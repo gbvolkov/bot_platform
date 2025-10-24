@@ -40,6 +40,7 @@ dependencies = [
     "typing-extensions==4.15.0",
     "whisper==1.1.10",
     "sentence-transformers>=5.1.2",
+    "aiosqlite>=0.21.0",
 ]
 
 [tool.uv.sources]

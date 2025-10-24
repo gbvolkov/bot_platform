@@ -10,7 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Runtime configuration for the lightweight bot service."""
 
-    model_config = SettingsConfigDict(env_prefix="BOT_SERVICE_", validate_assignment=True)
+    model_config = SettingsConfigDict(
+        env_prefix="BOT_SERVICE_",
+        validate_assignment=True,
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
     app_title: str = Field(default="Bot Platform API")
     app_version: str = Field(default="0.1.0")
@@ -43,4 +48,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
