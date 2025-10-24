@@ -3,6 +3,7 @@ from typing_extensions import TypedDict
 
 from langgraph.graph.message import AnyMessage, add_messages, Messages
 from langgraph.managed import IsLastStep, RemainingSteps
+from langchain.agents import AgentState
 
 from ..utils import ModelType
 
@@ -16,7 +17,7 @@ def add_messages_no_img(msgs1: Messages, msgs2: Messages) -> Messages:
 
     return add_messages(msgs1, msgs2)
 
-class AgentState(TypedDict):
+class CommonAgentState(AgentState):
     messages: Annotated[list[AnyMessage], add_messages_no_img]
     user_info: str
     last_question: str

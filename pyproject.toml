@@ -41,6 +41,7 @@ dependencies = [
     "whisper==1.1.10",
     "sentence-transformers>=5.1.2",
     "aiosqlite>=0.21.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [tool.uv.sources]

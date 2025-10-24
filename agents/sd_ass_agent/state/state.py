@@ -5,8 +5,8 @@ from langgraph.graph.message import AnyMessage, add_messages, Messages
 from langgraph.managed import IsLastStep, RemainingSteps
 
 from ...utils import ModelType
-from ...state.state import AgentState, add_messages_no_img
+from ...state.state import CommonAgentState, add_messages_no_img
 
-class SDAccAgentState(AgentState):
+class SDAccAgentState(CommonAgentState):
     verification_result: str
     verification_reason: str

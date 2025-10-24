@@ -151,6 +151,7 @@ def anonymize_message_content(content: Any, anonymizer: Palimpsest) -> Any:
 def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default", use_platform_store: bool = False):
     # The checkpointer lets the graph persist its state
     # this is a complete memory for the entire graph.
+    print("SDAgent initialization started...")
     log_name = f"sd_ass_{time.strftime("%Y%m%d%H%M")}"
     #log_handler = FileCallbackHandler(f"./logs/{log_name}")
     json_handler = JSONFileTracer(f"./logs/{log_name}")
@@ -228,7 +229,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         web_search_agent =      create_agent(
             model=team_llm, 
             tools=web_tools, 
-            prompt=search_web_prompt, 
+            system_prompt=search_web_prompt, 
             name="search_web_sd", 
             #state_schema = State, 
             checkpointer=memory, 
@@ -270,7 +271,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
 
         return validate_answer
 
-    sd_agent =      create_agent(
+    sd_agent =      create_react_agent(
         model=team_llm, 
         tools=search_tools + [search_tickets], 
         prompt=sd_prompt, 
@@ -280,7 +281,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         state_schema = SDAccAgentState, 
         checkpointer=memory, 
         debug=config.DEBUG_WORKFLOW)
-    sm_agent =      create_agent(
+    sm_agent =      create_react_agent(
         model=team_llm, 
         tools=search_tools, 
         prompt=sm_prompt, 
@@ -290,7 +291,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         state_schema = SDAccAgentState, 
         checkpointer=memory, 
         debug=config.DEBUG_WORKFLOW)
-    default_agent = create_agent(
+    default_agent = create_react_agent(
         model=team_llm, 
         tools=search_tools, 
         prompt=default_prompt, 
@@ -333,7 +334,9 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         }
     )
     builder.add_edge("reset_memory", END)
-    return builder.compile(name="interleasing_qa_agent", checkpointer=memory).with_config({"callbacks": callback_handlers})
+    agent = builder.compile(name="interleasing_qa_agent", checkpointer=memory).with_config({"callbacks": callback_handlers})
+    print("SDAgent initialized")
+    return agent 
 
 
 if __name__ == "__main__":
