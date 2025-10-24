@@ -125,9 +125,7 @@ async def _create_conversation(agent_id: str, title: Optional[str], user_role: O
         typer.echo(f"Started conversation {data['id']} with agent '{data['agent_id']}'.")
         if response.status_code == httpx.codes.ACCEPTED or data.get("status") != "active":
             await _ensure_conversation_ready(data["id"], headers)
-            typer.echo("Agent is ready. You can start chatting.")
-        else:
-            typer.echo("Agent is ready. You can start chatting.")
+        typer.echo("Agent is ready. You can start chatting.")
         return data["id"]
 
 
@@ -147,9 +145,8 @@ async def _send_message(conversation_id: str, text: str, *, reset: bool = False)
     timeout = httpx.Timeout(180.0, connect=10.0)
     indicator = None
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        indicator = _start_typing_indicator()
         while True:
-            if indicator is None:
-                indicator = _start_typing_indicator()
             response = await client.post(
                 _api_url(f"/conversations/{conversation_id}/messages"),
                 json=payload,
@@ -161,6 +158,7 @@ async def _send_message(conversation_id: str, text: str, *, reset: bool = False)
                 typer.echo("Agent is still initializing. Waiting for readiness...")
                 await _ensure_conversation_ready(conversation_id, headers)
                 typer.echo("Agent is ready. Retrying message.")
+                indicator = _start_typing_indicator()
                 continue
             response.raise_for_status()
             await _stop_spinner(indicator)

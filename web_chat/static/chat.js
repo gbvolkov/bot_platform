@@ -126,7 +126,7 @@ async function sendMessage(text) {
     if (res.status === 409) {
       setStatus("Agent is initializing, waiting for readiness…");
       await waitForConversationReady(conversationId);
-      setStatus("");
+      setStatus("Assistant is typing…");
       continue;
     }
     if (!res.ok) {
