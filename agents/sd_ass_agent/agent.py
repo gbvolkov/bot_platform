@@ -238,6 +238,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
             tools=web_tools, 
             system_prompt=search_web_prompt, 
             name="search_web_sd", 
+            middleware=middleware,
             #state_schema = State, 
             checkpointer=memory, 
             debug=config.DEBUG_WORKFLOW)
@@ -278,7 +279,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
 
         return validate_answer
 
-    middleware = [SDAgentAnonymizationMiddleware(anonymizer)] if anonymizer else None
+    middleware = [SDAgentAnonymizationMiddleware(anonymizer)] if anonymizer else []
 
     def with_validator(agent_runnable, validator):
         return agent_runnable | RunnableLambda(validator)
@@ -287,7 +288,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         create_agent(
             model=team_llm,
             tools=search_tools + [search_tickets],
-            prompt=sd_prompt,
+            system_prompt=sd_prompt,
             name="assistant_sd",
             state_schema=SDAccAgentState,
             checkpointer=memory,
@@ -300,7 +301,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         create_agent(
             model=team_llm,
             tools=search_tools,
-            prompt=sm_prompt,
+            system_prompt=sm_prompt,
             name="assistant_sm",
             state_schema=SDAccAgentState,
             checkpointer=memory,
@@ -313,7 +314,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         create_agent(
             model=team_llm,
             tools=search_tools,
-            prompt=default_prompt,
+            system_prompt=default_prompt,
             name="assistant_default",
             state_schema=SDAccAgentState,
             checkpointer=memory,

@@ -22,11 +22,6 @@ class CommonAgentState(AgentState):
     user_info: str
     last_question: str
     agent_class: str
-    #verification_result: str
-    #verification_reason: str
-
-    is_last_step: IsLastStep
-    remaining_steps: RemainingSteps
 
 class ConfigSchema(TypedDict):
     user_id: Optional[str]

@@ -69,7 +69,7 @@ async def _send_message(conversation_id: str, text: str, *, reset: bool = False)
     if user_role:
         headers["X-User-Role"] = user_role
 
-    timeout = httpx.Timeout(180.0, connect=10.0)
+    timeout = httpx.Timeout(600.0, connect=10.0)
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         response = await client.post(
             _api_url(f"/conversations/{conversation_id}/messages"),
