@@ -1,0 +1,29 @@
+[providers.openai]
+base = "gpt-4.1"
+mini = "gpt-4.1-mini"
+nano = "gpt-4.1-nano"
+
+[providers.anthropic]
+base = "claude-3.5-sonnet"
+mini = "claude-3.5-haiku"
+nano = "claude-3-haiku"
+
+[providers.gemini]
+base = "gemini-1.5-pro"
+mini = "gemini-1.5-flash"
+nano = "gemini-nano"
+
+[providers.gigachat]
+base = "GigaChat-2-Pro"
+mini = "GigaChat-2"
+nano = "GigaChat-2"
+
+[providers.mistral]
+base = "mistral-large-latest"
+mini = "mistral-medium-latest"
+nano = "mistral-medium-latest"
+
+[providers.yandex]
+base = "yandexgpt-32k/rc"
+mini = "yandexgpt-32k/rc"
+nano = "yandexgpt-lite/latest"

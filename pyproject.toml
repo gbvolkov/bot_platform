@@ -1,0 +1,40 @@
+[project]
+name = "bot-platform"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckduckgo-search==8.1.1",
+    "fastapi==0.120.0",
+    "google-api-python-client==2.185.0",
+    "langchain==1.0.2",
+    "langchain-community==0.4",
+    "langchain-core==1.0.0",
+    "langchain-huggingface==1.0.0",
+    "langchain-mistralai==1.0.0",
+    "langchain-openai==1.0.1",
+    "langchain-text-splitters==1.0.0",
+    "langfuse==3.8.1",
+    "langgraph==1.0.1",
+    "langgraph-supervisor==0.0.30",
+    "natasha==1.6.0",
+    "numpy==2.3.4",
+    "palimpsest==0.0.2",
+    "pandas==2.3.3",
+    "protobuf==6.33.0",
+    "pydantic==2.12.3",
+    "pymorphy2==0.9.1",
+    "python-dotenv==1.1.1",
+    "rank-llm>=0.21.0",
+    "requests==2.32.5",
+    "telegramify-markdown==0.5.2",
+    "torch==2.9.0",
+    "trafilatura==2.0.0",
+    "transliterate==1.10.2",
+    "typing-extensions==4.15.0",
+    "whisper==1.1.10",
+]
+
+[tool.uv.sources]
+palimpsest = { git = "https://github.com/gbvolkov/PalimpsestLib.git" }
