@@ -3,8 +3,8 @@ from copy import deepcopy
 from math import ceil
 from typing import List, Optional
 
-from langchain.retrievers.document_compressors import CrossEncoderReranker
-from langchain.schema import Document
+from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
+from langchain_classic.schema import Document
 
 class CrossEncoderRerankerWithScores(CrossEncoderReranker):
     """Same as CrossEncoderReranker but stores the rerank score in doc.metadata['rerank_score']."""

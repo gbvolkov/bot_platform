@@ -4,7 +4,7 @@ from rank_llm.data import Candidate, Query, Request
 from copy import deepcopy
 
 from langchain_community.document_compressors.rankllm_rerank import RankLLMRerank
-from langchain.schema import Document
+from langchain_classic.schema import Document
 
 
 class RankLLMRerank_GV(RankLLMRerank):

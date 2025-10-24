@@ -9,15 +9,15 @@ from langchain_community.document_loaders import NotionDBLoader
 from langchain_community.document_loaders import NotionDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.vectorstores import InMemoryVectorStore
-from langchain.docstore.document import Document
+from langchain_classic.docstore.document import Document
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage
-from langchain.tools import Tool
+#from langchain.tools import Tool
 from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain.retrievers import EnsembleRetriever
-from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
-from langchain.retrievers.multi_vector import MultiVectorRetriever
-from langchain.storage import InMemoryByteStore
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_classic.retrievers.contextual_compression import ContextualCompressionRetriever
+from langchain_classic.retrievers.multi_vector import MultiVectorRetriever
+from langchain_classic.storage import InMemoryByteStore
 from langchain_core.tools import tool
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode

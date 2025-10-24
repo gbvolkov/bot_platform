@@ -13,9 +13,9 @@ import config
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 
-from langchain.schema import Document
-from langchain.schema.retriever import BaseRetriever
-from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
+from langchain_classic.schema import Document
+from langchain_classic.schema.retriever import BaseRetriever
+from langchain_classic.retrievers.contextual_compression import ContextualCompressionRetriever
 from langchain_core.callbacks import (
     AsyncCallbackManagerForRetrieverRun,
     CallbackManagerForRetrieverRun,
@@ -161,8 +161,8 @@ class TeamlyContextualCompressionRetriever(ContextualCompressionRetriever):
 
 if __name__ == "__main__":
     from langchain_openai import ChatOpenAI
-    from langchain.chains import create_retrieval_chain
-    from langchain.chains.combine_documents import create_stuff_documents_chain
+    from langchain_classic.chains import create_retrieval_chain
+    from langchain_classic.chains.combine_documents import create_stuff_documents_chain
     from langchain_core.prompts import ChatPromptTemplate, StringPromptTemplate
     from pprint import pprint
 

@@ -1,7 +1,7 @@
 # chunker.py
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing import List
-from langchain.docstore.document import Document
+from langchain_classic.docstore.document import Document
 
 def chunk_text(text: str, chunk_size: int = 2048, chunk_overlap: int = 0) -> List[str]:
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(

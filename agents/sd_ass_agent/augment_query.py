@@ -6,7 +6,7 @@ import config
 from ..retrievers.teamly_api_wrapper import TeamlyAPIWrapper_Glossary
 from difflib import SequenceMatcher
 
-from langchain.schema import Document
+from langchain_classic.schema import Document
 
 import pymorphy2
 try:

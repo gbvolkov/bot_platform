@@ -10,7 +10,7 @@ import pandas as pd
 
 import config
 
-from langchain.schema import Document
+from langchain_classic.schema import Document
 
 from .utils.load_table import (
     get_data_from_json
@@ -23,7 +23,7 @@ from .utils.build_documents import (
     , get_documents_for_glossary
 )
 
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod 
 import logging
 
 # ---------------------------------------------------------------------------

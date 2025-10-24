@@ -20,11 +20,16 @@ class AgentDefinition:
     default_provider: ModelType
 
 
+PROVIDER_MAPPING: Dict[str, ModelType] = {
+    "openai": ModelType.GPT,
+    "yandex": ModelType.YA,
+    "mistral": ModelType.MISTRAL,
+    "gigachat": ModelType.SBER,
+}
+
+
 def _resolve_provider(provider_name: str) -> ModelType:
-    try:
-        return ModelType(provider_name)
-    except ValueError:
-        return ModelType(settings.default_model_provider)
+    return PROVIDER_MAPPING.get(provider_name.lower(), ModelType.GPT)
 
 
 class AgentRegistry:

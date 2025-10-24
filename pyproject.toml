@@ -39,6 +39,7 @@ dependencies = [
     "transliterate==1.10.2",
     "typing-extensions==4.15.0",
     "whisper==1.1.10",
+    "sentence-transformers>=5.1.2",
 ]
 
 [tool.uv.sources]

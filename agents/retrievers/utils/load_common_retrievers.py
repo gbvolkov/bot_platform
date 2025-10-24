@@ -7,10 +7,10 @@ import os, torch, pickle
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_community.vectorstores import FAISS
-from langchain.retrievers import EnsembleRetriever
-from langchain.retrievers.multi_vector import MultiVectorRetriever
-from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
-from langchain.storage import InMemoryByteStore
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_classic.retrievers.multi_vector import MultiVectorRetriever
+from langchain_classic.retrievers.contextual_compression import ContextualCompressionRetriever
+from langchain_classic.storage import InMemoryByteStore
 
 from ..cross_encoder_reranker_with_score import CrossEncoderRerankerWithScores, TournamentCrossEncoderReranker
 from .models_builder import (
