@@ -24,7 +24,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Base
 
 from langchain.agents import create_agent
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 #from langchain_core.callbacks.file import FileCallbackHandler
 
 from langfuse import Langfuse
@@ -205,17 +205,24 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         lookup_abbreviation
     ]
 
-    def anonymize_request(state: SDAccAgentState):
-        anon_msgs: List[BaseMessage] = []
-        
-        with open(f"./logs/{ANON_LOG_NAME}", "a", encoding="utf-8") as f:
-            for message in state["messages"]:
-                anon_msg = copy(message)
-                f.write(f"BEFORE ANONIMIZATION:\n{anon_msg.content}\n")
-                anon_msg.content=anonymize_message_content(message.content, anonymizer)
-                f.write(f"AFTER ANONIMIZATION:\n{anon_msg.content}\n\n")
-                anon_msgs.append(anon_msg)
-        return {"llm_input_messages": anon_msgs}
+    class SDAgentAnonymizationMiddleware:
+        def __init__(self, anonymizer: Palimpsest):
+            self._anonymizer = anonymizer
+
+        def modify_model_request(self, request, state):
+            anon_msgs: List[BaseMessage] = []
+
+            with open(f"./logs/{ANON_LOG_NAME}", "a", encoding="utf-8") as f:
+                for message in request.messages:
+                    anon_msg = copy(message)
+                    f.write(f"BEFORE ANONIMIZATION:\n{anon_msg.content}\n")
+                    anon_msg.content = anonymize_message_content(
+                        message.content, self._anonymizer
+                    )
+                    f.write(f"AFTER ANONIMIZATION:\n{anon_msg.content}\n\n")
+                    anon_msgs.append(anon_msg)
+            request.messages = anon_msgs
+            return request
 
     def get_validator(agent: str):
 
@@ -271,36 +278,50 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
 
         return validate_answer
 
-    sd_agent =      create_react_agent(
-        model=team_llm, 
-        tools=search_tools + [search_tickets], 
-        prompt=sd_prompt, 
-        name="assistant_sd", 
-        pre_model_hook=anonymize_request if anonymizer else None,
-        post_model_hook=get_validator("sd_agent"),
-        state_schema = SDAccAgentState, 
-        checkpointer=memory, 
-        debug=config.DEBUG_WORKFLOW)
-    sm_agent =      create_react_agent(
-        model=team_llm, 
-        tools=search_tools, 
-        prompt=sm_prompt, 
-        name="assistant_sm", 
-        pre_model_hook=anonymize_request if anonymizer else None,
-        post_model_hook=get_validator("sm_agent"),
-        state_schema = SDAccAgentState, 
-        checkpointer=memory, 
-        debug=config.DEBUG_WORKFLOW)
-    default_agent = create_react_agent(
-        model=team_llm, 
-        tools=search_tools, 
-        prompt=default_prompt, 
-        name="assistant_default", 
-        pre_model_hook=anonymize_request if anonymizer else None,
-        post_model_hook=get_validator("default_agent"),
-        state_schema = SDAccAgentState, 
-        checkpointer=memory, 
-        debug=config.DEBUG_WORKFLOW)
+    middleware = [SDAgentAnonymizationMiddleware(anonymizer)] if anonymizer else None
+
+    def with_validator(agent_runnable, validator):
+        return agent_runnable | RunnableLambda(validator)
+
+    sd_agent = with_validator(
+        create_agent(
+            model=team_llm,
+            tools=search_tools + [search_tickets],
+            prompt=sd_prompt,
+            name="assistant_sd",
+            state_schema=SDAccAgentState,
+            checkpointer=memory,
+            middleware=middleware,
+            debug=config.DEBUG_WORKFLOW,
+        ),
+        get_validator("sd_agent"),
+    )
+    sm_agent = with_validator(
+        create_agent(
+            model=team_llm,
+            tools=search_tools,
+            prompt=sm_prompt,
+            name="assistant_sm",
+            state_schema=SDAccAgentState,
+            checkpointer=memory,
+            middleware=middleware,
+            debug=config.DEBUG_WORKFLOW,
+        ),
+        get_validator("sm_agent"),
+    )
+    default_agent = with_validator(
+        create_agent(
+            model=team_llm,
+            tools=search_tools,
+            prompt=default_prompt,
+            name="assistant_default",
+            state_schema=SDAccAgentState,
+            checkpointer=memory,
+            middleware=middleware,
+            debug=config.DEBUG_WORKFLOW,
+        ),
+        get_validator("default_agent"),
+    )
     
 
     builder = StateGraph(SDAccAgentState, config_schema=ConfigSchema)
