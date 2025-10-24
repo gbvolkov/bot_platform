@@ -8,6 +8,7 @@ const state = {
   conversationId: null,
   agentId: null,
   isSending: false,
+  agentReady: false,
 };
 
 function appendMessage(role, text) {
@@ -61,12 +62,34 @@ agentSelect.addEventListener("change", (event) => {
 
 newChatBtn.addEventListener("click", () => {
   state.conversationId = null;
+  state.agentReady = false;
   conversationEl.innerHTML = "";
   setStatus("Conversation cleared. Start chatting!");
 });
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForConversationReady(conversationId, maxAttempts) {
+  let attempts = 0;
+  while (maxAttempts === undefined || attempts < maxAttempts) {
+    const res = await fetch(`/api/conversations/${conversationId}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "active") {
+        state.agentReady = true;
+        return true;
+      }
+    }
+    attempts += 1;
+    await delay(1000);
+  }
+  return false;
+}
+
 async function ensureConversation() {
-  if (state.conversationId) {
+  if (state.conversationId && state.agentReady) {
     return state.conversationId;
   }
   if (!state.agentId) {
@@ -83,21 +106,35 @@ async function ensureConversation() {
   }
   const data = await res.json();
   state.conversationId = data.id;
+  state.agentReady = res.status === 201 && data.status === "active";
+  if (!state.agentReady) {
+    setStatus("Initializing agent, please wait…");
+    await waitForConversationReady(state.conversationId);
+    setStatus("");
+  }
   return state.conversationId;
 }
 
 async function sendMessage(text) {
   const conversationId = await ensureConversation();
-  const res = await fetch(`/api/conversations/${conversationId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error(detail?.detail || "Message failed");
+  while (true) {
+    const res = await fetch(`/api/conversations/${conversationId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (res.status === 409) {
+      setStatus("Agent is initializing, waiting for readiness…");
+      await waitForConversationReady(conversationId);
+      setStatus("");
+      continue;
+    }
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail?.detail || "Message failed");
+    }
+    return res.json();
   }
-  return res.json();
 }
 
 form.addEventListener("submit", async (event) => {
@@ -119,10 +156,12 @@ form.addEventListener("submit", async (event) => {
     }
   } catch (error) {
     console.error(error);
-    appendMessage("assistant", `⚠️ ${error.message}`);
+    setStatus(error.message || "Message failed");
   } finally {
     state.isSending = false;
-    setStatus("");
+    if (state.agentReady) {
+      setStatus("");
+    }
     input.focus();
   }
 });

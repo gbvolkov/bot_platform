@@ -51,7 +51,7 @@ class BotServiceClient:
         user_id: str,
         user_role: Optional[str] = None,
         title: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> tuple[Dict[str, Any], bool]:
         payload: Dict[str, Any] = {"agent_id": agent_id}
         if user_role:
             payload["user_role"] = user_role
@@ -60,10 +60,10 @@ class BotServiceClient:
         headers = {"X-User-Id": user_id}
         if user_role:
             headers["X-User-Role"] = user_role
-
         response = await self._client.post("/conversations/", json=payload, headers=headers)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        return data, response.status_code == httpx.codes.CREATED
 
     async def send_message(
         self,
@@ -89,5 +89,15 @@ class BotServiceClient:
             json=payload,
             headers=headers,
         )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        headers = {"X-User-Id": user_id}
+        response = await self._client.get(f"/conversations/{conversation_id}", headers=headers)
         response.raise_for_status()
         return response.json()

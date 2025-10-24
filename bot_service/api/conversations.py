@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,16 +48,18 @@ def _message_to_view(entity: Message) -> MessageView:
     )
 
 
-@router.post("/", response_model=ConversationView, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=ConversationView)
 async def create_conversation(
     payload: ConversationCreate,
     session: DbSession,
     user: UserContextDep,
-) -> ConversationView:
+):
     try:
-        agent_registry.get_agent(payload.agent_id)
+        ready = await agent_registry.ensure_agent_ready(payload.agent_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
     conversation = Conversation(
         agent_id=payload.agent_id,
@@ -63,11 +67,18 @@ async def create_conversation(
         user_role=payload.user_role or user.user_role,
         title=payload.title,
         metadata_json=payload.metadata or {},
+        status="active" if ready else "pending",
     )
     session.add(conversation)
     await session.commit()
     await session.refresh(conversation)
-    return _conversation_to_view(conversation)
+    view = _conversation_to_view(conversation)
+    if ready:
+        return view
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=jsonable_encoder(view),
+    )
 
 
 @router.get("/", response_model=list[ConversationView])
@@ -78,7 +89,17 @@ async def list_conversations(session: DbSession, user: UserContextDep) -> list[C
         .order_by(Conversation.last_message_at.desc())
     )
     result = await session.scalars(stmt)
-    return [_conversation_to_view(conv) for conv in result.all()]
+    conversations = result.all()
+    updated = False
+    for conv in conversations:
+        if conv.status != "active" and agent_registry.is_ready(conv.agent_id):
+            conv.status = "active"
+            updated = True
+    if updated:
+        await session.commit()
+        for conv in conversations:
+            await session.refresh(conv)
+    return [_conversation_to_view(conv) for conv in conversations]
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
@@ -90,6 +111,11 @@ async def get_conversation(
     conversation = await session.get(Conversation, conversation_id)
     if conversation is None or conversation.user_id != user.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    ready = await agent_registry.ensure_agent_ready(conversation.agent_id)
+    if ready and conversation.status != "active":
+        conversation.status = "active"
+        await session.commit()
+        await session.refresh(conversation)
     await session.refresh(conversation, attribute_names=["messages"])
     messages = [_message_to_view(msg) for msg in conversation.messages]
     return ConversationDetail(**_conversation_to_view(conversation).model_dump(), messages=messages)
@@ -110,8 +136,17 @@ async def post_message(
     if conversation is None or conversation.user_id != user.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
 
+    ready = await agent_registry.ensure_agent_ready(conversation.agent_id)
+    if not ready:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Conversation is still initializing.")
+
+    if conversation.status != "active":
+        conversation.status = "active"
+
     try:
         agent = agent_registry.get_agent(conversation.agent_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 

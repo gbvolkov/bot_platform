@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
@@ -52,6 +54,8 @@ class AgentRegistry:
             ),
         }
         self._instances: Dict[str, Any] = {}
+        self._init_tasks: Dict[str, Future] = {}
+        self._init_errors: Dict[str, BaseException] = {}
 
     def list_agents(self) -> List[AgentInfo]:
         return [
@@ -64,14 +68,78 @@ class AgentRegistry:
             for definition in self._definitions.values()
         ]
 
+    def _start_initialization(self, agent_id: str) -> None:
+        definition = self._definitions[agent_id]
+        provider = definition.default_provider
+
+        def build() -> Any:
+            return definition.factory(provider)
+
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, build)
+
+        def on_done(fut: Future) -> None:
+            try:
+                instance = fut.result()
+            except BaseException as exc:  # noqa: BLE001
+                self._init_errors[agent_id] = exc
+            else:
+                self._instances[agent_id] = instance
+                self._init_errors.pop(agent_id, None)
+            finally:
+                self._init_tasks.pop(agent_id, None)
+
+        future.add_done_callback(on_done)
+        self._init_tasks[agent_id] = future
+
+    async def ensure_agent_ready(self, agent_id: str) -> bool:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        if agent_id in self._instances:
+            return True
+        if agent_id in self._init_errors:
+            exc = self._init_errors.pop(agent_id)
+            raise RuntimeError(f"Failed to initialize agent '{agent_id}'") from exc
+        task = self._init_tasks.get(agent_id)
+        if task is None:
+            self._start_initialization(agent_id)
+            return False
+        if task.done():
+            try:
+                instance = task.result()
+            except BaseException as exc:  # noqa: BLE001
+                self._init_errors[agent_id] = exc
+                self._init_tasks.pop(agent_id, None)
+                raise RuntimeError(f"Failed to initialize agent '{agent_id}'") from exc
+            else:
+                self._instances[agent_id] = instance
+                self._init_tasks.pop(agent_id, None)
+                self._init_errors.pop(agent_id, None)
+                return True
+        return False
+
     def get_agent(self, agent_id: str) -> Any:
         if agent_id not in self._definitions:
             raise KeyError(f"Unknown agent '{agent_id}'")
-        if agent_id not in self._instances:
-            definition = self._definitions[agent_id]
-            provider = definition.default_provider
-            self._instances[agent_id] = definition.factory(provider)
-        return self._instances[agent_id]
+        if agent_id in self._instances:
+            return self._instances[agent_id]
+        if agent_id in self._init_errors:
+            raise RuntimeError(f"Agent '{agent_id}' failed to initialize") from self._init_errors[agent_id]
+        raise RuntimeError(f"Agent '{agent_id}' is still initializing")
+
+    def is_ready(self, agent_id: str) -> bool:
+        return agent_id in self._instances
+
+    def initialization_status(self, agent_id: str) -> str:
+        if agent_id in self._instances:
+            return "ready"
+        if agent_id in self._init_errors:
+            return "error"
+        if agent_id in self._init_tasks:
+            return "initializing"
+        if agent_id in self._definitions:
+            return "pending"
+        return "unknown"
 
 
 agent_registry = AgentRegistry()

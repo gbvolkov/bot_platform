@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -69,12 +70,24 @@ async def create_chat_completion(
 
     conversation_id = request.conversation_id
     if conversation_id is None:
-        conv = await client.create_conversation(
+        conv, ready = await client.create_conversation(
             agent_id=request.model,
             user_id=user_id,
             user_role=user_role,
         )
         conversation_id = conv["id"]
+        if not ready:
+            for _ in range(30):
+                await asyncio.sleep(1.0)
+                detail = await client.get_conversation(conversation_id, user_id)
+                if detail.get("status") == "active":
+                    ready = True
+                    break
+            if not ready:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Agent is initializing. Retry the request shortly.",
+                )
 
     try:
         prompt = build_prompt(request.messages)

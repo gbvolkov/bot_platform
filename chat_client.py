@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import sys
 from typing import Optional
 
 import httpx
@@ -37,6 +39,73 @@ def list_agents() -> None:
     asyncio.run(_list_agents())
 
 
+async def _poll_conversation_ready(
+    conversation_id: str,
+    headers: dict[str, str],
+    *,
+    delay: float = 1.0,
+    max_attempts: Optional[int] = None,
+) -> bool:
+    timeout = httpx.Timeout(30.0, connect=5.0)
+    attempt = 0
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        while max_attempts is None or attempt < max_attempts:
+            attempt += 1
+            response = await client.get(_api_url(f"/conversations/{conversation_id}"), headers=headers)
+            if response.status_code == httpx.codes.OK:
+                data = response.json()
+                if data.get("status") == "active":
+                    return True
+            await asyncio.sleep(delay)
+    return False
+
+
+def _start_spinner(message: str) -> asyncio.Task:
+    async def _indicator() -> None:
+        frames = [
+            f"{message}   ",
+            f"{message}.  ",
+            f"{message}.. ",
+            f"{message}...",
+        ]
+        idx = 0
+        try:
+            while True:
+                typer.echo("\r" + frames[idx % len(frames)], nl=False)
+                sys.stdout.flush()
+                await asyncio.sleep(0.5)
+                idx += 1
+        except asyncio.CancelledError:
+            typer.echo("\r" + " " * len(frames[0]) + "\r", nl=False)
+            sys.stdout.flush()
+            raise
+
+    return asyncio.create_task(_indicator())
+
+
+def _start_typing_indicator() -> asyncio.Task:
+    return _start_spinner("Assistant is typing")
+
+
+async def _stop_spinner(task: Optional[asyncio.Task]) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def _ensure_conversation_ready(conversation_id: str, headers: dict[str, str]) -> None:
+    if await _poll_conversation_ready(conversation_id, headers, max_attempts=1):
+        return
+    indicator = _start_spinner("Initializing agent")
+    try:
+        await _poll_conversation_ready(conversation_id, headers)
+    finally:
+        await _stop_spinner(indicator)
+        typer.echo("")
+
+
 async def _create_conversation(agent_id: str, title: Optional[str], user_role: Optional[str]) -> str:
     payload = {"agent_id": agent_id}
     if title:
@@ -54,6 +123,11 @@ async def _create_conversation(agent_id: str, title: Optional[str], user_role: O
         response.raise_for_status()
         data = response.json()
         typer.echo(f"Started conversation {data['id']} with agent '{data['agent_id']}'.")
+        if response.status_code == httpx.codes.ACCEPTED or data.get("status") != "active":
+            await _ensure_conversation_ready(data["id"], headers)
+            typer.echo("Agent is ready. You can start chatting.")
+        else:
+            typer.echo("Agent is ready. You can start chatting.")
         return data["id"]
 
 
@@ -69,20 +143,39 @@ async def _send_message(conversation_id: str, text: str, *, reset: bool = False)
     if user_role:
         headers["X-User-Role"] = user_role
 
-    timeout = httpx.Timeout(600.0, connect=10.0)
+    await _ensure_conversation_ready(conversation_id, headers)
+    timeout = httpx.Timeout(180.0, connect=10.0)
+    indicator = None
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
-        response = await client.post(
-            _api_url(f"/conversations/{conversation_id}/messages"),
-            json=payload,
-            headers=headers,
-        )
-        response.raise_for_status()
+        while True:
+            if indicator is None:
+                indicator = _start_typing_indicator()
+            response = await client.post(
+                _api_url(f"/conversations/{conversation_id}/messages"),
+                json=payload,
+                headers=headers,
+            )
+            if response.status_code == httpx.codes.CONFLICT:
+                await _stop_spinner(indicator)
+                indicator = None
+                typer.echo("Agent is still initializing. Waiting for readiness...")
+                await _ensure_conversation_ready(conversation_id, headers)
+                typer.echo("Agent is ready. Retrying message.")
+                continue
+            response.raise_for_status()
+            await _stop_spinner(indicator)
+            indicator = None
+            typer.echo("")
+            break
+
         data = response.json()
         agent_message = data["agent_message"]["raw_text"].strip()
         if agent_message:
             typer.echo(f"\nAssistant: {agent_message}\n")
         else:
             typer.echo("\nAssistant cleared memory.\n")
+
+    await _stop_spinner(indicator)
 
 
 @app.command()

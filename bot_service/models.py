@@ -19,7 +19,7 @@ class Conversation(Base):
     agent_id: Mapped[str] = mapped_column(String(64), index=True)
     user_id: Mapped[str] = mapped_column(String(128), index=True)
     user_role: Mapped[str] = mapped_column(String(64), default="default")
-    status: Mapped[str] = mapped_column(String(32), default="active")
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     metadata_json: Mapped[Dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(
@@ -59,4 +59,3 @@ class Message(Base):
     )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
-
