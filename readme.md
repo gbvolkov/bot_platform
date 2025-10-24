@@ -43,3 +43,32 @@
    * `GET /api/agents/` — список зарегистрированных агентов.
    * `POST /api/conversations` — создание диалога.
    * `POST /api/conversations/{id}/messages` — отправка сообщения и получение ответа агента.
+
+## OpenAI-совместимый слой
+
+Прокси-сервис `openai_proxy` эмулирует endpoint `POST /v1/chat/completions` и внутри обращается к `bot_service`.
+
+1. Убедитесь, что `bot_service` запущен.
+2. Запустите прокси:
+
+   ```bash
+   uvicorn openai_proxy.main:app --reload --port 8080
+   ```
+
+   При необходимости задайте `OPENAI_PROXY_BOT_SERVICE_BASE_URL` (по умолчанию `http://localhost:8000/api`).
+
+3. Пример запроса:
+
+   ```bash
+   curl http://localhost:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{
+           "model": "find_job",
+           "messages": [
+             {"role": "system", "content": "Ты подбираешь вакансии."},
+             {"role": "user", "content": "Найди позиции промпт-инженера."}
+           ]
+         }'
+   ```
+
+   В ответ вернётся объект в стиле OpenAI API c полем `conversation_id`. Используйте его в следующих запросах, чтобы продолжить диалог.

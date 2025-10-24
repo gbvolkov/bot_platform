@@ -17,7 +17,8 @@ def _api_url(path: str) -> str:
 
 
 async def _list_agents() -> None:
-    async with httpx.AsyncClient() as client:
+    timeout = httpx.Timeout(120.0, connect=10.0)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         response = await client.get(_api_url("/agents/"))
         response.raise_for_status()
         agents = response.json()
@@ -47,8 +48,9 @@ async def _create_conversation(agent_id: str, title: Optional[str], user_role: O
     if user_role:
         headers["X-User-Role"] = user_role
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(_api_url("/conversations"), json=payload, headers=headers)
+    timeout = httpx.Timeout(120.0, connect=10.0)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        response = await client.post(_api_url("/conversations/"), json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
         typer.echo(f"Started conversation {data['id']} with agent '{data['agent_id']}'.")
@@ -67,7 +69,8 @@ async def _send_message(conversation_id: str, text: str, *, reset: bool = False)
     if user_role:
         headers["X-User-Role"] = user_role
 
-    async with httpx.AsyncClient() as client:
+    timeout = httpx.Timeout(180.0, connect=10.0)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         response = await client.post(
             _api_url(f"/conversations/{conversation_id}/messages"),
             json=payload,
