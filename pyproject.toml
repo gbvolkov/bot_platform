@@ -24,7 +24,7 @@ dependencies = [
     "pandas==2.3.3",
     "protobuf==6.33.0",
     "pydantic==2.12.3",
-    "pydantic-settings==2.6.1",
+    "pydantic-settings==2.11.0",
     "pymorphy2==0.9.1",
     "python-dotenv==1.1.1",
     "rank-llm>=0.21.0",
