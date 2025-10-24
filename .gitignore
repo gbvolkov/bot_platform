@@ -1,1 +1,16 @@
+__pycache__
+.venv
+data
+keys
+logs
+models
+gv.env
+.env
+.*
+.langgraph_api
+auth.json
+auth_tickets.json
+auth_glossary.json
+nohup.out
+
 docs
