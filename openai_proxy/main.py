@@ -16,7 +16,11 @@ from .schemas import (
 from .utils import build_prompt
 
 
-bot_client = BotServiceClient()
+bot_client = BotServiceClient(
+    base_url=str(settings.bot_service_base_url),
+    request_timeout=settings.request_timeout_seconds,
+    connect_timeout=settings.connect_timeout_seconds,
+)
 
 
 @asynccontextmanager
@@ -65,11 +69,12 @@ async def create_chat_completion(
 
     conversation_id = request.conversation_id
     if conversation_id is None:
-        conversation_id = await client.create_conversation(
+        conv = await client.create_conversation(
             agent_id=request.model,
             user_id=user_id,
             user_role=user_role,
         )
+        conversation_id = conv["id"]
 
     try:
         prompt = build_prompt(request.messages)
@@ -94,4 +99,3 @@ async def create_chat_completion(
         choices=[choice],
         conversation_id=conversation_id,
     )
-
