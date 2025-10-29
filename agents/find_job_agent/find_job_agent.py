@@ -18,6 +18,7 @@ from langchain_core.runnables import RunnableConfig
 from ..llm_utils import get_llm
 from ..utils import ModelType
 from platform_utils.llm_logger import JSONFileTracer
+from services.kb_manager.notifications import KBReloadContext, register_reload_listener
 
 import config
 
@@ -514,6 +515,16 @@ def initialize_agent(
     builder.add_edge("respond", END)
 
     graph = builder.compile(name="find_job_agent", checkpointer=memory)
+
+    agent_key = "find_job"
+    def _handle_kb_reload(context: KBReloadContext) -> None:
+        logger.info(
+            "KB reload requested for %s (reason=%s); no KB-backed retrievers configured yet.",
+            agent_key,
+            context.reason,
+        )
+    register_reload_listener(agent_key, _handle_kb_reload)
+
     return graph.with_config({"callbacks": callback_handlers})
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
@@ -13,6 +13,8 @@ from .schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessageResponse,
+    ModelCard,
+    ModelList,
 )
 from .utils import build_prompt
 
@@ -47,6 +49,40 @@ app = FastAPI(
 @app.get("/healthz", tags=["system"])
 async def health_check():
     return {"status": "ok"}
+
+
+def agent_to_model_card(agent: Dict[str, Any]) -> ModelCard:
+    owned_by = agent.get("provider") or "bot-service"
+    metadata = {key: value for key, value in agent.items() if key not in {"id"}}
+    return ModelCard(
+        id=agent["id"],
+        name=agent.get("name"),
+        description=agent.get("description"),
+        provider=agent.get("provider"),
+        owned_by=owned_by,
+        metadata=metadata,
+    )
+
+
+@app.get("/v1/models", response_model=ModelList)
+async def list_models(
+    client: Annotated[BotServiceClient, Depends(get_client)],
+) -> ModelList:
+    agents = await client.list_agents()
+    models = [agent_to_model_card(agent) for agent in agents]
+    return ModelList(data=models)
+
+
+@app.get("/v1/models/{model_id}", response_model=ModelCard)
+async def retrieve_model(
+    model_id: str,
+    client: Annotated[BotServiceClient, Depends(get_client)],
+) -> ModelCard:
+    try:
+        agent = await client.get_agent(model_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return agent_to_model_card(agent)
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)

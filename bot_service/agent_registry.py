@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
+from agents.ingos_product_agent import initialize_agent as init_product_agent
 from agents.utils import ModelType
 
 from .config import settings
@@ -34,6 +36,9 @@ def _resolve_provider(provider_name: str) -> ModelType:
     return PROVIDER_MAPPING.get(provider_name.lower(), ModelType.GPT)
 
 
+PRODUCT_DOCS_DIR = Path(__file__).resolve().parent.parent / "data" / "docs"
+
+
 class AgentRegistry:
     def __init__(self) -> None:
         default_provider = _resolve_provider(settings.default_model_provider)
@@ -53,9 +58,30 @@ class AgentRegistry:
                 default_provider=default_provider,
             ),
         }
+        self._definitions.update(self._build_product_definitions(default_provider))
         self._instances: Dict[str, Any] = {}
         self._init_tasks: Dict[str, Future] = {}
         self._init_errors: Dict[str, BaseException] = {}
+
+    def _build_product_definitions(self, default_provider: ModelType) -> Dict[str, AgentDefinition]:
+        product_definitions: Dict[str, AgentDefinition] = {}
+        docs_dir = PRODUCT_DOCS_DIR
+        if not docs_dir.exists():
+            return product_definitions
+
+        for product_dir in sorted(docs_dir.iterdir()):
+            if not product_dir.is_dir():
+                continue
+            product_name = product_dir.name
+            agent_id = f"product_{product_name}"
+            product_definitions[agent_id] = AgentDefinition(
+                id=agent_id,
+                name=product_name,
+                description=f"Assistant of Ingosstrakh Product '{product_name}'.",
+                factory=lambda provider, product=product_name: init_product_agent(provider=provider, product=product),
+                default_provider=default_provider,
+            )
+        return product_definitions
 
     def list_agents(self) -> List[AgentInfo]:
         return [

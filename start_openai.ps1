@@ -1,0 +1,1 @@
+uvicorn openai_proxy.main:app --reload --port 8080

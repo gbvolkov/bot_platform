@@ -12,6 +12,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         validate_assignment=True,
+        extra="ignore",
     )
 
     bot_service_base_url: HttpUrl = Field(
@@ -42,4 +43,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-

@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import logging
 
-from typing import List, Any, Optional, Dict, Tuple, TypedDict, Annotated
+from typing import Annotated, Dict, List, Optional, Tuple, TypedDict, TYPE_CHECKING
 import os
 import pickle
 import torch
@@ -38,9 +40,15 @@ from .utils.load_common_retrievers import (
     buildFAISSRetriever,
     getTeamlyTicketsRetriever,
     getTeamlyGlossaryRetriever,
+    refresh_indexes,
 )
 
 from .cross_encoder_reranker_with_score import CrossEncoderRerankerWithScores
+
+if TYPE_CHECKING:
+    from agents.kb_refresh_registry import KBReloadContext
+
+logger = logging.getLogger(__name__)
 
 
 def get_retriever_multi():
@@ -170,6 +178,15 @@ def get_term_and_defition_tools(anonymizer: Palimpsest = None):
         else:
             return "No matching information found."
     return lookup_term
+
+
+def reload_retrievers(context: "KBReloadContext | None" = None) -> None:
+    """Refresh cached retriever instances so they pick up new KB data."""
+    reason = context.reason if context else "unspecified"
+    logger.info("Reloading service desk retrievers (reason=%s)", reason)
+    refresh_indexes()
+    global search
+    search = get_retriever()
 
 if __name__ == '__main__':
     search_kb = get_search_tool()

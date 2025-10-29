@@ -45,6 +45,10 @@ class BotServiceClient:
             await self.refresh_agents()
         return list(self._agents.values())
 
+    async def get_agent(self, agent_id: str) -> Dict[str, Any]:
+        await self.ensure_agent(agent_id)
+        return self._agents[agent_id]
+
     async def create_conversation(
         self,
         agent_id: str,

@@ -71,3 +71,19 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo = Field(default_factory=UsageInfo)
     conversation_id: str
 
+
+class ModelCard(BaseModel):
+    id: str
+    object: Literal["model"] = "model"
+    created: int = 0
+    owned_by: str = Field(default="bot-service")
+    name: Optional[str] = None
+    description: Optional[str] = None
+    provider: Optional[str] = None
+    permission: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelList(BaseModel):
+    object: Literal["list"] = "list"
+    data: List[ModelCard]

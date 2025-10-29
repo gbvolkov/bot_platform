@@ -1,0 +1,1 @@
+uvicorn web_chat.main:app --reload --port 8081
