@@ -7,13 +7,23 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
-from typing import Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple, TYPE_CHECKING
+import pickle
+
+from langchain_classic.docstore.document import Document
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 try:
     from filelock import FileLock, Timeout as FileLockTimeout  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     FileLock = None  # type: ignore
     FileLockTimeout = RuntimeError  # type: ignore
+
+if TYPE_CHECKING:
+    from filelock import FileLock as FileLockType
+else:
+    FileLockType = Any
 
 from .enums import (
     ChunkingStrategy,
@@ -36,6 +46,7 @@ from .notifications import (
     get_broadcaster,
     get_webhook_registry,
 )
+from .utils import load_documents
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +63,7 @@ class KnowledgeBaseManagerService:
         default_preparation: KnowledgeBasePreparationMethod = KnowledgeBasePreparationMethod.CLEAR_CHUNKING,
         reload_broadcaster: Optional[ReloadBroadcaster] = None,
         webhook_registry: Optional[WebhookRegistry] = None,
+        default_index_path: Optional[Path] = None,
     ) -> None:
         self._documents: MutableMapping[str, DocumentRecord] = {}
         self._subscribers: Dict[str, KnowledgeBaseSubscriber] = {}
@@ -60,12 +72,13 @@ class KnowledgeBaseManagerService:
         self._preparation_method = default_preparation
         self._mutex = RLock()
         self._lock_path = lock_path
-        self._file_lock: Optional[FileLock] = None
+        self._file_lock: Optional[FileLockType] = None
         if lock_path and FileLock:
             self._file_lock = FileLock(str(lock_path))
         self._source_name = "kb_manager_service"
         self._reload_broadcaster = reload_broadcaster or get_broadcaster()
         self._webhook_registry = webhook_registry or get_webhook_registry()
+        self._default_index_path = Path(default_index_path) if default_index_path else None
         logger.debug(
             "KnowledgeBaseManagerService initialised (embedding=%s, preparation=%s, lock=%s)",
             self._embedding_backend.value,
@@ -128,6 +141,13 @@ class KnowledgeBaseManagerService:
         self._chunking_config = config
         return config
 
+    def set_default_index_path(self, path: Path) -> None:
+        """Update the default location for persisted vector stores."""
+        resolved = Path(path)
+        resolved.mkdir(parents=True, exist_ok=True)
+        self._default_index_path = resolved
+        logger.info("Default index path set to %s", resolved)
+
     # ----------------------------------------------------------------------------------
     # Subscription management
     # ----------------------------------------------------------------------------------
@@ -169,6 +189,56 @@ class KnowledgeBaseManagerService:
     # Document lifecycle
     # ----------------------------------------------------------------------------------
 
+    def ingest_directory(
+        self,
+        directory_path: str,
+        *,
+        product: Optional[str] = None,
+        allowed_extensions: Optional[Sequence[str]] = None,
+        chunk_on_ingest: bool = True,
+        chunking: Optional[ChunkingConfig] = None,
+        initiated_by: Optional[str] = None,
+    ) -> List[str]:
+        """Load documents from a filesystem directory and register them in the KB."""
+        base_path = Path(directory_path).expanduser().resolve()
+        if not base_path.exists() or not base_path.is_dir():
+            raise FileNotFoundError(f"Directory '{directory_path}' does not exist or is not a directory.")
+
+        extension_filter = None
+        if allowed_extensions:
+            extension_filter = [
+                ext if ext.startswith(".") else f".{ext}"
+                for ext in (item.lower() for item in allowed_extensions)
+            ]
+        documents = load_documents(str(base_path), extentions=extension_filter)
+        if not documents:
+            logger.warning("No documents discovered under %s", base_path)
+            return []
+
+        registered_ids: List[str] = []
+        for doc in documents:
+            metadata = dict(doc.metadata or {})
+            if product and "product" not in metadata:
+                metadata["product"] = product
+            relative_path = metadata.get("relative_path")
+            source_path = base_path / relative_path if isinstance(relative_path, str) else None
+            doc_id = self.add_document(
+                doc.page_content,
+                metadata=metadata,
+                source_path=source_path,
+                auto_chunk=False,
+                auto_index=False,
+                initiated_by=initiated_by,
+            )
+            registered_ids.append(doc_id)
+
+        if chunk_on_ingest:
+            for doc_id in registered_ids:
+                self.chunk_document(doc_id, chunking=chunking, initiated_by=initiated_by)
+
+        logger.info("Ingested %s documents from %s", len(registered_ids), base_path)
+        return registered_ids
+
     def add_document(
         self,
         content: str,
@@ -182,12 +252,14 @@ class KnowledgeBaseManagerService:
     ) -> str:
         """Store a new document and optionally trigger chunking/indexing."""
         doc_id = document_id or uuid.uuid4().hex
+        resolved_source = Path(source_path) if isinstance(source_path, (str, Path)) else None
+        record_metadata = dict(metadata or {})
         with self._writable_storage():
             record = DocumentRecord(
                 document_id=doc_id,
-                source_path=source_path,
+                source_path=resolved_source,
                 content=content,
-                metadata=dict(metadata or {}),
+                metadata=record_metadata,
             )
             self._documents[doc_id] = record
             record.touch()
@@ -197,14 +269,21 @@ class KnowledgeBaseManagerService:
                 event_type=KnowledgeBaseEventType.DOCUMENT_ADDED,
                 source=self._source_name,
                 document_ids=(doc_id,),
-                payload={"metadata": dict(metadata or {})},
+                payload={"metadata": record_metadata},
                 initiated_by=initiated_by,
             )
         )
         if auto_chunk:
             self.chunk_document(doc_id, initiated_by=initiated_by)
         if auto_index:
-            self.index_document((doc_id,), initiated_by=initiated_by)
+            if self._default_index_path is None:
+                raise ValueError("auto_index=True but no default index path configured.")
+            self.index_document(
+                (doc_id,),
+                initiated_by=initiated_by,
+                notify_agents=True,
+                vector_store_path=self._default_index_path,
+            )
         return doc_id
 
     def chunk_document(
@@ -218,15 +297,44 @@ class KnowledgeBaseManagerService:
         record = self._documents.get(document_id)
         if record is None:
             raise KeyError(f"Document '{document_id}' is not present in the knowledge base.")
-        record.touch()
+
         chunk_config = chunking or self._chunking_config
+        text = self._ensure_document_content(record)
+        if not text:
+            logger.warning("Document '%s' contains no text to chunk.", document_id)
+            record.chunks.clear()
+            return []
+
+        splitter = self._build_text_splitter(chunk_config)
+        segments = splitter.split_text(text)
         logger.debug(
-            "Preparing to chunk document '%s' using strategy=%s",
+            "Chunking document '%s' into %s segments using %s",
             document_id,
+            len(segments),
             chunk_config.strategy.value,
         )
-        # Placeholder: the real chunking logic will be provided later.
+
         record.chunks.clear()
+        for index, segment in enumerate(segments):
+            chunk_id = f"{document_id}:{index}"
+            metadata = dict(record.metadata)
+            metadata.update(
+                {
+                    "chunk_id": chunk_id,
+                    "chunk_index": index,
+                    "chunk_strategy": chunk_config.strategy.value,
+                    "chunk_size": len(segment),
+                    "chunk_overlap": chunk_config.overlap,
+                }
+            )
+            record.chunks[chunk_id] = DocumentChunk(
+                chunk_id=chunk_id,
+                document_id=document_id,
+                content=segment,
+                metadata=metadata,
+            )
+
+        record.touch()
         self._dispatch_event(
             KnowledgeBaseEvent(
                 event_type=KnowledgeBaseEventType.DOCUMENT_CHUNKED,
@@ -241,13 +349,126 @@ class KnowledgeBaseManagerService:
                         "respect_sentences": chunk_config.respect_sentence_boundaries,
                         "respect_table_rows": chunk_config.respect_table_rows,
                         "join_on_retrieval": chunk_config.join_on_retrieval,
-                    }
+                    },
+                    "chunk_count": len(record.chunks),
                 },
                 initiated_by=initiated_by,
             )
         )
-        # The caller is expected to populate record.chunks once chunkers are implemented.
         return list(record.chunks.values())
+
+    def _build_text_splitter(self, config: ChunkingConfig) -> RecursiveCharacterTextSplitter:
+        """Construct a text splitter based on the chunking configuration."""
+        strategy = config.strategy
+        if strategy not in (
+            ChunkingStrategy.SIMPLE_LENGTH,
+            ChunkingStrategy.SENTENCE,
+        ):
+            logger.warning("Chunking strategy '%s' is not fully supported; falling back to simple length.", strategy.value)
+
+        if config.size_unit == ChunkSizeUnit.TOKENS:
+            splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+                chunk_size=config.size,
+                chunk_overlap=config.overlap,
+                encoding_name="cl100k_base",
+            )
+        else:
+            separators = ["\n\n", "\n", " ", ""]
+            if strategy == ChunkingStrategy.SENTENCE:
+                separators = ["\n\n", ". ", "! ", "? ", "\n", " ", ""]
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=config.size,
+                chunk_overlap=config.overlap,
+                separators=separators,
+            )
+        return splitter
+
+    def _ensure_document_content(self, record: DocumentRecord) -> str:
+        """Ensure the document record has textual content loaded."""
+        if isinstance(record.content, str) and record.content:
+            return record.content
+        if record.source_path and record.source_path.exists():
+            try:
+                text = record.source_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = record.source_path.read_text(encoding="utf-8", errors="ignore")
+            record.content = text
+            return text
+        return ""
+
+    def _collect_chunk_documents(self, document_ids: Sequence[str]) -> List[Document]:
+        """Ensure chunks exist for the supplied documents and materialise them as LangChain Documents."""
+        chunk_docs: List[Document] = []
+        for doc_id in document_ids:
+            record = self._documents[doc_id]
+            if not record.chunks:
+                self.chunk_document(doc_id)
+            for chunk in record.chunks.values():
+                if not chunk.content:
+                    continue
+                metadata = dict(chunk.metadata)
+                metadata.setdefault("document_id", doc_id)
+                chunk_docs.append(Document(page_content=chunk.content, metadata=metadata))
+        return chunk_docs
+
+    def _prepare_documents_for_index(self, chunk_docs: List[Document]) -> List[Document]:
+        """Apply the configured preparation strategy to generate vectorisable documents."""
+        if self._preparation_method == KnowledgeBasePreparationMethod.CLEAR_CHUNKING:
+            return chunk_docs
+        if self._preparation_method == KnowledgeBasePreparationMethod.RAPTOR:
+            return self._augment_with_raptor(chunk_docs)
+        if self._preparation_method == KnowledgeBasePreparationMethod.QA_TABLE:
+            raise NotImplementedError("QA table preparation is not implemented yet.")
+        raise NotImplementedError(f"Preparation method '{self._preparation_method.value}' is not supported.")
+
+    def _augment_with_raptor(self, chunk_docs: List[Document]) -> List[Document]:
+        """Augment chunk documents with hierarchical RAPTOR summaries."""
+        try:
+            from .utils.raptor.tree_builder import recursive_embed_cluster_summarize  # type: ignore
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "RAPTOR preparation requires optional dependencies (umap-learn, scikit-learn, langchain-openai)."
+            ) from exc
+
+        leaf_texts = [doc.page_content for doc in chunk_docs if isinstance(doc.page_content, str) and doc.page_content.strip()]
+        if not leaf_texts:
+            return chunk_docs
+
+        tree_results = recursive_embed_cluster_summarize(leaf_texts, level=1, n_levels=3)
+        augmented = list(chunk_docs)
+        summary_counter = 0
+        for level, (_, summary_df) in sorted(tree_results.items()):
+            if "summaries" not in summary_df:
+                continue
+            for summary in summary_df["summaries"].tolist():
+                if not isinstance(summary, str) or not summary.strip():
+                    continue
+                metadata = {
+                    "type": "raptor_summary",
+                    "raptor_level": level,
+                    "summary_index": summary_counter,
+                }
+                augmented.append(Document(page_content=summary, metadata=metadata))
+                summary_counter += 1
+        return augmented
+
+    def _get_embedding_model(self):
+        """Resolve the embedding model for index construction."""
+        if self._embedding_backend == EmbeddingBackend.DEFAULT:
+            from agents.retrievers.utils.models_builder import getEmbeddingModel
+
+            return getEmbeddingModel()
+        raise NotImplementedError(f"Embedding backend '{self._embedding_backend.value}' is not supported.")
+
+    def _persist_docstore(self, destination: Path, document_ids: Sequence[str]) -> None:
+        """Persist original documents for metadata lookups alongside the FAISS index."""
+        docstore_documents: List[Document] = []
+        for doc_id in document_ids:
+            record = self._documents[doc_id]
+            text = self._ensure_document_content(record)
+            docstore_documents.append(Document(page_content=text, metadata=record.metadata))
+        with open(destination / "docstore.pkl", "wb") as file:
+            pickle.dump(docstore_documents, file)
 
     def show_chunked_document(self, document_id: str) -> List[DocumentChunk]:
         """Return the currently registered chunks for a document."""
@@ -329,29 +550,62 @@ class KnowledgeBaseManagerService:
         *,
         initiated_by: Optional[str] = None,
         notify_agents: bool = True,
+        vector_store_path: Optional[Path] = None,
+        overwrite: bool = True,
     ) -> KnowledgeBaseEvent:
         """Trigger indexing flow for a set of documents."""
-        missing = [doc_id for doc_id in document_ids if doc_id not in self._documents]
+        target_ids: Tuple[str, ...] = tuple(document_ids) if document_ids else tuple(self._documents.keys())
+        if not target_ids:
+            raise ValueError("No documents were provided for indexing.")
+
+        missing = [doc_id for doc_id in target_ids if doc_id not in self._documents]
         if missing:
             raise KeyError(f"Documents not found in KB: {', '.join(missing)}")
+
+        destination_input = vector_store_path or self._default_index_path
+        if destination_input is None:
+            raise ValueError("Index destination is not configured. Provide 'vector_store_path' or set a default index path.")
+        destination = Path(destination_input)
+        destination.mkdir(parents=True, exist_ok=True)
+
+        if overwrite:
+            for artefact in ("index.faiss", "index.pkl"):
+                artefact_path = destination / artefact
+                if artefact_path.exists():
+                    artefact_path.unlink()
+
         logger.info(
-            "Indexing documents: %s [embedding=%s, preparation=%s]",
-            ", ".join(document_ids),
+            "Indexing documents: %s [embedding=%s, preparation=%s] -> %s",
+            ", ".join(target_ids),
             self._embedding_backend.value,
             self._preparation_method.value,
+            destination,
         )
+
+        chunk_docs = self._collect_chunk_documents(target_ids)
+        prepared_docs = self._prepare_documents_for_index(chunk_docs)
+        if not prepared_docs:
+            raise ValueError("No content available to build the vector index.")
+
+        embedding_model = self._get_embedding_model()
+        vector_store = FAISS.from_documents(prepared_docs, embedding_model)
+        vector_store.save_local(str(destination))
+        self._persist_docstore(destination, target_ids)
+
         event = make_index_event(
-            document_ids,
+            target_ids,
             source=self._source_name,
             initiated_by=initiated_by,
             preparation=self._preparation_method,
             embedding_backend=self._embedding_backend.value,
-        )
+        ).with_payload(index_path=str(destination))
+
         self._dispatch_event(event)
+
         if notify_agents:
             self.trigger_retriever_reload(
-                reason=f"Indexed documents: {', '.join(document_ids)}",
-                document_ids=document_ids,
+                reason=f"Indexed documents: {', '.join(target_ids)}",
+                document_ids=target_ids,
                 initiated_by=initiated_by,
             )
         return event

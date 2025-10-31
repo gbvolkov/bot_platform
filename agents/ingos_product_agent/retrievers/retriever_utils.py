@@ -36,7 +36,7 @@ import config
 _MAX_RETRIEVALS=5
 
 if TYPE_CHECKING:
-    from agents.kb_refresh_registry import KBReloadContext
+    from services.kb_manager.notifications import KBReloadContext
 
 logger = logging.getLogger(__name__)
 

@@ -44,6 +44,10 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "chromadb>=0.5.3",
     "langchain-chroma>=1.0.0",
+    "chardet>=5.2.0",
+    "pydub>=0.25.1",
+    "assemblyai>=0.45.5",
+    "audioop-lts>=0.2.2",
 ]
 
 [tool.uv.sources]

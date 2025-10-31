@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -405,6 +404,102 @@ def rank_jobs(state: JobAgentState, config: Optional[RunnableConfig] = None) -> 
 
 
 
+def format_jobs_markdown(payload: Dict[str, Any]) -> str:
+    summary_text = payload.get("summary") or ""
+    vacancies = payload.get("vacancies") or []
+
+    lines: List[str] = []
+
+    summary_items = [
+        line.strip()
+        for line in summary_text.splitlines()
+        if isinstance(line, str) and line.strip()
+    ]
+    if summary_items:
+        lines.append("## Краткое описание")
+        for item in summary_items:
+            lines.append(f"- {item}")
+        lines.append("")
+
+    lines.append("## Вакансии")
+    if not vacancies:
+        lines.append("- Подходящих вакансий не найдено.")
+        return "\n".join(lines)
+
+    def format_salary(salary_info: Any) -> str:
+        if not isinstance(salary_info, dict):
+            return ""
+        min_amount = salary_info.get("min")
+        max_amount = salary_info.get("max")
+        currency = salary_info.get("currency")
+
+        parts: List[str] = []
+        if min_amount is not None:
+            parts.append(f"от {min_amount}")
+        if max_amount is not None:
+            parts.append(f"до {max_amount}")
+        if currency:
+            parts.append(str(currency))
+        return " ".join(parts)
+
+    for index, vacancy in enumerate(vacancies, start=1):
+        title = vacancy.get("title") or "Без названия"
+        lines.append(f"{index}. **{title}**")
+
+        def add_field(label: str, value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, list):
+                rendered = ", ".join(str(item).strip() for item in value if str(item).strip())
+                if not rendered:
+                    return
+            elif isinstance(value, float):
+                rendered = f"{value:.3f}"
+            else:
+                rendered = str(value).strip()
+                if not rendered:
+                    return
+            lines.append(f"   - **{label}:** {rendered}")
+
+        #add_field("Идентификатор", vacancy.get("id"))
+        add_field("Компания", vacancy.get("company"))
+        add_field("Локация", vacancy.get("location"))
+
+        salary_text = format_salary(vacancy.get("salary"))
+        if salary_text:
+            add_field("Зарплата", salary_text)
+
+        add_field("Навыки", vacancy.get("skills"))
+
+        rank_score = vacancy.get("rank_score")
+        if isinstance(rank_score, (int, float)):
+            add_field("Оценка ранжирования", float(rank_score))
+        elif rank_score:
+            add_field("Оценка ранжирования", rank_score)
+
+        match_score = vacancy.get("match_score")
+        if isinstance(match_score, (int, float)):
+            add_field("Оценка совпадения", float(match_score))
+        elif match_score:
+            add_field("Оценка совпадения", match_score)
+
+        add_field("Требуемый опыт", vacancy.get("experience"))
+        add_field("Источник", vacancy.get("source"))
+        add_field("Дата публикации", vacancy.get("published_at"))
+        add_field("Позиция запроса", vacancy.get("search_position"))
+        add_field("Локация запроса", vacancy.get("search_location"))
+        add_field("Описание", vacancy.get("description"))
+
+        url = vacancy.get("url")
+        if isinstance(url, str) and url.strip():
+            link = url.strip()
+            lines.append(f"   - **Ссылка:** [Открыть вакансию]({link})")
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def respond_with_jobs(state: JobAgentState, config: Optional[RunnableConfig] = None) -> JobAgentState:
     jobs = state.get("ranked_jobs") or []
     features = state.get("extracted_features") or {}
@@ -427,12 +522,14 @@ def respond_with_jobs(state: JobAgentState, config: Optional[RunnableConfig] = N
             parts.append(f"от {min_amount}")
         if max_amount is not None:
             parts.append(f"до {max_amount}")
-        summary_lines.append("Желаемая зарплата: " + " ".join(parts + [currency]))
+        if currency:
+            parts.append(currency)
+        summary_lines.append("Желаемая зарплата: " + " ".join(parts))
 
     if jobs:
-        summary_lines.append(f"Найдено {len(jobs)} подходящих вакансий. Выберите одну для подробностей.")
+        summary_lines.append(f"Найдено {len(jobs)} подходящих вакансий.")
     else:
-        summary_lines.append("Не удалось найти подходящие вакансии. Уточните предпочтения и попробуйте снова.")
+        summary_lines.append("Подходящих вакансий не найдено.")
 
     payload = {
         "summary": "\n".join(summary_lines),
@@ -459,7 +556,9 @@ def respond_with_jobs(state: JobAgentState, config: Optional[RunnableConfig] = N
         ],
     }
 
-    return {"messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))]}
+    message_content = format_jobs_markdown(payload)
+
+    return {"messages": [AIMessage(content=message_content)]}
 
 
 def initialize_agent(

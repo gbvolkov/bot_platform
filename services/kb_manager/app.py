@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 try:
@@ -11,6 +12,8 @@ try:
     from pydantic import AnyHttpUrl, BaseModel, Field
 except ImportError as exc:  # pragma: no cover - optional dependency
     raise ImportError("Install 'fastapi' and 'pydantic' to run the KB manager service API.") from exc
+
+import config
 
 from .enums import ChunkingStrategy, ChunkSizeUnit, EmbeddingBackend, KnowledgeBasePreparationMethod
 from .models import ChunkingConfig, WebhookRegistration
@@ -53,14 +56,25 @@ class DocumentPayload(BaseModel):
 
 
 class IndexingPayload(BaseModel):
-    document_ids: Sequence[str]
+    document_ids: Sequence[str] = ()
     initiated_by: Optional[str] = None
     notify_agents: bool = True
+    index_path: Optional[str] = None
+    overwrite: bool = True
 
 
 class ReloadPayload(BaseModel):
     reason: str = "manual reload"
     document_ids: Sequence[str] = ()
+    initiated_by: Optional[str] = None
+
+
+class DirectoryIngestPayload(BaseModel):
+    directory: str
+    product: Optional[str] = None
+    extensions: Optional[Sequence[str]] = None
+    auto_chunk: bool = True
+    chunking: Optional[ChunkingConfigPayload] = None
     initiated_by: Optional[str] = None
 
 
@@ -79,7 +93,14 @@ class WebhookPayload(BaseModel):
         )
 
 
-kb_service = KnowledgeBaseManagerService(reload_broadcaster=get_broadcaster())
+class IndexPathPayload(BaseModel):
+    path: str
+
+
+kb_service = KnowledgeBaseManagerService(
+    reload_broadcaster=get_broadcaster(),
+    default_index_path=Path(config.PRODUCT_INDEX_FOLDER),
+)
 
 
 @app.post("/documents", response_model=Dict[str, str])
@@ -93,6 +114,20 @@ def add_document(payload: DocumentPayload) -> Dict[str, str]:
         initiated_by=payload.initiated_by,
     )
     return {"document_id": doc_id}
+
+
+@app.post("/ingest/directory", response_model=Dict[str, Any])
+def ingest_directory(payload: DirectoryIngestPayload) -> Dict[str, Any]:
+    chunk_config = payload.chunking.to_config() if payload.chunking else None
+    document_ids = kb_service.ingest_directory(
+        payload.directory,
+        product=payload.product,
+        allowed_extensions=list(payload.extensions) if payload.extensions else None,
+        chunk_on_ingest=payload.auto_chunk,
+        chunking=chunk_config,
+        initiated_by=payload.initiated_by,
+    )
+    return {"document_ids": document_ids, "count": len(document_ids)}
 
 
 @app.post("/documents/{document_id}/chunk", response_model=Dict[str, Any])
@@ -126,6 +161,8 @@ def index_documents(payload: IndexingPayload) -> Dict[str, Any]:
             payload.document_ids,
             initiated_by=payload.initiated_by,
             notify_agents=payload.notify_agents,
+            vector_store_path=Path(payload.index_path).expanduser() if payload.index_path else None,
+            overwrite=payload.overwrite,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -170,6 +207,13 @@ def trigger_reload(payload: ReloadPayload) -> JSONResponse:
         initiated_by=payload.initiated_by,
     )
     return JSONResponse({"results": results})
+
+
+@app.post("/config/index-path", response_model=Dict[str, str])
+def configure_index_path(payload: IndexPathPayload) -> Dict[str, str]:
+    resolved = Path(payload.path).expanduser()
+    kb_service.set_default_index_path(resolved)
+    return {"path": str(resolved)}
 
 
 @app.post("/config/embedding", response_model=Dict[str, str])
