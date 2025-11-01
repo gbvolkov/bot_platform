@@ -40,6 +40,27 @@ logging.basicConfig(
 
 import config
 
+try:
+    import pdfminer.utils as _pdfminer_utils
+except Exception:  # pragma: no cover - optional dependency failure
+    _pdfminer_utils = None
+else:
+    if _pdfminer_utils is not None and not hasattr(_pdfminer_utils, "open_filename"):
+        def _open_filename(filename, *args, **kwargs):
+            """Compatibility shim for pdfminer >=202407 which removed open_filename."""
+            if hasattr(filename, "read"):
+                return filename
+            filename = os.fspath(filename)
+            mode = args[0] if args else kwargs.get("mode")
+            if mode is None:
+                kwargs.setdefault("mode", "rb")
+                mode = kwargs["mode"]
+            if filename == "-":
+                return sys.stdin.buffer if "b" in mode else sys.stdin
+            return open(filename, *args, **kwargs)
+
+        _pdfminer_utils.open_filename = _open_filename
+
 
 def _ensure_audio_support() -> None:
     if AudioSegment is None:
@@ -147,6 +168,37 @@ def fallback_text(full_path: str)-> list[Document]:
     encoding = result["encoding"]
     loader = TextLoader(full_path, encoding=encoding)
     return loader.load()
+
+
+def load_single_document(file_path: str) -> list[Document]:
+    """
+    Load a single document from the filesystem, applying the same fallbacks
+    and metadata enrichment as load_documents() but limited to a given file.
+    """
+    directory_path = os.path.dirname(file_path)
+    filename = os.path.basename(file_path)
+
+    loader = get_loader(directory_path, filename)
+    if loader is None:
+        logging.warning("Unsupported file type %s for file %s", os.path.splitext(filename)[1].lower(), filename)
+        return []
+
+    try:
+        docs = loader.load()
+    except Exception as e:
+        docs = None
+        if isinstance(loader, JSONLoader) and isinstance(e, JSONDecodeError):
+            docs = fallback_json(file_path)
+        elif isinstance(loader, TextLoader) and isinstance(e, RuntimeError):
+            docs = fallback_text(file_path)
+        if docs is None:
+            raise e
+
+    rel_path = os.path.relpath(file_path, directory_path)
+    for doc in docs:
+        doc.metadata["source"] = filename
+        doc.metadata["relative_path"] = rel_path
+    return docs
 
 
 def load_documents(directory_path: str, extentions: list[str] = None) -> list[Document]:
