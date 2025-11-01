@@ -442,6 +442,14 @@ def format_jobs_markdown(payload: Dict[str, Any]) -> str:
             parts.append(str(currency))
         return " ".join(parts)
 
+    highlight_pattern = re.compile(r"</?highlighttext>", re.IGNORECASE)
+
+    def apply_highlight_formatting(text: Any) -> str:
+        if not isinstance(text, str):
+            return ""
+        formatted = highlight_pattern.sub("_", text)
+        return formatted.strip()
+
     for index, vacancy in enumerate(vacancies, start=1):
         title = vacancy.get("title") or "Без названия"
         lines.append(f"{index}. **{title}**")
@@ -471,24 +479,31 @@ def format_jobs_markdown(payload: Dict[str, Any]) -> str:
 
         add_field("Навыки", vacancy.get("skills"))
 
-        rank_score = vacancy.get("rank_score")
-        if isinstance(rank_score, (int, float)):
-            add_field("Оценка ранжирования", float(rank_score))
-        elif rank_score:
-            add_field("Оценка ранжирования", rank_score)
+        #rank_score = vacancy.get("rank_score")
+        #if isinstance(rank_score, (int, float)):
+        #    add_field("Оценка ранжирования", float(rank_score))
+        #elif rank_score:
+        #    add_field("Оценка ранжирования", rank_score)
 
-        match_score = vacancy.get("match_score")
-        if isinstance(match_score, (int, float)):
-            add_field("Оценка совпадения", float(match_score))
-        elif match_score:
-            add_field("Оценка совпадения", match_score)
+        #match_score = vacancy.get("match_score")
+        #if isinstance(match_score, (int, float)):
+        #    add_field("Оценка совпадения", float(match_score))
+        #elif match_score:
+        #    add_field("Оценка совпадения", match_score)
 
         add_field("Требуемый опыт", vacancy.get("experience"))
         add_field("Источник", vacancy.get("source"))
         add_field("Дата публикации", vacancy.get("published_at"))
-        add_field("Позиция запроса", vacancy.get("search_position"))
-        add_field("Локация запроса", vacancy.get("search_location"))
-        add_field("Описание", vacancy.get("description"))
+        #add_field("Позиция запроса", vacancy.get("search_position"))
+        #add_field("Локация запроса", vacancy.get("search_location"))
+
+        description = vacancy.get("description")
+        if isinstance(description, str):
+            formatted_description = apply_highlight_formatting(description)
+            if formatted_description:
+                lines.append(f"   - **Описание:** {formatted_description}")
+        elif description:
+            add_field("Описание", description)
 
         url = vacancy.get("url")
         if isinstance(url, str) and url.strip():

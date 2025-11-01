@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent_registry import agent_registry
+from ..attachments import attachment_to_text_segment, process_attachments
 from ..models import Conversation, Message
 from ..schemas import (
     ConversationCreate,
@@ -149,6 +150,39 @@ async def post_message(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    if payload.payload.type == "reset" and payload.payload.attachments:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attachments are not supported for reset messages.",
+        )
+
+    processed_attachments = []
+    if payload.payload.attachments:
+        supported_types = agent_registry.supported_content_types(conversation.agent_id)
+        processed_attachments = process_attachments(payload.payload.attachments, supported_types)
+        fatal_attachments = [
+            item
+            for item in processed_attachments
+            if item.error or (not item.supported and not item.text)
+        ]
+        if fatal_attachments:
+            failed_names = ", ".join(item.attachment.filename for item in fatal_attachments)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to process unsupported attachments: {failed_names}",
+            )
+        attachment_segments = [
+            segment
+            for segment in (attachment_to_text_segment(item) for item in processed_attachments)
+            if segment
+        ]
+        metadata = dict(payload.payload.metadata)
+        if processed_attachments:
+            metadata["attachments"] = [item.as_metadata() for item in processed_attachments]
+        if attachment_segments:
+            metadata["attachment_text_segments"] = attachment_segments
+        payload.payload.metadata = metadata
 
     try:
         agent_result = await invoke_agent(

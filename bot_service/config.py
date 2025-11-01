@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         validate_assignment=True,
         env_file=".env",
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     app_title: str = Field(default="Bot Platform API")

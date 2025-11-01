@@ -21,8 +21,9 @@ def get_config():
 def main():
     query = "Допускается ли китайский автомобиль?"
     payload_msg = HumanMessage(content=[{"type": "text", "text": query}])
-    agent = initialize_agent(product="Овертайм")  
+    agent = initialize_agent(product="Инголаб")  
     result = agent.invoke({"messages": [payload_msg]}, config=get_config(), stream_mode="values")
+
 
     print(result)
 

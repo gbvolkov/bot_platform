@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
@@ -12,7 +12,7 @@ from agents.ingos_product_agent import initialize_agent as init_product_agent
 from agents.utils import ModelType
 
 from .config import settings
-from .schemas import AgentInfo
+from .schemas import AgentInfo, ContentType
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,7 @@ class AgentDefinition:
     description: str
     factory: Callable[[ModelType], Any]
     default_provider: ModelType
+    supported_content_types: Tuple[ContentType, ...]
 
 
 PROVIDER_MAPPING: Dict[str, ModelType] = {
@@ -42,6 +43,14 @@ PRODUCT_DOCS_DIR = Path(__file__).resolve().parent.parent / "data" / "docs"
 class AgentRegistry:
     def __init__(self) -> None:
         default_provider = _resolve_provider(settings.default_model_provider)
+        default_content_types: Tuple[ContentType, ...] = (
+            ContentType.TEXT_FILES,
+            ContentType.MARKDOWN,
+            ContentType.DOCX_DOCUMENTS,
+            ContentType.PDFS,
+            ContentType.CSVS,
+            ContentType.EXCELS,
+        )
         self._definitions: Dict[str, AgentDefinition] = {
             "find_job": AgentDefinition(
                 id="find_job",
@@ -49,6 +58,12 @@ class AgentRegistry:
                 description="Подыскивает вакансии на основе резюме пользователя.",
                 factory=lambda provider: init_job_agent(provider=provider),
                 default_provider=default_provider,
+                supported_content_types=(
+                    ContentType.TEXT_FILES,
+                    ContentType.MARKDOWN,
+                    ContentType.DOCX_DOCUMENTS,
+                    ContentType.PDFS,
+                ),
             ),
             "service_desk": AgentDefinition(
                 id="service_desk",
@@ -56,14 +71,19 @@ class AgentRegistry:
                 description="Отвечает на вопросы сотрудников и консультирует по внутренним процессам.",
                 factory=lambda provider: init_sd_agent(provider=provider),
                 default_provider=default_provider,
+                supported_content_types=default_content_types,
             ),
         }
-        self._definitions.update(self._build_product_definitions(default_provider))
+        self._definitions.update(self._build_product_definitions(default_provider, default_content_types))
         self._instances: Dict[str, Any] = {}
         self._init_tasks: Dict[str, Future] = {}
         self._init_errors: Dict[str, BaseException] = {}
 
-    def _build_product_definitions(self, default_provider: ModelType) -> Dict[str, AgentDefinition]:
+    def _build_product_definitions(
+        self,
+        default_provider: ModelType,
+        default_content_types: Tuple[ContentType, ...],
+    ) -> Dict[str, AgentDefinition]:
         product_definitions: Dict[str, AgentDefinition] = {}
         docs_dir = PRODUCT_DOCS_DIR
         if not docs_dir.exists():
@@ -80,6 +100,7 @@ class AgentRegistry:
                 description=f"Assistant of Ingosstrakh Product '{product_name}'.",
                 factory=lambda provider, product=product_name: init_product_agent(provider=provider, product=product),
                 default_provider=default_provider,
+                supported_content_types=default_content_types,
             )
         return product_definitions
 
@@ -90,6 +111,7 @@ class AgentRegistry:
                 name=definition.name,
                 description=definition.description,
                 provider=definition.default_provider.value,
+                supported_content_types=list(definition.supported_content_types),
             )
             for definition in self._definitions.values()
         ]
@@ -166,6 +188,11 @@ class AgentRegistry:
         if agent_id in self._definitions:
             return "pending"
         return "unknown"
+
+    def supported_content_types(self, agent_id: str) -> Tuple[ContentType, ...]:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        return self._definitions[agent_id].supported_content_types
 
 
 agent_registry = AgentRegistry()

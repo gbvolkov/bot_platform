@@ -35,6 +35,14 @@ class Settings(BaseSettings):
         default=10.0,
         description="Connection timeout for requests to bot_service.",
     )
+    log_level: str = Field(
+        default="DEBUG",
+        description="Logging level for the OpenAI proxy service.",
+    )
+    default_attachment_prompt: str = Field(
+        default="Act as per your configured purpose using the provided attachments.",
+        description="Fallback text used when a user message contains only attachments.",
+    )
 
 
 @lru_cache

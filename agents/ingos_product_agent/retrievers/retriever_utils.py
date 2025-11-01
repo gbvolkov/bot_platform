@@ -105,13 +105,13 @@ def get_retriever_faiss(product: str = "default"):
         return result
     return search
 
-def get_retriever():
+def get_retriever(product: str = "default"):
     MAX_RETRIEVALS = 3
     retriever  = VectorStore(docs_path="./data/docs", vector_store_path="./data/vector_store")
-
+    product = product
     def search(query: str) -> List[Document]:
         try:
-            result = retriever.search(query=query, n_results=MAX_RETRIEVALS)
+            result = retriever.search(query=query, n_results=MAX_RETRIEVALS, product=product)
         except Exception as e:
             logging.error(f"Error occured during faiss search tool calling.\nException: {e}")
             raise e
@@ -123,7 +123,10 @@ def get_retriever():
 #@lru_cache(maxsize=64)
 def get_search_tool(product: str = "default", anonymizer: Palimpsest = None):
     product = product
-    search = get_retriever_faiss(product)
+    if config.INGOS_RETRIEVER == "faiss":
+        search = get_retriever_faiss(product)
+    else:
+        search = get_retriever(product)
     @tool
     def search_kb(query: str) -> str:
         """Retrieves from knowledgebase context suitable for the query. Shall be always used when user asks question.

@@ -4,12 +4,76 @@ import time
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class AttachmentInput(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    data: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded file content for binary attachments.",
+    )
+    text: Optional[str] = Field(
+        default=None,
+        description="Pre-extracted text content for the attachment.",
+    )
 
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: Any
+    attachments: List[AttachmentInput] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_message(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        content = data.get("content")
+        has_explicit_attachments = "attachments" in data and data["attachments"] is not None
+
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            extracted_attachments: List[Dict[str, Any]] = []
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type == "text":
+                        text_value = item.get("text")
+                        if isinstance(text_value, str):
+                            text_parts.append(text_value)
+                    elif item_type and item_type.startswith("input_"):
+                        attachment: Dict[str, Any] = {}
+                        filename = item.get("filename")
+                        if isinstance(filename, str):
+                            attachment["filename"] = filename
+                        media_type = item.get("media_type") or item.get("content_type")
+                        if isinstance(media_type, str):
+                            attachment["content_type"] = media_type
+                        data_field = item.get("data") or item.get("base64_data")
+                        if isinstance(data_field, str):
+                            attachment["data"] = data_field
+                        text_value = item.get("text")
+                        if isinstance(text_value, str):
+                            attachment["text"] = text_value
+                        if attachment:
+                            extracted_attachments.append(attachment)
+                    else:
+                        text_value = item.get("text")
+                        if isinstance(text_value, str):
+                            text_parts.append(text_value)
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            if text_parts:
+                data["content"] = "\n".join(text_parts)
+            elif not text_parts and not extracted_attachments:
+                # ensure content is at least string
+                data["content"] = ""
+            if extracted_attachments and not has_explicit_attachments:
+                data["attachments"] = extracted_attachments
+        return data
 
     @field_validator("content")
     @classmethod

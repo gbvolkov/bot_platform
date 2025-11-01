@@ -779,7 +779,7 @@ class VectorStore:
         print(f"Загружено векторное хранилище")
         return self
 
-    def search(self, query: str, n_results: int = 6) -> List[Dict]:
+    def search(self, query: str, n_results: int = 6, product: str = "default") -> List[Dict]:
         """Поиск похожих документов
 
         Args:
@@ -801,10 +801,15 @@ class VectorStore:
                 return []
 
         try:
-            docs = self.vectorstore.similarity_search(
+            search_kwargs = None
+            if product != "default":
+                search_kwargs={"product": {"$eq": product}}
+            search_result = self.vectorstore.similarity_search_with_relevance_scores(
                 query,
-                k=n_results
+                k=n_results,
+                filter=search_kwargs
             )
+            docs = [Document(page_content=d.page_content, metadata={**(d.metadata or {}), "relevance_score": float(s)}) for d, s in search_result if (s or 0) > 0]
             if not docs:
                 return []
 

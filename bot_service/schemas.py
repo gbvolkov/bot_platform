@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+class ContentType(str, Enum):
+    IMAGES = "images"
+    PDFS = "pdfs"
+    TEXT_FILES = "text_files"
+    MARKDOWN = "mds"
+    DOCX_DOCUMENTS = "docx_documents"
+    CSVS = "csvs"
+    EXCELS = "excels"
+    SOUNDS = "sounds"
+    VIDEOS = "videos"
 
 
 class AgentInfo(BaseModel):
@@ -11,6 +24,7 @@ class AgentInfo(BaseModel):
     name: str
     description: str
     provider: Optional[str] = None
+    supported_content_types: List[ContentType] = Field(default_factory=list)
 
 
 class ConversationCreate(BaseModel):
@@ -33,12 +47,26 @@ class ConversationView(BaseModel):
     last_message_at: datetime
 
 
+class AttachmentPayload(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    data: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded file content for binary attachments.",
+    )
+    text: Optional[str] = Field(
+        default=None,
+        description="Pre-extracted plain text for the attachment (optional).",
+    )
+
+
 class MessagePayload(BaseModel):
     type: Literal["text", "reset"] = "text"
     text: Optional[str] = Field(
         default=None, description="Text content when the type is 'text'."
     )
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    attachments: List[AttachmentPayload] = Field(default_factory=list)
 
 
 class MessageCreate(BaseModel):
@@ -62,4 +90,3 @@ class SendMessageResponse(BaseModel):
     conversation: ConversationView
     user_message: MessageView
     agent_message: MessageView
-

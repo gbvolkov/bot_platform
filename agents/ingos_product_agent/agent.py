@@ -43,6 +43,7 @@ from ..user_info import user_info
 from ..utils import ModelType
 from ..llm_utils import get_llm
 from .retrievers.retriever_utils import get_search_tool, reload_retrievers as reload_product_retrievers
+from .retrievers.vector_store import VectorStore
 
 from palimpsest import Palimpsest
 
@@ -92,7 +93,13 @@ def anonymize_message_content(content: Any, anonymizer: Palimpsest) -> Any:
         return out
     return content
 
-def initialize_agent(provider: ModelType = ModelType.GPT, product: str = "default", use_platform_store: bool = False):
+def initialize_agent(
+    provider: ModelType = ModelType.GPT,
+    product: str = "default",
+    use_platform_store: bool = False,
+    *,
+    prefetch_top_k: int = 3,
+):
     # The checkpointer lets the graph persist its state
     # this is a complete memory for the entire graph.
     print("ProductAgent initialization started...")
@@ -125,10 +132,12 @@ def initialize_agent(provider: ModelType = ModelType.GPT, product: str = "defaul
         ]
         anonymizer = Palimpsest(verbose=False, run_entities=anon_entities)
     memory = None if use_platform_store else MemorySaver()
-    #team_llm = get_llm(config.TEAM_GPT_MODEL, temperature=1)
     team_llm = get_llm(model = config.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     
     search_kb = get_search_tool(product)
+    vector_docs_path = os.getenv("INGOS_VECTOR_DOCS_PATH", "./data/docs")
+    vector_store_path = os.getenv("INGOS_VECTOR_STORE_PATH", "./data/vector_store")
+    vector_store = VectorStore(docs_path=vector_docs_path, vector_store_path=vector_store_path)
     search_tools = [
         search_kb,
     ]
@@ -183,6 +192,77 @@ def initialize_agent(provider: ModelType = ModelType.GPT, product: str = "defaul
     def with_validator(agent_runnable, validator):
         return agent_runnable | RunnableLambda(validator)
 
+    def prefetch_context(state: ProductAgentState) -> ProductAgentState:
+        if prefetch_top_k <= 0:
+            return state
+
+        messages = list(state["messages"])
+        if not messages:
+            return state
+
+        # Remove any previously injected prefetch messages to avoid duplication.
+        messages = [
+            msg
+            for msg in messages
+            if not (
+                isinstance(msg, SystemMessage)
+                and isinstance(getattr(msg, "additional_kwargs", {}), dict)
+                and msg.additional_kwargs.get("source") == "vector_prefetch"
+            )
+        ]
+
+        last_user_idx = next(
+            (idx for idx in range(len(messages) - 1, -1, -1) if messages[idx].type == "human"),
+            None,
+        )
+        if last_user_idx is None:
+            state["messages"] = messages
+            return state
+
+        last_user = messages[last_user_idx]
+        query_parts: List[str] = []
+        for part in getattr(last_user, "content", []):
+            if isinstance(part, dict) and part.get("type") == "text":
+                text_value = part.get("text")
+                if isinstance(text_value, str) and text_value.strip():
+                    query_parts.append(text_value.strip())
+        query = "\n".join(query_parts).strip()
+        if not query:
+            query = f"information about product {product}"
+
+        try:
+            docs = vector_store.search(query=query, n_results=prefetch_top_k, product=product)
+        except Exception as exc:
+            logging.warning("Vector prefetch failed for product %s: %s", product, exc)
+            state["messages"] = messages
+            return state
+
+        if not docs:
+            state["messages"] = messages
+            return state
+
+        context_chunks = "\n\n".join(
+            doc.page_content for doc in docs if getattr(doc, "page_content", "").strip()
+        ).strip()
+        if not context_chunks:
+            state["messages"] = messages
+            return state
+
+        context_message = SystemMessage(
+            content=f"Prefetched knowledge base context:\n{context_chunks}",
+            additional_kwargs={"source": "vector_prefetch", "doc_count": len(docs)},
+        )
+
+        updated_messages = messages[:last_user_idx] + [context_message] + messages[last_user_idx:]
+        state["messages"] = updated_messages
+        logging.debug(
+            "Prefetched %d documents for product=%s using query='%s'",
+            len(docs),
+            product,
+            query[:120],
+        )
+        return state
+
     default_agent = with_validator(
         create_agent(
             model=team_llm,
@@ -202,6 +282,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, product: str = "defaul
     # Define nodes
     builder.add_node("fetch_user_info", user_info)
     builder.add_node("reset_memory", reset_memory)
+    builder.add_node("prefetch_context", prefetch_context)
     builder.add_node("default_agent", default_agent)
 
     # Define edges
@@ -211,10 +292,11 @@ def initialize_agent(provider: ModelType = ModelType.GPT, product: str = "defaul
         reset_or_run,
         {
             "reset_memory": "reset_memory",
-            "default_agent": "default_agent",
+            "default_agent": "prefetch_context",
         }
     )
     builder.add_edge("reset_memory", END)
+    builder.add_edge("prefetch_context", "default_agent")
     agent = builder.compile(name="ingos_product_agent", checkpointer=memory).with_config({"callbacks": callback_handlers})
 
     agent_key = f"product_{product}"

@@ -21,9 +21,7 @@ from langchain_community.document_loaders import (
     UnstructuredEmailLoader,
     JSONLoader,
 )
-
 from pydub import AudioSegment
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -36,28 +34,10 @@ logging.basicConfig(
 import config
 
 
-#def _ensure_audio_support() -> None:
-#    if AudioSegment is None:
-#        missing = getattr(_pydub_import_error, "name", "pydub")
-#        raise RuntimeError(
-#            "Audio ingestion requires optional dependency `pydub` "
-#            "with an `audioop` backend. Install it via `pip install pydub audioop-lts`."
-#        ) from _pydub_import_error
-
-
-#def _log_missing_audio_dependency(filename: str) -> None:
-#    missing = getattr(_pydub_import_error, "name", "pydub")
-#    logging.warning(
-#        f"Skipping audio file {filename} because optional dependency {missing!r} is not installed. "
-#        "Install `pip install pydub audioop-lts` to enable audio ingestion."
-#    )
-
-
 def convert_audio_to_wav(input_file, output_file, audio_type):
     """
     Converts an M4A (or similar) file to WAV format.
     """
-#    _ensure_audio_support()
     audio = AudioSegment.from_file(input_file, format=audio_type)
     audio.export(output_file, format='wav')
 
@@ -139,36 +119,6 @@ def fallback_text(full_path: str)-> list[Document]:
     encoding = result["encoding"]
     loader = TextLoader(full_path, encoding=encoding)
     return loader.load()
-
-
-def load_single_document(file_path: str) -> list[Document]:
-    """
-    Load a single document from the filesystem, applying the same fallbacks
-    and metadata enrichment as load_documents() but limited to a given file.
-    """
-    directory_path = os.path.dirname(file_path)
-    filename = os.path.basename(file_path)
-
-    loader = get_loader(directory_path, filename)
-    if loader is None:
-        logging.warning("Unsupported file type %s for file %s", os.path.splitext(filename)[1].lower(), filename)
-        raise NotImplementedError(f"Unsupported file type {os.path.splitext(filename)[1].lower()} for file {filename}")
-    try:
-        docs = loader.load()
-    except Exception as e:
-        docs = None
-        if isinstance(loader, JSONLoader) and isinstance(e, JSONDecodeError):
-            docs = fallback_json(file_path)
-        elif isinstance(loader, TextLoader) and isinstance(e, RuntimeError):
-            docs = fallback_text(file_path)
-        if docs is None:
-            raise e
-
-    rel_path = os.path.relpath(file_path, directory_path)
-    for doc in docs:
-        doc.metadata["source"] = filename
-        doc.metadata["relative_path"] = rel_path
-    return docs
 
 
 def load_documents(directory_path: str, extentions: list[str] = None) -> list[Document]:

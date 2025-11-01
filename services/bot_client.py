@@ -1,8 +1,34 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import httpx
+import logging
+
+
+logger = logging.getLogger(__name__)
+
+
+def _redact_attachment(attachment: Dict[str, Any]) -> Dict[str, Any]:
+    redacted = dict(attachment)
+    data = redacted.get("data")
+    if isinstance(data, str):
+        redacted["data"] = f"<base64 {len(data)} chars>"
+    return redacted
+
+
+def _redact_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    redacted = dict(payload)
+    message_payload = redacted.get("payload")
+    if isinstance(message_payload, dict):
+        msg_copy: Dict[str, Any] = dict(message_payload)
+        attachments = msg_copy.get("attachments")
+        if isinstance(attachments, list):
+            msg_copy["attachments"] = [
+                _redact_attachment(att) if isinstance(att, dict) else att for att in attachments
+            ]
+        redacted["payload"] = msg_copy
+    return redacted
 
 
 class BotServiceClient:
@@ -10,10 +36,15 @@ class BotServiceClient:
         self,
         *,
         base_url: str,
-        request_timeout: float = 180.0,
+        request_timeout: float | None = 180.0,
         connect_timeout: float = 10.0,
     ) -> None:
-        timeout = httpx.Timeout(request_timeout, connect=connect_timeout)
+        timeout = httpx.Timeout(
+            connect=connect_timeout,
+            read=None,
+            write=None,
+            pool=None,
+        )
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=timeout,
@@ -64,6 +95,7 @@ class BotServiceClient:
         headers = {"X-User-Id": user_id}
         if user_role:
             headers["X-User-Role"] = user_role
+        logger.info("POST /conversations payload=%s headers=%s", payload, {"X-User-Id": headers["X-User-Id"], "X-User-Role": headers.get("X-User-Role")})
         response = await self._client.post("/conversations/", json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
@@ -76,6 +108,7 @@ class BotServiceClient:
         text: str,
         user_role: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        attachments: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = {
             "payload": {
@@ -84,9 +117,17 @@ class BotServiceClient:
                 "metadata": metadata or {},
             }
         }
+        if attachments:
+            payload["payload"]["attachments"] = list(attachments)
         headers = {"X-User-Id": user_id}
         if user_role:
             headers["X-User-Role"] = user_role
+        logger.info(
+            "POST /conversations/%s/messages payload=%s headers=%s",
+            conversation_id,
+            _redact_payload(payload),
+            {"X-User-Id": headers["X-User-Id"], "X-User-Role": headers.get("X-User-Role")},
+        )
 
         response = await self._client.post(
             f"/conversations/{conversation_id}/messages",

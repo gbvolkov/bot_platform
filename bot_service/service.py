@@ -46,7 +46,17 @@ def build_human_message(payload: MessagePayload) -> HumanMessage:
         reset_text = payload.text or "RESET"
         content = [{"type": "reset", "text": reset_text}]
     else:
-        content = [{"type": "text", "text": payload.text or ""}]
+        content: List[Dict[str, str]] = []
+        if payload.text:
+            content.append({"type": "text", "text": payload.text})
+        attachment_segments = []
+        if isinstance(payload.metadata, dict):
+            attachment_segments = payload.metadata.get("attachment_text_segments") or []
+        for segment in attachment_segments:
+            if isinstance(segment, str) and segment.strip():
+                content.append({"type": "text", "text": segment})
+        if not content:
+            content.append({"type": "text", "text": ""})
     return HumanMessage(content=content)
 
 
@@ -101,4 +111,3 @@ def serialise_message(message: BaseMessage) -> Dict[str, Any]:
         "raw_text": _extract_text(message),
         "content": _normalise_content(message),
     }
-
