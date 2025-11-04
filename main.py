@@ -19,9 +19,9 @@ def get_config():
     return RunnableConfig(ConfigSchema({"user_id": 100, "user_role": "default", "model": "openai", "thread_id": 110}))
 
 def main():
-    query = "Допускается ли китайский автомобиль?"
+    query = "Чем привлекателен ваш сервис?"
     payload_msg = HumanMessage(content=[{"type": "text", "text": query}])
-    agent = initialize_agent(product="Инголаб")  
+    agent = initialize_agent(product="Personal")  
     result = agent.invoke({"messages": [payload_msg]}, config=get_config(), stream_mode="values")
 
 
