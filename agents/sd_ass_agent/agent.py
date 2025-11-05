@@ -4,7 +4,7 @@ import os
 from typing import List, Any
 from copy import copy
 
-import config
+import config as cfg
 
 #os.environ["LANGSMITH_HIDE_INPUTS"] = "true"
 #os.environ["LANGSMITH_HIDE_OUTPUTS"] = "true"
@@ -157,17 +157,17 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
     #log_handler = FileCallbackHandler(f"./logs/{log_name}")
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]
-    if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
+    if cfg.LANGFUSE_URL and len(cfg.LANGFUSE_URL) > 0:
         langfuse = Langfuse(
-            public_key=config.LANGFUSE_PUBLIC,
-            secret_key=config.LANGFUSE_SECRET,
-            host=config.LANGFUSE_URL
+            public_key=cfg.LANGFUSE_PUBLIC,
+            secret_key=cfg.LANGFUSE_SECRET,
+            host=cfg.LANGFUSE_URL
         )
         lf_handler = CallbackHandler()
         callback_handlers += [lf_handler]
 
     anonymizer = None
-    if config.USE_ANONIMIZER:
+    if cfg.USE_ANONIMIZER:
         anon_entities = [
             "RU_PERSON"
             ,"CREDIT_CARD"
@@ -182,8 +182,8 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         ]
         anonymizer = Palimpsest(verbose=False, run_entities=anon_entities)
     memory = None if use_platform_store else MemorySaver()
-    #team_llm = get_llm(config.TEAM_GPT_MODEL, temperature=1)
-    team_llm = get_llm(model = config.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
+    #team_llm = get_llm(cfg.TEAM_GPT_MODEL, temperature=1)
+    team_llm = get_llm(model = cfg.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     
     search_kb = get_search_tool()
     (lookup_term, lookup_abbreviation) = get_term_and_defition_tools()
@@ -195,8 +195,8 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
     ]
     
     yandex_tool = YandexSearchTool(
-        api_key=config.YA_API_KEY,
-        folder_id=config.YA_FOLDER_ID,
+        api_key=cfg.YA_API_KEY,
+        folder_id=cfg.YA_FOLDER_ID,
         max_results=3
     )
     
@@ -242,7 +242,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
             middleware=middleware,
             #state_schema = State, 
             checkpointer=memory, 
-            debug=config.DEBUG_WORKFLOW)
+            debug=cfg.DEBUG_WORKFLOW)
 
         def validate_answer(state: SDAccAgentState):
             queries = []
@@ -294,7 +294,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
             state_schema=SDAccAgentState,
             checkpointer=memory,
             middleware=middleware,
-            debug=config.DEBUG_WORKFLOW,
+            debug=cfg.DEBUG_WORKFLOW,
         ),
         get_validator("sd_agent"),
     )
@@ -307,7 +307,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
             state_schema=SDAccAgentState,
             checkpointer=memory,
             middleware=middleware,
-            debug=config.DEBUG_WORKFLOW,
+            debug=cfg.DEBUG_WORKFLOW,
         ),
         get_validator("sm_agent"),
     )
@@ -320,7 +320,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
             state_schema=SDAccAgentState,
             checkpointer=memory,
             middleware=middleware,
-            debug=config.DEBUG_WORKFLOW,
+            debug=cfg.DEBUG_WORKFLOW,
         ),
         get_validator("default_agent"),
     )

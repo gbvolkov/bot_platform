@@ -19,7 +19,7 @@ from ..utils import ModelType
 from platform_utils.llm_logger import JSONFileTracer
 from services.kb_manager.notifications import KBReloadContext, register_reload_listener
 
-import config
+import config as cfg
 
 from ..state.state import ConfigSchema
 from .utilities.hh_search import search_vacancies, resolve_area_id
@@ -573,8 +573,12 @@ def respond_with_jobs(state: JobAgentState, config: Optional[RunnableConfig] = N
     }
 
     formatted_jobs = format_jobs_markdown(payload)
-    if config.JOB_FIND_TRANSLATE:
-        message_content = translate_deepl(text=formatted_jobs, target_lang="EN", use_free_api=True, preserve_formatting=True)
+    if cfg.JOB_FIND_TRANSLATE:
+        try:
+            message_content = translate_deepl(text=formatted_jobs, target_lang="EN", use_free_api=True, preserve_formatting=True)
+        except Exception as exc:
+            logger.warning("Translation failed: %s", exc)
+            message_content = formatted_jobs
     else:
         message_content = formatted_jobs
 
@@ -590,15 +594,15 @@ def initialize_agent(
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]
 
-    if config.LANGFUSE_URL:
+    if cfg.LANGFUSE_URL:
         try:
             from langfuse import Langfuse
             from langfuse.langchain import CallbackHandler as LangfuseHandler
 
             langfuse = Langfuse(
-                public_key=config.LANGFUSE_PUBLIC,
-                secret_key=config.LANGFUSE_SECRET,
-                host=config.LANGFUSE_URL,
+                public_key=cfg.LANGFUSE_PUBLIC,
+                secret_key=cfg.LANGFUSE_SECRET,
+                host=cfg.LANGFUSE_URL,
             )
             callback_handlers.append(LangfuseHandler())
         except Exception as exc:  # pragma: no cover - optional dependency

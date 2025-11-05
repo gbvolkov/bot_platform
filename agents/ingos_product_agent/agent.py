@@ -4,7 +4,7 @@ import os
 from typing import List, Any
 from copy import copy
 
-import config
+import config as cfg
 
 #os.environ["LANGSMITH_HIDE_INPUTS"] = "true"
 #os.environ["LANGSMITH_HIDE_OUTPUTS"] = "true"
@@ -107,17 +107,17 @@ def initialize_agent(
     #log_handler = FileCallbackHandler(f"./logs/{log_name}")
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]
-    if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
+    if cfg.LANGFUSE_URL and len(cfg.LANGFUSE_URL) > 0:
         langfuse = Langfuse(
-            public_key=config.LANGFUSE_PUBLIC,
-            secret_key=config.LANGFUSE_SECRET,
-            host=config.LANGFUSE_URL
+            public_key=cfg.LANGFUSE_PUBLIC,
+            secret_key=cfg.LANGFUSE_SECRET,
+            host=cfg.LANGFUSE_URL
         )
         lf_handler = CallbackHandler()
         callback_handlers += [lf_handler]
 
     anonymizer = None
-    if config.USE_ANONIMIZER:
+    if cfg.USE_ANONIMIZER:
         anon_entities = [
             "RU_PERSON"
             ,"CREDIT_CARD"
@@ -132,7 +132,7 @@ def initialize_agent(
         ]
         anonymizer = Palimpsest(verbose=False, run_entities=anon_entities)
     memory = None if use_platform_store else MemorySaver()
-    team_llm = get_llm(model = config.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
+    team_llm = get_llm(model = cfg.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     
     search_kb = get_search_tool(product)
     vector_docs_path = os.getenv("INGOS_VECTOR_DOCS_PATH", "./data/docs")
@@ -272,7 +272,7 @@ def initialize_agent(
             state_schema=ProductAgentState,
             checkpointer=memory,
             middleware=middleware,
-            debug=config.DEBUG_WORKFLOW,
+            debug=cfg.DEBUG_WORKFLOW,
         ),
         get_validator("default_agent"),
     )
