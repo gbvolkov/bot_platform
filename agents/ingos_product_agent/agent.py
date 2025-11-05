@@ -105,7 +105,7 @@ def initialize_agent(
 ):
     # The checkpointer lets the graph persist its state
     # this is a complete memory for the entire graph.
-    print("ProductAgent initialization started...")
+    print(f"ProductAgent initialization started for {product}...")
     log_name = f"sd_ass_{time.strftime("%Y%m%d%H%M")}"
     #log_handler = FileCallbackHandler(f"./logs/{log_name}")
     json_handler = JSONFileTracer(f"./logs/{log_name}")

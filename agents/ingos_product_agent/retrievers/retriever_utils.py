@@ -105,9 +105,15 @@ def get_retriever_faiss(product: str = "default"):
         return result
     return search
 
+
+@lru_cache(maxsize=64)
+def get_chroma_vectore_store(docs_path: str = "./data/docs", vector_store_path: str = "./data/vector_store")-> VectorStore:
+    return VectorStore(docs_path=docs_path, vector_store_path=vector_store_path)
+
+
 def get_retriever(product: str = "default"):
     MAX_RETRIEVALS = 3
-    retriever  = VectorStore(docs_path="./data/docs", vector_store_path="./data/vector_store")
+    retriever  = get_chroma_vectore_store(docs_path="./data/docs", vector_store_path="./data/vector_store")
     product = product
     def search(query: str) -> List[Document]:
         try:
