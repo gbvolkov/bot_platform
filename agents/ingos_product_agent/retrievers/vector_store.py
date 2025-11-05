@@ -67,7 +67,7 @@ class VectorStore:
         # Сохранение копий исходных документов
         self.save_normalized_docs = str(os.getenv("SAVE_NORMALIZED_DOCS", "false")).lower() in ("1", "true", "yes")
         self.save_only_changed = str(os.getenv("SAVE_ONLY_CHANGED", "true")).lower() in ("1", "true", "yes")
-        normalized_root = os.getenv("NORMALIZED_OUTPUT_DIR", "/app/data/normalized")
+        normalized_root = os.getenv("NORMALIZED_OUTPUT_DIR", "./data/normalized")
         self.normalized_base_dir = os.path.abspath(normalized_root)
         self.normalized_output_dir = self._resolve_normalized_output_dir()
         self.include_normalized_docs = str(
