@@ -43,7 +43,7 @@ def getFAISSIndex(file_path: str)-> FAISS:
     global _faiss_indexes
     index = _faiss_indexes.get(file_path, None)
     if index is None:
-        logging.info("loading index FAISS {file_path}")
+        logging.info(f"loading index FAISS {file_path}")
         index = FAISS.load_local(file_path, getEmbeddingModel(), allow_dangerous_deserialization=True)
         _faiss_indexes[file_path] = index
     return index
