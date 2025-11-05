@@ -67,6 +67,7 @@ class VacancyEmbeddingReranker:
         cross_encoder_pool_size: Optional[int] = None,
         cross_encoder_weight: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
+        logging.info(f"Reranking {len(vacancies)} vacancies...")
         if not vacancies:
             return []
         try:
@@ -99,12 +100,15 @@ class VacancyEmbeddingReranker:
 
             reranker_scores: Dict[int, float] = {}
             reranker_scores_norm: Dict[int, float] = {}
+            logging.info(f"..rerenking prepared...")
 
             if apply_ce:
+                logging.info(f"..looking for cross encoder...")
                 reranker = self._get_reranker_model()
                 if reranker is None:
                     logger.warning("Cross encoder reranker requested but could not be loaded.")
                 else:
+                    logging.info(f"..applying cross encoder...")
                     candidate_count = len(documents) if pool_size is None else min(pool_size, len(documents))
                     ranked_indices = sorted(
                         range(len(embedding_scores)),
@@ -136,7 +140,7 @@ class VacancyEmbeddingReranker:
                                 idx: float(norm)
                                 for idx, norm in zip(reranker_scores.keys(), norm_values)
                             }
-
+            logging.info(f"..applying scores...")
             final_scores = embedding_scores_norm.copy()
             if reranker_scores:
                 if blend_weight is None:
@@ -150,6 +154,7 @@ class VacancyEmbeddingReranker:
                         )
 
             ranked: List[Dict[str, Any]] = []
+            logging.info(f"..sorting...")
             for idx, vacancy in enumerate(vacancies):
                 item = dict(vacancy)
                 item["embedding_score"] = round(float(embedding_scores[idx]), 4)
@@ -169,7 +174,7 @@ class VacancyEmbeddingReranker:
                 ranked = ranked[:limit]
         except Exception as exc:
             logger.warning("Error reranking with embeddings: %s", exc)
-            ranked = []
+            raise exc
 
         return ranked
 

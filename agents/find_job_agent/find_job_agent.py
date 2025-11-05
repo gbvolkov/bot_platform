@@ -251,7 +251,7 @@ def hh_search_vacancies(
 
     if not vacancies:
         return []
-
+    logging.info("Start reranking")
     reranked = _rerank_vacancies(vacancies, features, resume_text)
     return reranked[:max_results] if max_results else reranked
 
