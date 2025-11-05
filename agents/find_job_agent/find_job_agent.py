@@ -318,6 +318,7 @@ def build_job_lookup_node(fetch_jobs_fn):
     def job_lookup(state: JobAgentState, config: Optional[RunnableConfig] = None) -> JobAgentState:
         logging.info("Looking for jobs...")
         features = state.get("extracted_features") or {}
+        logging.info(f"Looking for jobs... {features}")
         resume_text = state.get("resume_text", "")
         if not features:
             return {"job_candidates": []}
