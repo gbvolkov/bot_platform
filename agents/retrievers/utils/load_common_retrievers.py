@@ -2,7 +2,7 @@ import logging
 
 from typing import List, Any, Optional, Dict, Tuple, TypedDict, Annotated
 import os, torch, pickle
-
+from functools import lru_cache
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
@@ -39,6 +39,7 @@ _faiss_indexes = {}
 _multi_retrievers = {}
 
 
+@lru_cache(maxsize=64)
 def getFAISSIndex(file_path: str)-> FAISS:
     global _faiss_indexes
     index = _faiss_indexes.get(file_path, None)
@@ -48,11 +49,13 @@ def getFAISSIndex(file_path: str)-> FAISS:
         _faiss_indexes[file_path] = index
     return index
 
+@lru_cache(maxsize=64)
 def load_vectorstore(file_path: str) -> FAISS:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"No vectorstore found at {file_path}")
     return getFAISSIndex(file_path)
 
+@lru_cache(maxsize=64)
 def buildEnsembleRetriever(index_paths: list[str], search_kwargs: dict, weights: list[float])-> EnsembleRetriever:
     base_retrievers = []
     for index_path in index_paths:
@@ -62,6 +65,7 @@ def buildEnsembleRetriever(index_paths: list[str], search_kwargs: dict, weights:
         weights=weights  # adjust to favor text vs. images
     )
 
+@lru_cache(maxsize=64)
 def buildMultiRetriever(index_paths: list[str], search_kwargs: dict, weights: list[float])-> ContextualCompressionRetriever:
     global _multi_retrievers
     paths_str = ";".join(index_paths)
