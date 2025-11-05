@@ -316,6 +316,7 @@ def build_feature_node(extractor_llm):
 
 def build_job_lookup_node(fetch_jobs_fn):
     def job_lookup(state: JobAgentState, config: Optional[RunnableConfig] = None) -> JobAgentState:
+        logging.info("Looking for jobs...")
         features = state.get("extracted_features") or {}
         resume_text = state.get("resume_text", "")
         if not features:
@@ -325,6 +326,7 @@ def build_job_lookup_node(fetch_jobs_fn):
         except Exception as exc:  # pragma: no cover - defensive
             logging.error("job_lookup: hh search failed: %s", exc)
             job_list = []
+        logging.info(f"...jobs retrieved {len(job_list)}")
         return {"job_candidates": job_list}
 
     return job_lookup
