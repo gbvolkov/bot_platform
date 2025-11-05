@@ -27,6 +27,7 @@ from .utilities.hh_search import search_vacancies, resolve_area_id
 #USE_SEMANTIC_SCORE = True
 from .scorers.semantic_job_scorer import semantic_score_job, SemanticScoreWeights
 
+from utils.translate import translate_deepl
 
 from .utilities.feature_extractor import extract_features_from_resume
 
@@ -571,7 +572,11 @@ def respond_with_jobs(state: JobAgentState, config: Optional[RunnableConfig] = N
         ],
     }
 
-    message_content = format_jobs_markdown(payload)
+    formatted_jobs = format_jobs_markdown(payload)
+    if config.JOB_FIND_TRANSLATE:
+        message_content = translate_deepl(text=formatted_jobs, target_lang="EN", use_free_api=True, preserve_formatting=True)
+    else:
+        message_content = formatted_jobs
 
     return {"messages": [AIMessage(content=message_content)]}
 

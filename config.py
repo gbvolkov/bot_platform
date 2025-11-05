@@ -140,3 +140,6 @@ WEBCHAT_ALLOWED_FILE_TYPES = _split_env_list(os.environ.get("WEBCHAT_ALLOWED_FIL
 WEBCHAT_ALLOWED_FILE_EXTENSIONS = _split_env_list(os.environ.get("WEBCHAT_ALLOWED_FILE_EXTENSIONS")) or _WEBCHAT_DEFAULT_EXTENSIONS
 
 INGOS_RETRIEVER=os.environ.get('INGOS_RETRIEVER', "faiss")
+
+DEEPL_API_KEY=os.environ.get('DEEPL_API_KEY')
+JOB_FIND_TRANSLATE=os.environ.get('JOB_FIND_TRANSLATE', "False").lower() == 'true'
