@@ -122,7 +122,7 @@ class VacancyEmbeddingReranker:
                     ]
 
                     if not pairs:
-                        logger.debug("No candidate pairs for cross encoder reranking.")
+                        logger.info("No candidate pairs for cross encoder reranking.")
                     else:
                         try:
                             raw_scores = reranker.score(pairs)
