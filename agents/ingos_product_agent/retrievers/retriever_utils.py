@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, List, Any, Optional, Dict, Tuple, TypedDict, Annotated
 import os, torch, pickle
 from functools import lru_cache
+import threading
 
 import config
 
@@ -106,9 +107,39 @@ def get_retriever_faiss(product: str = "default"):
     return search
 
 
+_vector_store_instances: Dict[Tuple[str, str], VectorStore] = {}
+_vector_store_locks: Dict[Tuple[str, str], threading.Lock] = {}
+
+
+def _vector_store_key(docs_path: str, vector_store_path: str) -> Tuple[str, str]:
+    return (os.path.abspath(docs_path), os.path.abspath(vector_store_path))
+
+
+def _get_vector_store_lock(key: Tuple[str, str]) -> threading.Lock:
+    lock = _vector_store_locks.get(key)
+    if lock is not None:
+        return lock
+    new_lock = threading.Lock()
+    existing = _vector_store_locks.setdefault(key, new_lock)
+    return existing
+
+
 @lru_cache(maxsize=64)
-def get_chroma_vectore_store(docs_path: str = "./data/docs", vector_store_path: str = "./data/vector_store")-> VectorStore:
-    return VectorStore(docs_path=docs_path, vector_store_path=vector_store_path)
+def get_chroma_vectore_store(
+    docs_path: str = "./data/docs",
+    vector_store_path: str = "./data/vector_store",
+) -> VectorStore:
+    key = _vector_store_key(docs_path, vector_store_path)
+    instance = _vector_store_instances.get(key)
+    if instance is not None:
+        return instance
+    lock = _get_vector_store_lock(key)
+    with lock:
+        instance = _vector_store_instances.get(key)
+        if instance is None:
+            instance = VectorStore(docs_path=docs_path, vector_store_path=vector_store_path)
+            _vector_store_instances[key] = instance
+        return instance
 
 
 def get_retriever(product: str = "default"):
