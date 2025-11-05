@@ -176,6 +176,7 @@ class VacancyEmbeddingReranker:
             logger.warning("Error reranking with embeddings: %s", exc)
             raise exc
 
+        logging.info(f"...reranked {len(ranked)}")
         return ranked
 
     def _get_reranker_model(self) -> Optional[HuggingFaceCrossEncoder]:
