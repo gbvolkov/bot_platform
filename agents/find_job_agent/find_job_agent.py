@@ -393,7 +393,7 @@ def score_job(job: Dict[str, Any], resume_tokens: List[str], features: Dict[str,
 
 
 def rank_jobs(state: JobAgentState, config: Optional[RunnableConfig] = None) -> JobAgentState:
-    logging.info("Ranking jobs")
+    logging.info("Ranking jobs...")
 
     jobs = state.get("job_candidates") or []
     resume_text = state.get("resume_text", "")
@@ -406,7 +406,7 @@ def rank_jobs(state: JobAgentState, config: Optional[RunnableConfig] = None) -> 
         ranked.append({**job, "rank_score": job_score})
 
     ranked.sort(key=lambda item: item["rank_score"], reverse=True)
-    logging.info("Jobs ranked")
+    logging.info("...jobs ranked")
     return {"ranked_jobs": ranked[:5]}
 
 
