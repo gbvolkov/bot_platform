@@ -42,7 +42,7 @@ from ..utils import create_tool_node_with_fallback, show_graph, _print_event, _p
 from ..user_info import user_info
 from ..utils import ModelType
 from ..llm_utils import get_llm
-from .retrievers.retriever_utils import get_search_tool, reload_retrievers as reload_product_retrievers
+from .retrievers.retriever_utils import get_search_tool, reload_retrievers as reload_product_retrievers, get_chroma_vectore_store
 from .retrievers.vector_store import VectorStore
 
 from palimpsest import Palimpsest
@@ -140,7 +140,7 @@ def initialize_agent(
     search_kb = get_search_tool(product)
     vector_docs_path = os.getenv("INGOS_VECTOR_DOCS_PATH", "./data/docs")
     vector_store_path = os.getenv("INGOS_VECTOR_STORE_PATH", "./data/vector_store")
-    vector_store = VectorStore(docs_path=vector_docs_path, vector_store_path=vector_store_path)
+    vector_store = get_chroma_vectore_store(docs_path=vector_docs_path, vector_store_path=vector_store_path)
     search_tools = [
         search_kb,
     ]
