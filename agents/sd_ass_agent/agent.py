@@ -53,6 +53,11 @@ from palimpsest import Palimpsest
 
 import logging
 
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
+
 from .prompts.prompts import (
     default_prompt, 
     sm_prompt, 
@@ -365,7 +370,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
         reload_sd_retrievers(context)
     register_reload_listener(agent_key, _handle_kb_reload)
 
-    print("SDAgent initialized")
+    logging.info("SDAgent initialized")
     return agent 
 
 

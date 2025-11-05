@@ -48,6 +48,9 @@ from .retrievers.vector_store import VectorStore
 from palimpsest import Palimpsest
 
 import logging
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 from .prompts.prompts import (
     product_prompt)

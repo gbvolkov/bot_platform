@@ -31,7 +31,10 @@ from utils.translate import translate_deepl
 
 from .utilities.feature_extractor import extract_features_from_resume
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+#logger = logging.getLogger(__name__)
 
 
 class JobAgentState(TypedDict, total=False):
@@ -129,7 +132,7 @@ def _resolve_area_ids(locations: List[str]) -> Dict[str, Optional[str]]:
         try:
             resolved[location] = resolve_area_id(location)
         except Exception as exc:  # pragma: no cover - network or API errors
-            logger.warning("job_lookup: failed to resolve hh.ru area '%s': %s", location, exc)
+            logging.warning("job_lookup: failed to resolve hh.ru area '%s': %s", location, exc)
             resolved[location] = None
     return resolved
 
@@ -228,7 +231,7 @@ def hh_search_vacancies(
                 per_page=per_page,
             )
         except Exception as exc:  # pragma: no cover - network or API errors
-            logger.warning(
+            logging.warning(
                 "job_lookup: hh.ru search failed for '%s'/'%s': %s", query_text, location or "-", exc
             )
             continue
@@ -320,7 +323,7 @@ def build_job_lookup_node(fetch_jobs_fn):
         try:
             job_list = fetch_jobs_fn(features, resume_text)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("job_lookup: hh search failed: %s", exc)
+            logging.error("job_lookup: hh search failed: %s", exc)
             job_list = []
         return {"job_candidates": job_list}
 
@@ -390,6 +393,8 @@ def score_job(job: Dict[str, Any], resume_tokens: List[str], features: Dict[str,
 
 
 def rank_jobs(state: JobAgentState, config: Optional[RunnableConfig] = None) -> JobAgentState:
+    logging.info("Ranking jobs")
+
     jobs = state.get("job_candidates") or []
     resume_text = state.get("resume_text", "")
     features = state.get("extracted_features") or {}
@@ -401,6 +406,7 @@ def rank_jobs(state: JobAgentState, config: Optional[RunnableConfig] = None) -> 
         ranked.append({**job, "rank_score": job_score})
 
     ranked.sort(key=lambda item: item["rank_score"], reverse=True)
+    logging.info("Jobs ranked")
     return {"ranked_jobs": ranked[:5]}
 
 
@@ -577,7 +583,7 @@ def respond_with_jobs(state: JobAgentState, config: Optional[RunnableConfig] = N
         try:
             message_content = translate_deepl(text=formatted_jobs, target_lang="EN", use_free_api=True, preserve_formatting=True)
         except Exception as exc:
-            logger.warning("Translation failed: %s", exc)
+            logging.warning("Translation failed: %s", exc)
             message_content = formatted_jobs
     else:
         message_content = formatted_jobs
@@ -606,7 +612,7 @@ def initialize_agent(
             )
             callback_handlers.append(LangfuseHandler())
         except Exception as exc:  # pragma: no cover - optional dependency
-            logger.warning("Langfuse initialisation failed: %s", exc)
+            logging.warning("Langfuse initialisation failed: %s", exc)
 
     provider_name = provider.value if isinstance(provider, ModelType) else str(provider)
     extractor_llm = get_llm(model="nano", provider=provider_name, temperature=0)
@@ -641,7 +647,7 @@ def initialize_agent(
 
     agent_key = "find_job"
     def _handle_kb_reload(context: KBReloadContext) -> None:
-        logger.info(
+        logging.info(
             "KB reload requested for %s (reason=%s); no KB-backed retrievers configured yet.",
             agent_key,
             context.reason,

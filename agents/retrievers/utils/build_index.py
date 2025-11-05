@@ -4,6 +4,9 @@ import os
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 import logging
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 import config
 
