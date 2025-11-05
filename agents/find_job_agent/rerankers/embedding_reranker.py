@@ -124,17 +124,20 @@ class VacancyEmbeddingReranker:
                     if not pairs:
                         logger.info("No candidate pairs for cross encoder reranking.")
                     else:
+                        logging.info(f"..scoring...")
                         try:
                             raw_scores = reranker.score(pairs)
                         except Exception as exc:  # pragma: no cover - runtime model issues
                             logger.warning("Cross encoder scoring failed: %s", exc)
                             raw_scores = []
 
+                        logging.info(f"..scoring complete...")
                         scores_list = self._to_float_list(raw_scores)
                         reranker_scores = {
                             idx: score for idx, score in zip(candidate_indices, scores_list)
                         }
                         if reranker_scores:
+                            logging.info(f"..normalizing...")
                             norm_values = _normalize_array(np.array(list(reranker_scores.values()), dtype=np.float32))
                             reranker_scores_norm = {
                                 idx: float(norm)

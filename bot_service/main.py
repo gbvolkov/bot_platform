@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .api import router as api_router
+from .agent_registry import agent_registry
 from .config import settings
 from .db import init_models
 
@@ -12,6 +13,7 @@ from .db import init_models
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_models()
+    agent_registry.preload_all()
     yield
 
 
@@ -31,4 +33,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

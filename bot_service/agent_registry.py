@@ -194,5 +194,15 @@ class AgentRegistry:
             raise KeyError(f"Unknown agent '{agent_id}'")
         return self._definitions[agent_id].supported_content_types
 
+    def preload_all(self) -> None:
+        for agent_id in self._definitions:
+            if agent_id in self._instances:
+                continue
+            if agent_id in self._init_tasks:
+                continue
+            if agent_id in self._init_errors:
+                self._init_errors.pop(agent_id, None)
+            self._start_initialization(agent_id)
+
 
 agent_registry = AgentRegistry()
