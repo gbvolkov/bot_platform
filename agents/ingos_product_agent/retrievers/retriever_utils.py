@@ -45,7 +45,7 @@ def buildFAISSRetriever(product: str = "default")-> ContextualCompressionRetriev
     #global _faiss_reranker_retriever
     _faiss_reranker_retriever: Optional[TournamentCrossEncoderReranker] = None
     if _faiss_reranker_retriever is None:
-        logging.info("loading FAISSRetriever reranked")
+        logging.info(f"loading FAISSRetriever reranked for produce {product}")
         vector_store_path = config.PRODUCT_INDEX_FOLDER
         vectorstore = load_vectorstore(vector_store_path)
 

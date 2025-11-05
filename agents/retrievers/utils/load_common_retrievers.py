@@ -3,6 +3,7 @@ import logging
 from typing import List, Any, Optional, Dict, Tuple, TypedDict, Annotated
 import os, torch, pickle
 from functools import lru_cache
+import threading
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
@@ -35,19 +36,34 @@ _teamly_retriever_glossary_instance : Optional[TeamlyRetriever_Glossary] = None
 _teamly_reranker_retriever: Optional[TeamlyContextualCompressionRetriever] = None
 _faiss_reranker_retriever: Optional[TournamentCrossEncoderReranker] = None
 
-_faiss_indexes = {}
+_faiss_indexes: Dict[str, FAISS] = {}
+_faiss_index_locks: Dict[str, threading.Lock] = {}
 _multi_retrievers = {}
+
+
+def _get_faiss_lock(file_path: str) -> threading.Lock:
+    lock = _faiss_index_locks.get(file_path)
+    if lock is not None:
+        return lock
+    new_lock = threading.Lock()
+    existing = _faiss_index_locks.setdefault(file_path, new_lock)
+    return existing
 
 
 @lru_cache(maxsize=64)
 def getFAISSIndex(file_path: str)-> FAISS:
     global _faiss_indexes
     index = _faiss_indexes.get(file_path, None)
-    if index is None:
-        logging.info(f"loading index FAISS {file_path}")
-        index = FAISS.load_local(file_path, getEmbeddingModel(), allow_dangerous_deserialization=True)
-        _faiss_indexes[file_path] = index
-    return index
+    if index is not None:
+        return index
+    lock = _get_faiss_lock(file_path)
+    with lock:
+        index = _faiss_indexes.get(file_path, None)
+        if index is None:
+            logging.info(f"loading index FAISS {file_path}")
+            index = FAISS.load_local(file_path, getEmbeddingModel(), allow_dangerous_deserialization=True)
+            _faiss_indexes[file_path] = index
+        return index
 
 @lru_cache(maxsize=64)
 def load_vectorstore(file_path: str) -> FAISS:
@@ -150,7 +166,7 @@ def buildTeamlyRetriever()-> TeamlyContextualCompressionRetriever:
 def buildFAISSRetriever()-> ContextualCompressionRetriever:
     global _faiss_reranker_retriever
     if _faiss_reranker_retriever is None:
-        logging.info("loading FAISSRetriever reranked")
+        logging.info("loading FAISSRetriever reranked. No product")
         vector_store_path = config.ASSISTANT_INDEX_FOLDER
         vectorstore = load_vectorstore(vector_store_path)
 

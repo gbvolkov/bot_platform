@@ -308,7 +308,7 @@ def initialize_agent(
         reload_product_retrievers(context)
     register_reload_listener(agent_key, _handle_kb_reload)
 
-    print("ProductAgent initialized")
+    print(f"ProductAgent initialized for {product}")
     return agent 
 
 
