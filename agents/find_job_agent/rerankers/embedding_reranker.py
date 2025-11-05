@@ -69,104 +69,107 @@ class VacancyEmbeddingReranker:
     ) -> List[Dict[str, Any]]:
         if not vacancies:
             return []
+        try:
+            opts = options or EmbeddingRerankOptions()
+            limit = top_k if top_k is not None else opts.top_k
+            apply_ce = use_cross_encoder if use_cross_encoder is not None else opts.use_cross_encoder
+            pool_size = cross_encoder_pool_size if cross_encoder_pool_size is not None else opts.cross_encoder_pool_size
+            blend_weight = cross_encoder_weight if cross_encoder_weight is not None else opts.cross_encoder_weight
 
-        opts = options or EmbeddingRerankOptions()
-        limit = top_k if top_k is not None else opts.top_k
-        apply_ce = use_cross_encoder if use_cross_encoder is not None else opts.use_cross_encoder
-        pool_size = cross_encoder_pool_size if cross_encoder_pool_size is not None else opts.cross_encoder_pool_size
-        blend_weight = cross_encoder_weight if cross_encoder_weight is not None else opts.cross_encoder_weight
+            if blend_weight is not None and not 0.0 <= blend_weight <= 1.0:
+                raise ValueError("cross_encoder_weight must be between 0 and 1")
 
-        if blend_weight is not None and not 0.0 <= blend_weight <= 1.0:
-            raise ValueError("cross_encoder_weight must be between 0 and 1")
+            documents = [self._vacancy_to_document(vacancy) for vacancy in vacancies]
+            query_text = self._compose_query(resume_text, features or {})
 
-        documents = [self._vacancy_to_document(vacancy) for vacancy in vacancies]
-        query_text = self._compose_query(resume_text, features or {})
+            query_vector = np.array(
+                self._embedding_model.embed_query(self._format_query_text(query_text)),
+                dtype=np.float32,
+            )
+            document_embeddings = self._embedding_model.embed_documents(
+                [self._format_passage_text(doc.page_content) for doc in documents]
+            )
+            embedding_scores = [
+                float(np.dot(query_vector, np.array(doc_vec, dtype=np.float32)))
+                for doc_vec in document_embeddings
+            ]
 
-        query_vector = np.array(
-            self._embedding_model.embed_query(self._format_query_text(query_text)),
-            dtype=np.float32,
-        )
-        document_embeddings = self._embedding_model.embed_documents(
-            [self._format_passage_text(doc.page_content) for doc in documents]
-        )
-        embedding_scores = [
-            float(np.dot(query_vector, np.array(doc_vec, dtype=np.float32)))
-            for doc_vec in document_embeddings
-        ]
+            embedding_scores_array = np.array(embedding_scores, dtype=np.float32)
+            embedding_scores_norm = _normalize_array(embedding_scores_array)
 
-        embedding_scores_array = np.array(embedding_scores, dtype=np.float32)
-        embedding_scores_norm = _normalize_array(embedding_scores_array)
+            reranker_scores: Dict[int, float] = {}
+            reranker_scores_norm: Dict[int, float] = {}
 
-        reranker_scores: Dict[int, float] = {}
-        reranker_scores_norm: Dict[int, float] = {}
-
-        if apply_ce:
-            reranker = self._get_reranker_model()
-            if reranker is None:
-                logger.warning("Cross encoder reranker requested but could not be loaded.")
-            else:
-                candidate_count = len(documents) if pool_size is None else min(pool_size, len(documents))
-                ranked_indices = sorted(
-                    range(len(embedding_scores)),
-                    key=lambda idx: embedding_scores[idx],
-                    reverse=True,
-                )
-                candidate_indices = ranked_indices[:candidate_count]
-                pairs = [
-                    (query_text, documents[idx].page_content)
-                    for idx in candidate_indices
-                ]
-
-                if not pairs:
-                    logger.debug("No candidate pairs for cross encoder reranking.")
+            if apply_ce:
+                reranker = self._get_reranker_model()
+                if reranker is None:
+                    logger.warning("Cross encoder reranker requested but could not be loaded.")
                 else:
-                    try:
-                        raw_scores = reranker.score(pairs)
-                    except Exception as exc:  # pragma: no cover - runtime model issues
-                        logger.warning("Cross encoder scoring failed: %s", exc)
-                        raw_scores = []
-
-                    scores_list = self._to_float_list(raw_scores)
-                    reranker_scores = {
-                        idx: score for idx, score in zip(candidate_indices, scores_list)
-                    }
-                    if reranker_scores:
-                        norm_values = _normalize_array(np.array(list(reranker_scores.values()), dtype=np.float32))
-                        reranker_scores_norm = {
-                            idx: float(norm)
-                            for idx, norm in zip(reranker_scores.keys(), norm_values)
-                        }
-
-        final_scores = embedding_scores_norm.copy()
-        if reranker_scores:
-            if blend_weight is None:
-                for idx, score in reranker_scores.items():
-                    final_scores[idx] = float(score)
-            else:
-                for idx, norm_score in reranker_scores_norm.items():
-                    final_scores[idx] = (
-                        blend_weight * norm_score
-                        + (1.0 - blend_weight) * float(embedding_scores_norm[idx])
+                    candidate_count = len(documents) if pool_size is None else min(pool_size, len(documents))
+                    ranked_indices = sorted(
+                        range(len(embedding_scores)),
+                        key=lambda idx: embedding_scores[idx],
+                        reverse=True,
                     )
+                    candidate_indices = ranked_indices[:candidate_count]
+                    pairs = [
+                        (query_text, documents[idx].page_content)
+                        for idx in candidate_indices
+                    ]
 
-        ranked: List[Dict[str, Any]] = []
-        for idx, vacancy in enumerate(vacancies):
-            item = dict(vacancy)
-            item["embedding_score"] = round(float(embedding_scores[idx]), 4)
-            item["embedding_score_norm"] = round(float(embedding_scores_norm[idx]), 4)
-            if idx in reranker_scores:
-                item["reranker_score"] = round(float(reranker_scores[idx]), 4)
-                item["reranker_score_norm"] = round(
-                    float(reranker_scores_norm.get(idx, 0.0)), 4
-                )
-            item["final_rank_score"] = round(float(final_scores[idx]), 4)
-            ranked.append(item)
+                    if not pairs:
+                        logger.debug("No candidate pairs for cross encoder reranking.")
+                    else:
+                        try:
+                            raw_scores = reranker.score(pairs)
+                        except Exception as exc:  # pragma: no cover - runtime model issues
+                            logger.warning("Cross encoder scoring failed: %s", exc)
+                            raw_scores = []
 
-        ranked.sort(key=lambda entry: entry["final_rank_score"], reverse=True)
-        #ranked.sort(key=lambda entry: entry["reranker_score"], reverse=True)
+                        scores_list = self._to_float_list(raw_scores)
+                        reranker_scores = {
+                            idx: score for idx, score in zip(candidate_indices, scores_list)
+                        }
+                        if reranker_scores:
+                            norm_values = _normalize_array(np.array(list(reranker_scores.values()), dtype=np.float32))
+                            reranker_scores_norm = {
+                                idx: float(norm)
+                                for idx, norm in zip(reranker_scores.keys(), norm_values)
+                            }
 
-        if limit is not None:
-            ranked = ranked[:limit]
+            final_scores = embedding_scores_norm.copy()
+            if reranker_scores:
+                if blend_weight is None:
+                    for idx, score in reranker_scores.items():
+                        final_scores[idx] = float(score)
+                else:
+                    for idx, norm_score in reranker_scores_norm.items():
+                        final_scores[idx] = (
+                            blend_weight * norm_score
+                            + (1.0 - blend_weight) * float(embedding_scores_norm[idx])
+                        )
+
+            ranked: List[Dict[str, Any]] = []
+            for idx, vacancy in enumerate(vacancies):
+                item = dict(vacancy)
+                item["embedding_score"] = round(float(embedding_scores[idx]), 4)
+                item["embedding_score_norm"] = round(float(embedding_scores_norm[idx]), 4)
+                if idx in reranker_scores:
+                    item["reranker_score"] = round(float(reranker_scores[idx]), 4)
+                    item["reranker_score_norm"] = round(
+                        float(reranker_scores_norm.get(idx, 0.0)), 4
+                    )
+                item["final_rank_score"] = round(float(final_scores[idx]), 4)
+                ranked.append(item)
+
+            ranked.sort(key=lambda entry: entry["final_rank_score"], reverse=True)
+            #ranked.sort(key=lambda entry: entry["reranker_score"], reverse=True)
+
+            if limit is not None:
+                ranked = ranked[:limit]
+        except Exception as exc:
+            logger.warning("Error reranking with embeddings: %s", exc)
+            ranked = []
 
         return ranked
 
