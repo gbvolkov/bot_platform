@@ -258,13 +258,13 @@ def respond_with_report(state: BiAgentState, config: Optional[RunnableConfig] = 
         if state.get("graphic_type"):
             image_part["graphic_type"] = state["graphic_type"]
         parts.append(image_part)
-    elif state.get("graphic_type"):
-        parts.append(
-            {
-                "type": "text",
-                "text": f"Рекомендованный тип графика: {state['graphic_type']}",
-            }
-        )
+    #elif state.get("graphic_type"):
+        #parts.append(
+        #    {
+        #        "type": "text",
+        #        "text": f"Рекомендованный тип графика: {state['graphic_type']}",
+        #    }
+        #)
 
     return {"messages": [AIMessage(content=parts)]}
 

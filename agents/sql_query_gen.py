@@ -25,9 +25,12 @@ from langgraph.graph import END, StateGraph
 import duckdb_engine 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import math
 from pandas.api.types import is_datetime64_any_dtype
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 UNIVERSAL_SYSTEM_MESSAGE_LIMITED = """
 Given an input question, create a syntactically correct {dialect} query to

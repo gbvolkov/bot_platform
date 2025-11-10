@@ -224,8 +224,8 @@ async def main() -> None:
         )
 
         onboarding_text = (
-            "Hi! I am the BI agent.\n"
-            "Send me a question about the dataset and I will prepare a short answer, table and chart."
+            "Привет! Я интеллектуальный помощник в бизнес-аналитике.\n"
+            "Я могу отвечать на вопросы о предоставленных данных."
         )
         placeholder = await message.reply("Preparing welcome message...", parse_mode=None)
         typing_task = await start_show_typing(bot, chat_id, ChatAction.TYPING)
