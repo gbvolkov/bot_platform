@@ -19,6 +19,7 @@ PASSWORD = os.environ.get('IL_PWD')
 LOCAL_MODEL_NAME='/models/Meta-Llama-3.1-8B-Instruct-Q8_0'
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_ASSISTANT_BOT_TOKEN')
+TELEGRAM_BI_BOT_TOKEN = os.environ.get('TELEGRAM_BI_BOT_TOKEN')
 #EMBEDDING_MODEL='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
 
 #EMBEDDING_MODEL='sentence-transformers/distiluse-base-multilingual-cased-v1'

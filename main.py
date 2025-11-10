@@ -1,7 +1,7 @@
 from typing import Annotated, Optional
 from typing_extensions import TypedDict
 
-from agents.ingos_product_agent.agent import initialize_agent
+from agents.bi_agent.bi_agent import initialize_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -19,9 +19,9 @@ def get_config():
     return RunnableConfig(ConfigSchema({"user_id": 100, "user_role": "default", "model": "openai", "thread_id": 110}))
 
 def main():
-    query = "Чем привлекателен ваш сервис?"
+    query = "Верни самые популярные страны."
     payload_msg = HumanMessage(content=[{"type": "text", "text": query}])
-    agent = initialize_agent(product="Personal")  
+    agent = initialize_agent(notify_on_reload=False)  
     result = agent.invoke({"messages": [payload_msg]}, config=get_config(), stream_mode="values")
 
 

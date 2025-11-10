@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "duckduckgo-search==8.1.1",
+    "duckdb",
+    "duckdb-engine",
     "fastapi==0.120.0",
     "google-api-python-client==2.185.0",
     "langchain>=1.0.2",
@@ -23,8 +25,8 @@ dependencies = [
     "palimpsest>=0.0.2",
     "pandas==2.3.3",
     "protobuf==6.33.0",
-    "pydantic==2.12.3",
-    "pydantic-settings==2.11.0",
+    "pydantic>=2.9.2",
+    "pydantic-settings>=2.11.0",
     "pymorphy2==0.9.1",
     "python-dotenv==1.1.1",
     "rank-llm>=0.21.0",
@@ -50,6 +52,10 @@ dependencies = [
     "audioop-lts>=0.2.2",
     "unstructured[docx,image,md,pptx,xlsx]>=0.18.15",
     "redis",
+    "matplotlib",
+    "openpyxl",
+    "aiogram>=3.4",
+    "openai-whisper",
 ]
 
 [tool.uv.sources]
