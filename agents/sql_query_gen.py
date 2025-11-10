@@ -412,6 +412,7 @@ def generate_answer(question: str, query: str, result: list)-> dict:
         "- If results are empty, say there are no matching records.\n"
         "- Otherwise, summarize relevant information clearly and list key rows/fields the user asked for.\n"
         "- Do not include internal/technical columns unless the user asked for them.\n"
+        "- Always answer in Russian, except measure_columns, label_columns and visual_recommendations.\n"
         "- Provide visualization guidance by specifying:\n"
         "  * measure_columns: ordered numeric columns suitable for metrics (y-axis values).\n"
         "  * label_columns: ordered categorical/context columns (first item will be used as x-axis; remaining entries annotate data points).\n"
