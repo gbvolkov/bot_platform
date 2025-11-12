@@ -571,6 +571,7 @@ def create_visualization_image(
 
 def get_response(question: str, data_paths: List[str])-> dict:
     db = build_sql_database_from_csvs(["data/data.csv"])
+    notes = ""
     query = write_query(question, db)
     for attempt in range(3):
         result = execute_query(query, db)
@@ -583,6 +584,10 @@ def get_response(question: str, data_paths: List[str])-> dict:
     top_k = 30
     db_result = result.get("result", [])
     df = coerce_rows(db_result)
+    row_count = len(df)
+    if row_count > top_k:
+        notes = f"Only showing top {top_k} rows of {row_count}."
+
     export_path = _export_dataframe(df, f"data/data_{uuid4().hex}.xlsx")
     top_rows = df.head(top_k)
     answer = generate_answer(
@@ -611,7 +616,8 @@ def get_response(question: str, data_paths: List[str])-> dict:
         "answer": answer.get('answer', ''),
         "data": export_path,
         "image": image_path,
-        "graph_type": answer.get('visual_recommendations', '')
+        "graph_type": answer.get('visual_recommendations', ''),
+        "notes": notes
     }
 
 if __name__ == "__main__": 

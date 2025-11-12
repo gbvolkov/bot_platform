@@ -52,6 +52,7 @@ class BiAgentState(TypedDict, total=False):
     data_attachment: Optional[TabularAttachment]
     image_attachment: Optional[ImageAttachment]
     graphic_type: Optional[GraphicType]
+    notes: str
 
 
 DEFAULT_DATA_SOURCES = [str(Path("data") / "data.csv")]
@@ -215,25 +216,31 @@ def generate_report(state: BiAgentState, config: Optional[RunnableConfig] = None
             "data_attachment": None,
             "image_attachment": None,
             "graphic_type": None,
+            "notes": exc,
         }
 
     data_attachment = _encode_tabular_file(raw_response.get("data"))
     image_attachment = _encode_image_file(raw_response.get("image"))
     graphic_type = _normalise_graph_type(raw_response.get("graph_type"))
     answer_text = raw_response.get("answer") or "Мне не удалось сформировать текстовый ответ."
-
+    notes = raw_response.get("notes", "")
     return {
         "question": question,
         "answer": answer_text,
         "data_attachment": data_attachment,
         "image_attachment": image_attachment,
         "graphic_type": graphic_type,
+        "notes": notes,
     }
 
 
 def respond_with_report(state: BiAgentState, config: Optional[RunnableConfig] = None) -> Dict[str, List[AIMessage]]:
     answer_text = state.get("answer") or "Ответ недоступен."
-    parts: List[Dict[str, Any]] = [{"type": "text", "text": answer_text}]
+    if state.get("notes"):
+        answer_text += f"\n\n{state['notes']}"
+    parts: List[Dict[str, Any]] = [
+        {"type": "text", "text": answer_text},
+    ]
 
     data_attachment = state.get("data_attachment")
     if data_attachment:
