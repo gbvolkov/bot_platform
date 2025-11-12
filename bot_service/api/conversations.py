@@ -209,12 +209,15 @@ async def post_message(
     session.add(human_message)
 
     ai_payload = serialise_message(agent_result["ai"])
+    agent_metadata = {"agent_id": conversation.agent_id}
+    if ai_payload.get("attachments"):
+        agent_metadata["attachments"] = ai_payload["attachments"]
     agent_message = Message(
         conversation_id=conversation.id,
         role="assistant",
         content=ai_payload["content"],
         raw_text=ai_payload["raw_text"],
-        metadata_json={"agent_id": conversation.agent_id},
+        metadata_json=agent_metadata,
     )
     session.add(agent_message)
 

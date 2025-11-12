@@ -4,7 +4,7 @@ import asyncio
 import logging
 import signal
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 import contextlib
 
 from services.bot_client import BotServiceClient
@@ -21,6 +21,32 @@ def _chunk_text(value: str, limit: int) -> list[str]:
     if not value:
         return []
     return [value[i : i + limit] for i in range(0, len(value), limit)]
+
+
+def _extract_response_attachments(agent_message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    attachments: List[Dict[str, Any]] = []
+    metadata = agent_message.get("metadata")
+    if isinstance(metadata, dict):
+        meta_attachments = metadata.get("attachments")
+        if isinstance(meta_attachments, list):
+            attachments.extend(item for item in meta_attachments if isinstance(item, dict))
+    if attachments:
+        return attachments
+
+    content = agent_message.get("content")
+    parts = None
+    if isinstance(content, dict):
+        if content.get("type") == "segments":
+            parts = content.get("parts")
+    elif isinstance(content, list):
+        parts = content
+    if not isinstance(parts, list):
+        return attachments
+
+    for piece in parts:
+        if isinstance(piece, dict) and piece.get("type") in {"file", "image", "audio", "video", "attachment"}:
+            attachments.append(piece)
+    return attachments
 
 
 async def _heartbeat_loop(queue: RedisTaskQueue, job_id: str, status_fn) -> None:
@@ -111,6 +137,7 @@ async def _process_job(
         agent_message = response.get("agent_message", {}) or {}
         raw_text = agent_message.get("raw_text") or ""
         logger.debug("Agent response job_id=%s raw_text_chars=%d", payload.job_id, len(raw_text))
+        attachments = _extract_response_attachments(agent_message) if agent_message else []
 
         if raw_text:
             await queue.mark_status(payload.job_id, "streaming")
@@ -129,6 +156,8 @@ async def _process_job(
             "content": raw_text,
             "response": response,
         }
+        if attachments:
+            metadata["attachments"] = attachments
 
         await queue.store_result(payload.job_id, metadata)
         await queue.publish_event(

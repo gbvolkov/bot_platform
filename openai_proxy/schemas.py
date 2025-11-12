@@ -112,6 +112,7 @@ class ChatCompletionRequest(BaseModel):
 class ChatMessageResponse(BaseModel):
     role: Literal["assistant"] = "assistant"
     content: str
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class ChatCompletionChoice(BaseModel):

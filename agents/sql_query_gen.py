@@ -152,17 +152,20 @@ def build_sql_database_from_csvs(csv_paths: Sequence[str]) -> SQLDatabase:
 
 
 def coerce_rows(
-    data: Union[str, Sequence[Dict[str, Any]], None]
-) -> List[Dict[str, Any]]:
-    """Return result rows as a list of dicts, parsing LangChain string outputs."""
+    data: Union[str, pd.DataFrame, Sequence[Mapping[str, Any]], None]
+) -> pd.DataFrame:
+    """Parse various row formats into a pandas DataFrame."""
     if data is None:
-        return []
+        return pd.DataFrame()
 
-    parsed_data: Union[str, Sequence[Dict[str, Any]], Dict[str, Any], List[Any]]
+    if isinstance(data, pd.DataFrame):
+        return data.copy()
+
+    parsed_data: Union[str, Sequence[Mapping[str, Any]], Mapping[str, Any], List[Any]]
     if isinstance(data, str):
         serialized = data.strip()
         if not serialized:
-            return []
+            return pd.DataFrame()
         try:
             parsed_data = ast.literal_eval(serialized)
         except (ValueError, SyntaxError):
@@ -175,18 +178,22 @@ def coerce_rows(
     else:
         parsed_data = data
 
-    if isinstance(parsed_data, dict):
-        return [parsed_data]
-    if isinstance(parsed_data, list):
+    if isinstance(parsed_data, Mapping):
+        rows: List[Dict[str, Any]] = [dict(parsed_data)]
+    elif isinstance(parsed_data, list):
         if not parsed_data:
-            return []
-        if all(isinstance(row, dict) for row in parsed_data):
-            return parsed_data
-        raise ValueError("Visualization expects rows as dictionaries keyed by column name.")
-    if isinstance(parsed_data, tuple):
+            return pd.DataFrame()
+        if not all(isinstance(row, Mapping) for row in parsed_data):
+            raise ValueError("Visualization expects rows as mappings keyed by column name.")
+        rows = [dict(row) for row in parsed_data]
+    elif isinstance(parsed_data, tuple):
         return coerce_rows(list(parsed_data))
+    else:
+        raise TypeError(f"Unsupported data format for visualization: {type(parsed_data)!r}")
 
-    raise TypeError(f"Unsupported data format for visualization: {type(parsed_data)!r}")
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 
 def serialize_rows(rows: Optional[Sequence[Mapping[str, Any]]]) -> str:
@@ -199,14 +206,6 @@ def serialize_rows(rows: Optional[Sequence[Mapping[str, Any]]]) -> str:
             raise TypeError("Each row must be a mapping of column names to values.")
         normalized.append(dict(row))
     return repr(normalized)
-
-
-def rows_to_dataframe(rows: Optional[Sequence[Mapping[str, Any]]]) -> pd.DataFrame:
-    """Convert query rows into a pandas DataFrame."""
-    dict_rows = coerce_rows(rows)
-    if not dict_rows:
-        return pd.DataFrame()
-    return pd.DataFrame(dict_rows)
 
 
 def _export_dataframe(df: pd.DataFrame, excel_path: Union[str, Path]) -> Path:
@@ -426,7 +425,7 @@ def generate_answer(question: str, query: str, result: list)-> dict:
 
 
 def create_visualization_image(
-    rows: Union[str, Sequence[Dict[str, Any]]],
+    rows: Union[pd.DataFrame, str, Sequence[Mapping[str, Any]]],
     chart_type: str,
     label_columns: Sequence[str],
     measure_columns: Sequence[str],
@@ -438,11 +437,12 @@ def create_visualization_image(
     if not label_columns:
         raise ValueError("At least one label column must be provided for visualization.")
 
-    #rows = _coerce_rows(data)
-    #if not rows:
-    #    raise ValueError("No rows available to visualize.")
-
-    df = pd.DataFrame(rows)
+    if isinstance(rows, pd.DataFrame):
+        df = rows.copy()
+    else:
+        df = coerce_rows(rows)
+    if df.empty:
+        raise ValueError("No rows available to visualize.")
     required_columns = list(dict.fromkeys(label_columns + measure_columns))
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
@@ -569,7 +569,6 @@ def create_visualization_image(
     plt.close(fig)
     return output_path
 
-
 def get_response(question: str, data_paths: List[str])-> dict:
     db = build_sql_database_from_csvs(["data/data.csv"])
     query = write_query(question, db)
@@ -583,10 +582,14 @@ def get_response(question: str, data_paths: List[str])-> dict:
     
     top_k = 30
     db_result = result.get("result", [])
-    rows = coerce_rows(db_result)
-    df = rows_to_dataframe(rows)
+    df = coerce_rows(db_result)
     export_path = _export_dataframe(df, f"data/data_{uuid4().hex}.xlsx")
-    answer = generate_answer(question, query, serialize_rows(rows[:top_k]))
+    top_rows = df.head(top_k)
+    answer = generate_answer(
+        question,
+        query,
+        serialize_rows(top_rows.to_dict(orient="records")),
+    )
 
     viz_methods = answer.get("visual_recommendations") or []
     measure_columns = answer.get("measure_columns") or []
@@ -595,7 +598,7 @@ def get_response(question: str, data_paths: List[str])-> dict:
     if viz_methods and measure_columns and label_columns:
         try:
             image_path = create_visualization_image(
-                rows,
+                top_rows,
                 viz_methods[0],
                 label_columns,
                 measure_columns,
@@ -625,12 +628,16 @@ if __name__ == "__main__":
             break
         query = fix_query(query, result["error"])
     db_result = result.get("result", [])
-    rows = coerce_rows(db_result)
-    df = rows_to_dataframe(rows)
+    df = coerce_rows(db_result)
     export_path = _export_dataframe(df, "data/gen_data.xlsx")
     print(f"Tabular data saved to: {export_path}")
     k_top = 30
-    answer = generate_answer(question, query, serialize_rows(rows[:k_top]))
+    top_rows = df.head(k_top)
+    answer = generate_answer(
+        question,
+        query,
+        serialize_rows(top_rows.to_dict(orient="records")),
+    )
     print(f"Question: {question}")
     print(f"Query: {query}")
     print(f"Data: {db_result}")
@@ -644,7 +651,7 @@ if __name__ == "__main__":
     if viz_methods and measure_columns and label_columns:
         try:
             image_path = create_visualization_image(
-                rows,
+                df,
                 viz_methods[0],
                 label_columns,
                 measure_columns,

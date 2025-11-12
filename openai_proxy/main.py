@@ -163,6 +163,7 @@ def _build_sse_payload(
     finish_reason: str | None = None,
     agent_status: str | None = None,
     usage: Dict[str, Any] | None = None,
+    message_metadata: Dict[str, Any] | None = None,
 ) -> str:
     payload: Dict[str, Any] = {
         "id": job_id,
@@ -182,6 +183,8 @@ def _build_sse_payload(
         payload["agent_status"] = agent_status
     if usage:
         payload["usage"] = usage
+    if message_metadata:
+        payload["message_metadata"] = message_metadata
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -235,6 +238,11 @@ async def _stream_events(
                     delta={"role": "assistant"},
                 )
                 role_announced = True
+            metadata_payload: Dict[str, Any] | None = None
+            if event.metadata:
+                attachments = event.metadata.get("attachments")
+                if attachments:
+                    metadata_payload = {"attachments": attachments}
             yield _build_sse_payload(
                 model=model,
                 job_id=job_id,
@@ -243,6 +251,7 @@ async def _stream_events(
                 finish_reason="stop",
                 agent_status="completed",
                 usage=event.usage or {},
+                message_metadata=metadata_payload,
             )
             logger.debug("SSE completed job_id=%s usage=%s", job_id, event.usage)
             terminal_seen = True
@@ -404,6 +413,11 @@ async def create_chat_completion(
     except (TypeError, ValidationError):
         usage = UsageInfo()
 
+    message_metadata: Dict[str, Any] | None = None
+    attachments = metadata.get("attachments")
+    if attachments:
+        message_metadata = {"attachments": attachments}
+
     logger.debug(
         "Job complete job_id=%s conversation_id=%s content_chars=%d usage=%s",
         job_id,
@@ -414,7 +428,7 @@ async def create_chat_completion(
 
     choice = ChatCompletionChoice(
         index=0,
-        message=ChatMessageResponse(content=content),
+        message=ChatMessageResponse(content=content, metadata=message_metadata),
         finish_reason="stop",
     )
     return ChatCompletionResponse(

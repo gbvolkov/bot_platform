@@ -13,6 +13,9 @@ from .config import settings
 from .schemas import MessagePayload
 
 
+ATTACHMENT_TYPES = {"file", "image", "audio", "video", "attachment"}
+
+
 def _normalise_content(message: BaseMessage) -> Dict[str, Any]:
     content = getattr(message, "content", "")
     if isinstance(content, list):
@@ -39,6 +42,66 @@ def _extract_text(message: BaseMessage) -> str:
                 texts.append(str(item))
         return "\n".join(filter(None, texts))
     return str(content)
+
+
+def _normalise_attachment_piece(piece: Dict[str, Any]) -> Dict[str, Any]:
+    attachment: Dict[str, Any] = {"type": piece.get("type")}
+
+    def _copy(field: str, target_field: Optional[str] = None) -> None:
+        value = piece.get(field)
+        if value is None:
+            return
+        attachment[target_field or field] = value
+
+    _copy("filename")
+    _copy("name")
+    _copy("title")
+    _copy("caption")
+    _copy("format")
+    _copy("graphic_type")
+
+    content_type = piece.get("mime_type") or piece.get("content_type")
+    if content_type:
+        attachment["content_type"] = content_type
+
+    data = piece.get("data") or piece.get("base64_data")
+    if isinstance(data, str) and data:
+        attachment["data"] = data
+
+    url = piece.get("url")
+    if not url:
+        image_url = piece.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+    if url:
+        attachment["url"] = url
+
+    text_value = piece.get("text")
+    if isinstance(text_value, str) and text_value:
+        attachment["text"] = text_value
+
+    metadata_value = piece.get("metadata")
+    if isinstance(metadata_value, dict) and metadata_value:
+        attachment["metadata"] = metadata_value
+
+    return attachment
+
+
+def _extract_attachments(message: BaseMessage) -> List[Dict[str, Any]]:
+    content = getattr(message, "content", None)
+    attachments: List[Dict[str, Any]] = []
+    if not isinstance(content, list):
+        return attachments
+    for piece in content:
+        if not isinstance(piece, dict):
+            continue
+        piece_type = piece.get("type")
+        if not isinstance(piece_type, str):
+            continue
+        if piece_type.lower() not in ATTACHMENT_TYPES:
+            continue
+        attachments.append(_normalise_attachment_piece(piece))
+    return attachments
 
 
 def build_human_message(payload: MessagePayload) -> HumanMessage:
@@ -110,4 +173,5 @@ def serialise_message(message: BaseMessage) -> Dict[str, Any]:
     return {
         "raw_text": _extract_text(message),
         "content": _normalise_content(message),
+        "attachments": _extract_attachments(message),
     }

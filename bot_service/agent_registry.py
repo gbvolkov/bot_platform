@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
 from agents.ingos_product_agent import initialize_agent as init_product_agent
+from agents.bi_agent import initialize_agent as init_aibi_agent
 from agents.utils import ModelType
 
 from .config import settings
@@ -70,6 +71,14 @@ class AgentRegistry:
                 name="Service Desk Assistant",
                 description="Отвечает на вопросы сотрудников и консультирует по внутренним процессам.",
                 factory=lambda provider: init_sd_agent(provider=provider),
+                default_provider=default_provider,
+                supported_content_types=default_content_types,
+            ),
+            "ai_bi": AgentDefinition(
+                id="ai_bi",
+                name="BI analyst",
+                description="Отвечает на вопросы по датасету и строит графики.",
+                factory=lambda provider: init_aibi_agent(provider=provider),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
             ),
