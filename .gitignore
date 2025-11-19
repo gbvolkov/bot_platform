@@ -13,5 +13,5 @@ auth_tickets.json
 auth_glossary.json
 nohup.out
 *.db
-
+*.log
 docs
