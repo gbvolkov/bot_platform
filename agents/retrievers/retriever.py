@@ -46,7 +46,7 @@ from .utils.load_common_retrievers import (
 from .cross_encoder_reranker_with_score import CrossEncoderRerankerWithScores
 
 if TYPE_CHECKING:
-    from agents.kb_refresh_registry import KBReloadContext
+    from services.kb_manager.notifications import KBReloadContext
 
 logger = logging.getLogger(__name__)
 
