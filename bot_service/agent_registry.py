@@ -10,7 +10,7 @@ from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
 from agents.ingos_product_agent import initialize_agent as init_product_agent
 from agents.bi_agent import initialize_agent as init_aibi_agent
-from agents.theodor_agent.agent import initialize_agent as init_theodor_agent
+from agents.theodor_agent_old.agent import initialize_agent as init_theodor_agent
 from agents.utils import ModelType
 
 from .config import settings

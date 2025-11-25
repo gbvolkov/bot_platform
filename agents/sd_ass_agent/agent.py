@@ -34,7 +34,7 @@ from platform_utils.llm_logger import JSONFileTracer
 from services.kb_manager.notifications import KBReloadContext, register_reload_listener
 
 
-from .tools.yandex_search import YandexSearchTool
+from ..tools.yandex_search import YandexSearchTool
 
 from .classifier import classify_request, summarise_request
 from .validate_answer import vadildate_AI_answer, CheckResult

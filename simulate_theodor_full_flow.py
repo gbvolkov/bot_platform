@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.types import Command
 
 from agents.theodor_agent.agent import initialize_agent
+from agents.theodor_agent.artifacts_defs import ArtifactAgentContext
 from agents.utils import get_llm
 
 
@@ -37,10 +38,11 @@ USER_SIMULATOR_PROMPT = """
 
 
 async def run_simulation():
+
     print("Initializing Theodor Agent...")
     agent_graph = initialize_agent()
-    user_llm = get_llm(model="base", provider="openai")
-    logger.info("Simulation started")
+    user_llm = get_llm(model="mini", provider="openai")
+    logging.info("Simulation started")
 
     config = {"configurable": {"thread_id": "simulation_thread_1"}}
 
@@ -56,58 +58,47 @@ async def run_simulation():
     }
 
     max_steps = 50  # Safety limit
-    print("\n--- STARTING SIMULATION ---\n")
-    logger.info("\n--- STARTING SIMULATION ---\n")
+    #print("\n--- STARTING SIMULATION ---\n")
+    logging.info("\n--- STARTING SIMULATION ---\n")
 
-    for step_count in range(1, max_steps + 1):
-        print(f"\n[ITERATION {step_count}]")
-        logger.info(f"\n# [ITERATION {step_count}]")
+    ctx = ArtifactAgentContext(user_prompt = "Привет! У меня есть идея стартапа: Uber для выгула собак. Помоги мне проработать её.",
+                               generated_artifacts = [])
 
-        result = agent_graph.invoke(next_input, config=config)
-
-        # Show last AI message (if any)
-        last_ai = ""
-        if result.get("messages"):
-            for msg in reversed(result["messages"]):
-                if isinstance(msg, AIMessage):
-                    last_ai = msg.content
-                    break
-        if last_ai:
-            print(f"Bot: {last_ai}")
-            logger.info("Bot: %s", last_ai)
-
-        # Completion check
+    
+    while True:
+        result = agent_graph.invoke(next_input, config=config, context=ctx)
+        #res = agent_graph.get_state(config, subgraphs=True)
         state_snapshot = agent_graph.get_state(config)
-        current_idx = state_snapshot.values.get("current_step_index", 0)
-        if current_idx >= 13:
-            print("Simulation Finished! (All steps completed)")
+        if len(state_snapshot.next) == 0:
             break
+        current_idx = state_snapshot.values.get("current_step_index", 0)
 
-        # Handle interrupt payload (pause for user input)
+        logging.info("Current step index: %s", current_idx)
         interrupts = result.get("__interrupt__")
         if interrupts:
             payload = getattr(interrupts[-1], "value", interrupts[-1])
-            print(f"Interrupt payload: {payload}")
-            #logger.info("Interrupt payload: %s", payload)
-
-            sim_messages = [
-                SystemMessage(content=USER_SIMULATOR_PROMPT),
-                HumanMessage(content=f"Ответ наставника:\n{last_ai}\n\nТвой ответ:"),
-            ]
-            user_reply = user_llm.invoke(sim_messages).content
-            print(f"User: {user_reply}")
-            logger.info("User: %s", user_reply)
-
+            last_ai = payload.get("content", "")
+            #print(f"Interrupt payload: {payload}")
+            prompt = f"Ответ наставника:\n{last_ai}\n\nТвой ответ:"
+            user_reply = input(prompt)
+            if user_reply == "exit":
+                break
             next_input = Command(resume=user_reply)
             await asyncio.sleep(1)
             continue
+        else:
+            last_ai = ""
+            if result.get("messages"):
+                for msg in reversed(result["messages"]):
+                    if isinstance(msg, AIMessage):
+                        last_ai = msg.content
+                        break
+            if last_ai:
+                #print(f"Bot: {last_ai}")
+                logging.info("Bot: %s", last_ai)
+        #break
 
-        if not state_snapshot.next:
-            print("Graph reached END without further interrupts. Stopping.")
-            break
-
-        print("No interrupt returned; exiting to avoid tight loop.")
-        break
+    print("ФСЁ")
 
 
 if __name__ == "__main__":

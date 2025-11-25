@@ -17,7 +17,7 @@ class YandexSearchTool(BaseTool):
     name: str = "yandex_web_search"
     description: str = (
         "A wrapper around Yandex Search. "
-        "Useful for when you need to answer questions about current events. "
+        "Useful for when you need an information from internet."
         "Input should be a search query."
     )
     args_schema: Type[BaseModel] = YandexSearchInput
