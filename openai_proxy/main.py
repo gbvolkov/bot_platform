@@ -259,6 +259,29 @@ async def _stream_events(
         elif event.type == "heartbeat":
             logger.debug("SSE heartbeat job_id=%s status=%s", job_id, event.status)
             yield f": heartbeat {event.status or ''}\n\n"
+        elif event.type == "interrupt":
+            metadata = event.metadata or {}
+            content = metadata.get("question") or metadata.get("content") or ""
+            message_metadata = metadata or None
+            if not role_announced:
+                yield _build_sse_payload(
+                    model=model,
+                    job_id=job_id,
+                    conversation_id=conversation_id,
+                    delta={"role": "assistant"},
+                )
+                role_announced = True
+            yield _build_sse_payload(
+                model=model,
+                job_id=job_id,
+                conversation_id=conversation_id,
+                delta={"content": content},
+                finish_reason="stop",
+                agent_status="interrupted",
+                message_metadata=message_metadata,
+            )
+            terminal_seen = True
+            break
         elif event.type == "failed":
             error_payload = {
                 "error": {
@@ -339,6 +362,14 @@ async def create_chat_completion(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     logger.debug("Built prompt job model=%s chars=%d", request.model, len(prompt))
 
+    raw_user_text = ""
+    for message in reversed(request.messages):
+        if message.role == "user":
+            raw_user_text = message.content or ""
+            break
+    if default_prompt_used and not raw_user_text:
+        raw_user_text = settings.default_attachment_prompt or ""
+
     latest_attachments: List[Dict[str, Any]] = []
     for message in reversed(request.messages):
         if message.role == "user":
@@ -364,6 +395,7 @@ async def create_chat_completion(
         user_id=user_id,
         user_role=user_role,
         text=prompt,
+        raw_user_text=raw_user_text or None,
         attachments=latest_attachments or None,
     )
     await task_queue.enqueue(payload)
@@ -396,6 +428,25 @@ async def create_chat_completion(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=completion_event.error or "Agent execution failed.",
+        )
+
+    if completion_event.type == "interrupt":
+        metadata = completion_event.metadata or {}
+        content = metadata.get("question") or metadata.get("content") or ""
+        message_metadata: Dict[str, Any] | None = None
+        if metadata:
+            message_metadata = metadata
+        choice = ChatCompletionChoice(
+            index=0,
+            message=ChatMessageResponse(content=content, metadata=message_metadata),
+            finish_reason="stop",
+        )
+        return ChatCompletionResponse(
+            id=job_id,
+            model=request.model,
+            choices=[choice],
+            usage=UsageInfo(),
+            conversation_id=conversation_id,
         )
 
     metadata = completion_event.metadata or {}

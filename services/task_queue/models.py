@@ -5,8 +5,22 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-JobStage = Literal["queued", "running", "streaming", "completed", "failed"]
-EventKind = Literal["status", "chunk", "completed", "failed", "heartbeat"]
+JobStage = Literal[
+    "queued",
+    "running",
+    "streaming",
+    "completed",
+    "failed",
+    "interrupted",
+]
+EventKind = Literal[
+    "status",
+    "chunk",
+    "completed",
+    "failed",
+    "heartbeat",
+    "interrupt",
+]
 
 
 class EnqueuePayload(BaseModel):
@@ -21,6 +35,10 @@ class EnqueuePayload(BaseModel):
         description="Optional user role forwarded to bot_service.",
     )
     text: str = Field(default="", description="Rendered prompt text to deliver to the agent.")
+    raw_user_text: Optional[str] = Field(
+        default=None,
+        description="Last user utterance before rendering prompt (used to resume interrupts).",
+    )
     attachments: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="Attachment metadata forwarded to bot_service.",

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, Iterable, List, Optional
+import logging
 
 from fastapi.concurrency import run_in_threadpool
+import uuid
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 
 from agents.state.state import ConfigSchema
@@ -104,14 +107,15 @@ def _extract_attachments(message: BaseMessage) -> List[Dict[str, Any]]:
     return attachments
 
 
-def build_human_message(payload: MessagePayload) -> HumanMessage:
+def build_human_message(payload: MessagePayload, raw_text_override: Optional[str] = None) -> HumanMessage:
     if payload.type == "reset":
         reset_text = payload.text or "RESET"
         content = [{"type": "reset", "text": reset_text}]
     else:
         content: List[Dict[str, str]] = []
-        if payload.text:
-            content.append({"type": "text", "text": payload.text})
+        user_text = raw_text_override if raw_text_override is not None else payload.text
+        if user_text:
+            content.append({"type": "text", "text": user_text})
         attachment_segments = []
         if isinstance(payload.metadata, dict):
             attachment_segments = payload.metadata.get("attachment_text_segments") or []
@@ -139,12 +143,25 @@ async def invoke_agent(
     conversation_id: str,
     user_id: str,
     user_role: Optional[str],
+    pending_interrupt: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    human = build_human_message(payload)
+    raw_user_text = None
+    if isinstance(payload.metadata, dict):
+        raw_user_text = payload.metadata.get("raw_user_text")
+    human = build_human_message(payload, raw_text_override=raw_user_text if pending_interrupt else None)
     config = build_agent_config(conversation_id, user_id, user_role)
 
     def _invoke() -> Dict[str, Any]:
-        response = agent.invoke({"messages": [human]}, config=config)
+        if pending_interrupt:
+            logging.info(
+                "invoke_agent resume conversation_id=%s interrupt_id=%s raw_user_text_chars=%d",
+                conversation_id,
+                pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
+                len(raw_user_text or payload.text or ""),
+            )
+            response = agent.invoke(Command(resume=raw_user_text or payload.text or ""), config=config)
+        else:
+            response = agent.invoke({"messages": [human]}, config=config)
         if isinstance(response, dict):
             return response
         return {"messages": response}
@@ -153,6 +170,28 @@ async def invoke_agent(
     messages = result.get("messages") or []
 
     ai_message: Optional[AIMessage] = None
+    if "__interrupt__" in result:
+        interrupts = result.get("__interrupt__") or []
+        if interrupts:
+            latest = interrupts[-1]
+            interrupt_payload = getattr(latest, "value", latest)
+        else:
+            interrupt_payload = {}
+        if isinstance(interrupt_payload, dict) and "interrupt_id" not in interrupt_payload:
+            interrupt_payload = {**interrupt_payload, "interrupt_id": f"int-{uuid.uuid4().hex}"}
+        question = ""
+        if isinstance(interrupt_payload, dict):
+            question = interrupt_payload.get("question") or interrupt_payload.get("content") or ""
+        logging.info("invoke_agent interrupt detected conversation_id=%s interrupt_id=%s", conversation_id, interrupt_payload.get("interrupt_id") if isinstance(interrupt_payload, dict) else None)
+        ai_message = AIMessage(content=question)
+        return {
+            "human": human,
+            "ai": ai_message,
+            "raw_result": result,
+            "agent_status": "interrupted",
+            "interrupt_payload": interrupt_payload,
+        }
+
     if isinstance(messages, Iterable):
         for msg in reversed(list(messages)):
             if isinstance(msg, AIMessage):
@@ -162,10 +201,17 @@ async def invoke_agent(
     if ai_message is None:
         ai_message = AIMessage(content="")  # fallback empty response
 
+    logging.info(
+        "invoke_agent completed conversation_id=%s agent_status=%s",
+        conversation_id,
+        "completed",
+    )
     return {
         "human": human,
         "ai": ai_message,
         "raw_result": result,
+        "agent_status": "completed",
+        "interrupt_payload": None,
     }
 
 

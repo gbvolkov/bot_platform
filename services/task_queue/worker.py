@@ -102,6 +102,7 @@ async def _process_job(
             user_id=payload.user_id,
             user_role=payload.user_role,
             text=payload.text,
+            raw_user_text=payload.raw_user_text,
             attachments=payload.attachments,
             metadata=payload.metadata,
         )
@@ -136,8 +137,39 @@ async def _process_job(
 
         agent_message = response.get("agent_message", {}) or {}
         raw_text = agent_message.get("raw_text") or ""
-        logger.debug("Agent response job_id=%s raw_text_chars=%d", payload.job_id, len(raw_text))
+        agent_status = agent_message.get("metadata", {}).get("agent_status") if agent_message else None
+        logger.debug(
+            "Agent message job_id=%s status=%s keys=%s metadata=%s",
+            payload.job_id,
+            agent_status,
+            list(agent_message.keys()),
+            agent_message.get("metadata"),
+        )
+        logger.debug(
+            "Agent response job_id=%s raw_text_chars=%d status=%s",
+            payload.job_id,
+            len(raw_text),
+            agent_status,
+        )
         attachments = _extract_response_attachments(agent_message) if agent_message else []
+
+        if agent_status == "interrupted":
+            metadata = agent_message.get("metadata") or {}
+            if raw_text and "content" not in metadata:
+                metadata = {**metadata, "content": raw_text}
+            job_stage["value"] = "interrupted"
+            await queue.mark_status(payload.job_id, "interrupted", {"result": metadata})
+            await queue.publish_event(
+                QueueEvent(
+                    job_id=payload.job_id,
+                    type="interrupt",
+                    status="interrupted",
+                    metadata=metadata,
+                )
+            )
+            await queue.clear_active_job(payload.job_id)
+            logger.info("Job %s interrupted; awaiting user input", payload.job_id)
+            return
 
         if raw_text:
             await queue.mark_status(payload.job_id, "streaming")

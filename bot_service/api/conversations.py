@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from fastapi import APIRouter, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -21,6 +22,7 @@ from ..service import invoke_agent, serialise_message
 from .deps import DbSession, UserContextDep
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+logger = logging.getLogger(__name__)
 
 
 def _conversation_to_view(entity: Conversation) -> ConversationView:
@@ -93,7 +95,7 @@ async def list_conversations(session: DbSession, user: UserContextDep) -> list[C
     conversations = result.all()
     updated = False
     for conv in conversations:
-        if conv.status != "active" and agent_registry.is_ready(conv.agent_id):
+        if conv.status == "pending" and agent_registry.is_ready(conv.agent_id):
             conv.status = "active"
             updated = True
     if updated:
@@ -113,7 +115,7 @@ async def get_conversation(
     if conversation is None or conversation.user_id != user.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
     ready = await agent_registry.ensure_agent_ready(conversation.agent_id)
-    if ready and conversation.status != "active":
+    if ready and conversation.status == "pending":
         conversation.status = "active"
         await session.commit()
         await session.refresh(conversation)
@@ -184,6 +186,16 @@ async def post_message(
             metadata["attachment_text_segments"] = attachment_segments
         payload.payload.metadata = metadata
 
+    pending_interrupt = None
+    if isinstance(conversation.metadata_json, dict):
+        pending_interrupt = conversation.metadata_json.get("pending_interrupt")
+        if pending_interrupt:
+            logger.info(
+                "conversation %s resuming pending_interrupt interrupt_id=%s",
+                conversation.id,
+                pending_interrupt.get("interrupt_id"),
+            )
+
     try:
         agent_result = await invoke_agent(
             agent=agent,
@@ -191,8 +203,10 @@ async def post_message(
             conversation_id=conversation.id,
             user_id=conversation.user_id,
             user_role=conversation.user_role,
+            pending_interrupt=pending_interrupt,
         )
     except Exception as exc:  # pragma: no cover - defensive guardrail
+        logger.exception("Agent invocation failed conversation_id=%s", conversation.id)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Agent invocation failed: {exc}",
@@ -212,6 +226,13 @@ async def post_message(
     agent_metadata = {"agent_id": conversation.agent_id}
     if ai_payload.get("attachments"):
         agent_metadata["attachments"] = ai_payload["attachments"]
+    if agent_result.get("agent_status"):
+        agent_metadata["agent_status"] = agent_result["agent_status"]
+    if agent_result.get("interrupt_payload"):
+        agent_metadata["interrupt_payload"] = agent_result["interrupt_payload"]
+        if ai_payload.get("raw_text"):
+            agent_metadata["question"] = ai_payload["raw_text"]
+            agent_metadata["content"] = ai_payload["raw_text"]
     agent_message = Message(
         conversation_id=conversation.id,
         role="assistant",
@@ -220,6 +241,42 @@ async def post_message(
         metadata_json=agent_metadata,
     )
     session.add(agent_message)
+
+    if agent_result.get("agent_status") == "interrupted":
+        conversation.status = "waiting_user"
+        base_metadata = conversation.metadata_json if isinstance(conversation.metadata_json, dict) else {}
+        if isinstance(agent_result["interrupt_payload"], dict):
+            new_metadata = {
+                **base_metadata,
+                "pending_interrupt": {
+                    "interrupt_id": agent_result["interrupt_payload"].get("interrupt_id"),
+                    "question": agent_result["interrupt_payload"].get("question"),
+                    "content": agent_result["interrupt_payload"].get("content"),
+                    "artifact_id": agent_result["interrupt_payload"].get("artifact_id"),
+                    "artifact_name": agent_result["interrupt_payload"].get("artifact_name"),
+                },
+            }
+        else:
+            new_metadata = {
+                **base_metadata,
+                "pending_interrupt": {
+                    "interrupt_id": None,
+                    "question": ai_payload["raw_text"],
+                    "content": ai_payload["raw_text"],
+                },
+            }
+        conversation.metadata_json = new_metadata
+        logger.info(
+            "conversation %s stored pending_interrupt interrupt_id=%s",
+            conversation.id,
+            conversation.metadata_json["pending_interrupt"].get("interrupt_id"),
+        )
+    else:
+        conversation.status = "active"
+        base_metadata = conversation.metadata_json if isinstance(conversation.metadata_json, dict) else {}
+        new_metadata = dict(base_metadata)
+        new_metadata.pop("pending_interrupt", None)
+        conversation.metadata_json = new_metadata
 
     conversation.last_message_at = func.now()
 

@@ -127,7 +127,7 @@ class RedisTaskQueue:
 
     async def fail_job_if_active(self, job_id: str, reason: str) -> bool:
         status = await self._redis.hget(self._status_key(job_id), "status")
-        if status in {"completed", "failed", None}:
+        if status in {"completed", "failed", "interrupted", None}:
             await self.clear_active_job(job_id)
             return False
         await self.store_failure(job_id, reason)
@@ -218,8 +218,10 @@ class RedisTaskQueue:
                     current_status = "completed"
                 elif event.type == "failed":
                     current_status = "failed"
+                elif event.type == "interrupt":
+                    current_status = "interrupted"
                 yield event
-                if event.type in {"completed", "failed"}:
+                if event.type in {"completed", "failed", "interrupt"}:
                     break
 
     async def wait_for_completion(self, job_id: str, timeout: Optional[float] = None) -> QueueEvent:
@@ -229,7 +231,7 @@ class RedisTaskQueue:
 
         async def _wait() -> QueueEvent:
             async for event in self.iter_events(job_id):
-                if event.type in {"completed", "failed"}:
+                if event.type in {"completed", "failed", "interrupt"}:
                     return event
             # Fallback for defensive completeness.
             return QueueEvent(job_id=job_id, type="failed", status="failed", error="No terminal event received.")

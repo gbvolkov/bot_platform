@@ -47,7 +47,7 @@ from .artifacts_defs import (
 )
 from agents.structured_prompt_utils import build_json_prompt
 
-DEBUG = False
+DEBUG = True
 def debug_log(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -246,7 +246,7 @@ def select_option_node(state: ArtifactAgentState,
     #print(state.get("structured_response", {}).get("response", ""))
 
 
-    _SELECTED_OPTION = 0 #TODO: use interrupt to get option from user
+    #_SELECTED_OPTION = 0 #TODO: use interrupt to get option from user
     artifacts = state.get("artifacts") or {}
     current_artifact = artifacts.get(state["current_artifact_id"])
     artifact_name = current_artifact["artifact_definition"]["name"]
@@ -263,7 +263,7 @@ def select_option_node(state: ArtifactAgentState,
     #print("DEBUG: after options_interrupt")
     message_update = [HumanMessage(content=str(user_response))]    
 
-    current_artifact["selected_option"] = _SELECTED_OPTION
+    #current_artifact["selected_option"] = _SELECTED_OPTION
     user_response_estimated: UserSelectedOption = _user_select_option(str(user_response), state["current_artifact_text"])
 
     if not user_response_estimated.get("change_request", {}).get("is_change_requested", False):
@@ -347,7 +347,7 @@ response_format = AutoStrategy(schema=ArtifactOptions)
 def provider_then_tool(request: ModelRequest, handler):
     try:
         return handler(request)
-    except StructuredOutputValidationError:
+    except (ValueError, StructuredOutputValidationError):
         rf = request.response_format
         if isinstance(rf, AutoStrategy):
             schema = rf.schema
@@ -357,6 +357,12 @@ def provider_then_tool(request: ModelRequest, handler):
             raise  # already in ToolStrategy; bubble up
         # Retry using tool-based structured output
         return handler(request.override(response_format=ToolStrategy(schema=schema)))
+
+_yandex_tool = YandexSearchTool(
+    api_key=config.YA_API_KEY,
+    folder_id=config.YA_FOLDER_ID,
+    max_results=3
+)
 
 
 def create_options_generator_node(model: BaseChatModel, artifact_id: int):
@@ -375,10 +381,13 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
         prompt = (
             f"Мы прорабатываем {agent_state.get("user_prompt", "")}\n\n"
             f"{context_str}\n"
-            f"Мы переходим к этапу {_artifact_id + 1}: {_artifact_def['name']}.\n"
+            f"Мы находимся на этапе {_artifact_def['stage']}.\n"
+            f"Цель этапа: {_artifact_def['stage_goal']}.\n"
+            f"Мы переходим к артефакту {_artifact_id + 1}: {_artifact_def['name']}.\n"
             f"Цель: {_artifact_def['goal']}\n"
+            f"Компоненты: {',\n-'.join(_artifact_def['components'])}\n"
             f"Методология: {_artifact_def['methodology']}\n"
-            f"Критерии: {', '.join(_artifact_def['criteria'])}\n\n"
+            f"Критерии: {',\n-'.join(_artifact_def['criteria'])}\n\n"
             "Предложи 2-3 варианта для этого артефакта, основываясь на предыдущем контексте.\n\n"
             "Каждый вариант должен удовлетворять всем критериям.\n\n"
             "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
@@ -386,15 +395,9 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
         #print(f"DEBUG: {prompt}")
         return SYSTEM_PROMPT + "\n\n" + FORMAT_OPTIONS_PROMPT + "\n\n" + TOOL_POLICY_PROMPT + "\n\n" + prompt
 
-    yandex_tool = YandexSearchTool(
-        api_key=config.YA_API_KEY,
-        folder_id=config.YA_FOLDER_ID,
-        max_results=3
-    )
-
     _agent = create_agent(
         model=model,
-        tools=[yandex_tool], # No tools for now, or add search_kb if needed
+        tools=[_yandex_tool], # No tools for now, or add search_kb if needed
         #system_prompt=SYSTEM_PROMPT + "\n\n" + prompt,
         middleware=[build_agent_prompt, provider_then_tool],
         response_format=ArtifactOptions,
@@ -499,7 +502,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
     
     _agent = create_agent(
         model=model,
-        tools= [], # No tools for now, or add search_kb if needed
+        tools= [_yandex_tool], # No tools for now, or add search_kb if needed
         middleware=[build_agent_prompt, provider_then_tool],
         response_format=AftifactFinalText,
         state_schema=ArtifactAgentState,

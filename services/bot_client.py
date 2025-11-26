@@ -106,15 +106,19 @@ class BotServiceClient:
         conversation_id: str,
         user_id: str,
         text: str,
+        raw_user_text: Optional[str] = None,
         user_role: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         attachments: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        payload_metadata: Dict[str, Any] = metadata.copy() if isinstance(metadata, dict) else {}
+        if raw_user_text and "raw_user_text" not in payload_metadata:
+            payload_metadata["raw_user_text"] = raw_user_text
         payload = {
             "payload": {
                 "type": "text",
                 "text": text,
-                "metadata": metadata or {},
+                "metadata": payload_metadata,
             }
         }
         if attachments:
@@ -134,7 +138,16 @@ class BotServiceClient:
             json=payload,
             headers=headers,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "POST /conversations/%s/messages failed status=%s body=%s",
+                conversation_id,
+                exc.response.status_code if exc.response else None,
+                exc.response.text if exc.response else None,
+            )
+            raise
         return response.json()
 
     async def get_conversation(
