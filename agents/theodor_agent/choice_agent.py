@@ -35,6 +35,7 @@ from .prompts.prompts import (
 
 from ..tools.yandex_search import YandexSearchTool
 from agents.utils import ModelType, get_llm
+from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
 from .artifacts_defs import (
     ARTIFACTS, 
@@ -227,6 +228,7 @@ def _update_last_ai_message_content(messages: List[Any], text: str) -> List[Any]
 
     return updated_messages
 
+
 @debug_log
 def select_option_node(state: ArtifactAgentState, 
               config: RunnableConfig,
@@ -255,7 +257,7 @@ def select_option_node(state: ArtifactAgentState,
         "type": "choice",
         "artifact_id": state["current_artifact_id"],
         "artifact_name": artifact_name,
-        "content": state["current_artifact_text"],
+        "content": prettify(state["current_artifact_text"]),
         "question": "Выберите один из предложенных вариантов или скажите, что нужно поправить.",
     }
     #print("DEBUG: before options_interrupt")
@@ -314,7 +316,7 @@ def confirmation_node(state: ArtifactAgentState,
         "type": "choice",
         "artifact_id": state["current_artifact_id"],
         "artifact_name": artifact_name,
-        "content": current_artifact["artifact_final_text"],
+        "content": prettify(current_artifact["artifact_final_text"]),
         "question": f"Подтвердите артефакт \"{artifact_name}\" или скажите, что нужно изменить.",
     }
 

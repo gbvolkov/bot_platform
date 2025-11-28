@@ -408,6 +408,7 @@ dependencies = [
     { name = "duckdb-engine" },
     { name = "duckduckgo-search" },
     { name = "fastapi" },
+    { name = "flowmark" },
     { name = "google-api-python-client" },
     { name = "httpx" },
     { name = "langchain" },
@@ -463,6 +464,7 @@ requires-dist = [
     { name = "duckdb-engine" },
     { name = "duckduckgo-search", specifier = "==8.1.1" },
     { name = "fastapi", specifier = "==0.120.0" },
+    { name = "flowmark", specifier = ">=0.5.7" },
     { name = "google-api-python-client", specifier = "==2.185.0" },
     { name = "httpx", specifier = "==0.27.2" },
     { name = "langchain", specifier = ">=1.0.2" },
@@ -1240,6 +1242,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9d/1f/3ee70b0a55137442038f2a33469cc5fddd7e0ad2abf83d7497c18a2b6923/flatbuffers-25.9.23.tar.gz", hash = "sha256:676f9fa62750bb50cf531b42a0a2a118ad8f7f797a511eda12881c016f093b12", size = 22067, upload-time = "2025-09-24T05:25:30.106Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ee/1b/00a78aa2e8fbd63f9af08c9c19e6deb3d5d66b4dda677a0f61654680ee89/flatbuffers-25.9.23-py2.py3-none-any.whl", hash = "sha256:255538574d6cb6d0a79a17ec8bc0d30985913b87513a01cce8bcdb6b4c44d0e2", size = 30869, upload-time = "2025-09-24T05:25:28.912Z" },
+]
+
+[[package]]
+name = "flowmark"
+version = "0.5.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "marko" },
+    { name = "regex" },
+    { name = "strif" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6f/1c/4ddfc65f4ce5a58b3fdd6ce1675c5e68b76ee5747f1e393c43d43fae36f2/flowmark-0.5.7.tar.gz", hash = "sha256:2e92e078627de8cd50b651a93f4df8441cd138b095d618cf4a78ec9fa2d57337", size = 173659, upload-time = "2025-11-03T23:00:11.446Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/d8/318547fbbee728f10749a92821dc268c3aad6fded41a28999b8f95e138e2/flowmark-0.5.7-py3-none-any.whl", hash = "sha256:1cfb551bfc0f59c66806354e6716e3efa55af55ccbcddf46650bcd27583c9c1b", size = 33022, upload-time = "2025-11-03T23:00:10.403Z" },
 ]
 
 [[package]]
@@ -2497,6 +2514,15 @@ all = [
     { name = "latex2mathml" },
     { name = "pygments" },
     { name = "wavedrom" },
+]
+
+[[package]]
+name = "marko"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/60/f5ce3c467b29fbf8f654c56e23ddde6febf52b8fab4b8e949f46aa8e1c12/marko-2.2.1.tar.gz", hash = "sha256:e29d7e071a3b0cb2f7cc4c500d55f893dc5a45d85a8298dde6cb4e4dffd794d3", size = 143474, upload-time = "2025-10-13T03:13:42.101Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/de/65dfc670e50c9db92b750db1d7c87292b8f3ba9be2c1154594d1a7d1afb4/marko-2.2.1-py3-none-any.whl", hash = "sha256:31e9a18b35c113e506ace5594716fa3df2872f8955908e279bc551f3eb1f0db8", size = 42688, upload-time = "2025-10-13T03:13:40.452Z" },
 ]
 
 [[package]]
@@ -5283,6 +5309,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a7/a5/d6f429d43394057b67a6b5bbe6eae2f77a6bf7459d961fdb224bf206eee6/starlette-0.48.0.tar.gz", hash = "sha256:7e8cee469a8ab2352911528110ce9088fdc6a37d9876926e73da7ce4aa4c7a46", size = 2652949, upload-time = "2025-09-13T08:41:05.699Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/be/72/2db2f49247d0a18b4f1bb9a5a39a0162869acf235f3a96418363947b3d46/starlette-0.48.0-py3-none-any.whl", hash = "sha256:0764ca97b097582558ecb498132ed0c7d942f233f365b86ba37770e026510659", size = 73736, upload-time = "2025-09-13T08:41:03.869Z" },
+]
+
+[[package]]
+name = "strif"
+version = "3.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5c/63/bf90e5632aea866c1bbd2567f04a7026191728c648ecf44ff489829898a3/strif-3.0.1.tar.gz", hash = "sha256:a312ea9540062ccd386132ac2eece93c0c4adaeb25a5f5da11eed7867b1ff31e", size = 33981, upload-time = "2025-05-04T18:40:27.713Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a4/fd/94ebfa518f46b473d238a8ad5837ce75cfe4ea0ce5a91544a88198d8a8d3/strif-3.0.1-py3-none-any.whl", hash = "sha256:5dca44af3ff2f8a947a0398b619d138014f4d29a5aaf6c7e73fe7bec5f5973da", size = 18446, upload-time = "2025-05-04T18:40:26.07Z" },
 ]
 
 [[package]]
