@@ -34,6 +34,7 @@ from .prompts.prompts import (
 )
 
 from ..tools.yandex_search import YandexSearchTool
+from ..tools.think import ThinkTool
 from agents.utils import ModelType, get_llm
 from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
@@ -366,8 +367,9 @@ def provider_then_tool(request: ModelRequest, handler):
 _yandex_tool = YandexSearchTool(
     api_key=config.YA_API_KEY,
     folder_id=config.YA_FOLDER_ID,
-    max_results=3
+    max_results=10
 )
+_think_tool = ThinkTool()
 
 
 def create_options_generator_node(model: BaseChatModel, artifact_id: int):
@@ -403,7 +405,7 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
 
     _agent = create_agent(
         model=model,
-        tools=[_yandex_tool], # No tools for now, or add search_kb if needed
+        tools=[_think_tool, _yandex_tool], # Includes internal scratchpad and search
         #system_prompt=SYSTEM_PROMPT + "\n\n" + prompt,
         middleware=[build_agent_prompt, provider_then_tool],
         response_format=ArtifactOptions,
@@ -509,7 +511,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
     
     _agent = create_agent(
         model=model,
-        tools= [_yandex_tool], # No tools for now, or add search_kb if needed
+        tools= [_think_tool, _yandex_tool], # Includes internal scratchpad and search
         middleware=[build_agent_prompt, provider_then_tool],
         response_format=AftifactFinalText,
         state_schema=ArtifactAgentState,

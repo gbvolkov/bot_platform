@@ -114,11 +114,12 @@ REOPEN возможен: APPROVED → ACTIVE (по запросу пользов
 
 
 TOOL_POLICY_PROMPT = """
-#### Tool-Usage Policy  
+### Yandex Web Search
 1. **Context check.**  
    Immediately inspect the preceding conversation for knowledge-base snippets.  
 2. **Call of `yandex_web_search`.**  
-   If you need information from internet on the best practices oк or competitor analysis, you **may** call `yandex_web_search`. 
+   If you need information from internet on the best practices oк or competitor analysis, you **MAY** call `yandex_web_search`. 
+   If user asked you use information from internet or from external sources, you **MUST** call `yandex_web_search`. 
 3. **Persistent search.**  
    Should the first query return no or insufficient results, broaden it (synonyms, alternative terms) and repeat until you obtain adequate data or exhaust reasonable options.  
 4. **No hallucinations & no external citations.**  
@@ -126,6 +127,55 @@ TOOL_POLICY_PROMPT = """
 5. **Answer timing.**  
    Do **not** send any free-text response to the user until you have processed the results of `yandex_web_search` (if invoked).
 
+### Think Tool (internal scratchpad)
+## Using the think tool (internal scratchpad)
+Before taking any action or responding to the user, **ALWAYS** use the `think_tool` tool to:
+- List the specific rules/criteria that apply to the current artifact.
+- Check if all required information is collected.
+- Verify that the planned action complies with the artifact’s stage goal and criteria.
+- Iterate over tool results for correctness and consistency.
+
+Examples (adapt to the current artifact):
+
+<think_tool_example_trinity>
+Артефакт: Продуктовая троица (Stage: Ideation)
+- Rules/criteria: segment + problem + value + solution must all be present; must have a 2x–30x growth driver.
+- Missing: evidence of segment growth; severity of the problem; linkage of value → solution.
+- Checks: does the solution deliver the stated value for this segment? is the growth driver credible?
+- Next: search segment growth stats; tighten value statement; surface the growth driver.
+</think_tool_example_trinity>
+
+<think_tool_example_canvas>
+Артефакт: Карточка инициативы (Stage: Ideation)
+- Rules/criteria: segments, problem (client language), alternative solutions, revenue sources, solution, channels, metrics (relative), costs, impacted processes.
+- Missing: order-of-magnitude revenue/cost; process impact; metric ↔ revenue alignment.
+- Checks: problem ↔ solution ↔ segment consistency; metrics tied to revenue sources.
+- Next: collect revenue/cost estimates; refine segment specificity; align metrics to revenue.
+</think_tool_example_canvas>
+
+<think_tool_example_value_prop>
+Артефакт: Ценностное предложение (Stage: Discovery)
+- Rules/criteria: fill customer profile (jobs, pains, gains) and value map (products, pain relievers, gain creators); fit between pains/gains and relievers/creators.
+- Missing: top pains/gains from interviews; evidence for fit.
+- Checks: do relievers/creators target the top pains/gains? any gaps?
+- Next: pull interview snippets; rewrite relievers/creators to match pains/gains; flag gaps.
+</think_tool_example_value_prop>
+
+<think_tool_example_cjm>
+Артефакт: CJM (Stage: Discovery)
+- Rules/criteria: stages, actions, touchpoints, problems/barriers, emotions, fixes.
+- Missing: any stage without emotions/problems; unclear touchpoints.
+- Checks: do problems map to specific stages/touchpoints? are proposed fixes plausible?
+- Next: add missing emotions/problems; validate fixes against barriers.
+</think_tool_example_cjm>
+
+<think_tool_example_fin_model>
+Артефакт: Финансовая модель (Stage: Design)
+- Rules/criteria: revenues/metrics, variable & fixed costs, scenarios, TCO/ breakeven in 3–6 months.
+- Missing: key metric-to-revenue link; cost breakdown by stage; scenario deltas.
+- Checks: do revenues align with metrics? is TCO timeline within target? any cost omissions?
+- Next: fill metric→revenue mapping; add scenario table; check TCO horizon.
+</think_tool_example_fin_model>
 """
 
 FORMAT_OPTIONS_PROMPT = f"###СТРУКТУРА ОТВЕТА:\nВсегда отвечай в формате JSON: {build_json_prompt(ArtifactOptions)}\n"
