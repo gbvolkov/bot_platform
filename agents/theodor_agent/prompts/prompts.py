@@ -120,11 +120,13 @@ TOOL_POLICY_PROMPT = """
 2. **Call of `yandex_web_search`.**  
    If you need information from internet on the best practices oк or competitor analysis, you **MAY** call `yandex_web_search`. 
    If user asked you use information from internet or from external sources, you **MUST** call `yandex_web_search`. 
-3. **Persistent search.**  
+3. **Language.**  
+   Always try to query first in Russsian and only then in English.  
+4. **Persistent search.**  
    Should the first query return no or insufficient results, broaden it (synonyms, alternative terms) and repeat until you obtain adequate data or exhaust reasonable options.  
-4. **No hallucinations & no external citations.**  
+5. **No hallucinations & no external citations.**  
    Present information as your own. If data is still lacking, inform the user that additional investigation is required.  
-5. **Answer timing.**  
+6. **Answer timing.**  
    Do **not** send any free-text response to the user until you have processed the results of `yandex_web_search` (if invoked).
 
 ### Think Tool (internal scratchpad)

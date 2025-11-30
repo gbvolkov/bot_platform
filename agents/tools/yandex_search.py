@@ -11,7 +11,7 @@ import logging
 
 # Input schema for the tool
 class YandexSearchInput(BaseModel):
-    query: str = Field(..., description="Search query for web search")
+    query: str = Field(..., description="Search query for web search. Can be in Russian (prefferred) on in English.")
 
 class YandexSearchTool(BaseTool):
     name: str = "yandex_web_search"

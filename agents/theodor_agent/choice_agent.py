@@ -401,7 +401,7 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
             "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
         )
         #print(f"DEBUG: {prompt}")
-        return SYSTEM_PROMPT + "\n\n" + FORMAT_OPTIONS_PROMPT + "\n\n" + TOOL_POLICY_PROMPT + "\n\n" + prompt
+        return SYSTEM_PROMPT + "\n\n" + prompt + "\n\n" + FORMAT_OPTIONS_PROMPT + "\n\n" + TOOL_POLICY_PROMPT
 
     _agent = create_agent(
         model=model,
@@ -506,7 +506,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             f"Список критериев: {', '.join(_artifact_def['criteria'])}\n"
         )
         #print(f"DEBUG: {prompt}")
-        return SYSTEM_PROMPT + "\n\n" + TOOL_POLICY_PROMPT + "\n\n" + prompt    
+        return SYSTEM_PROMPT + "\n\n" + prompt + "\n\n" + TOOL_POLICY_PROMPT
 
     
     _agent = create_agent(
