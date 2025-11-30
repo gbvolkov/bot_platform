@@ -504,7 +504,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             f"Список критериев: {', '.join(_artifact_def['criteria'])}\n"
         )
         #print(f"DEBUG: {prompt}")
-        return SYSTEM_PROMPT + "\n\n" + prompt    
+        return SYSTEM_PROMPT + "\n\n" + TOOL_POLICY_PROMPT + "\n\n" + prompt    
 
     
     _agent = create_agent(
