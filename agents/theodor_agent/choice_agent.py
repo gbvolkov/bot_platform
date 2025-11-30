@@ -251,9 +251,9 @@ def select_option_node(state: ArtifactAgentState,
 
 
     #_SELECTED_OPTION = 0 #TODO: use interrupt to get option from user
-    artifacts = state.get("artifacts") or {}
-    current_artifact = artifacts.get(state["current_artifact_id"])
-    artifact_name = current_artifact["artifact_definition"]["name"]
+    artifacts = state.get("artifacts", {})
+    current_artifact = artifacts.get(state["current_artifact_id"], {})
+    artifact_name = current_artifact.get("artifact_definition", {}).get("name", "")
 
     interrupt_payload = {
         "type": "choice",
@@ -305,9 +305,9 @@ def confirmation_node(state: ArtifactAgentState,
     #state["user_info"] = config.
     #print(state.get("structured_response", {}).get("response", ""))
     
-    artifacts = state.get("artifacts") or {}
-    current_artifact = artifacts.get(state["current_artifact_id"])
-    artifact_name = current_artifact["artifact_definition"]["name"]
+    artifacts = state.get("artifacts", {})
+    current_artifact = artifacts.get(state["current_artifact_id"], {})
+    artifact_name = current_artifact.get("artifact_definition", {}).get("name", "")
 
     #result = _is_user_confirmed("Ерунда какая-то", current_artifact["artifact_final_text"])
     #result = _is_user_confirmed("Подтверждаю", current_artifact["artifact_final_text"])
