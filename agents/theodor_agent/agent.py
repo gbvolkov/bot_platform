@@ -25,12 +25,12 @@ from platform_utils.llm_logger import JSONFileTracer
 
 from .artifacts_defs import (
     ARTIFACTS, 
-    ArtifactDetails,
-    ArtifactOptions,
+    #ArtifactDetails,
+    #ArtifactOptions,
     ArtifactState,
     ArtifactAgentState,
     ArtifactAgentContext,
-    AftifactFinalText,
+    #AftifactFinalText,
 )
 from .choice_agent import initialize_agent as build_choice_agent
 

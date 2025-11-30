@@ -199,7 +199,9 @@ def _format_artifact_options_text(structured_response: Dict[str, Any]) -> str:
 
 def _format_artifact_final_text(structured_response: Dict[str, Any]) -> str:
     """Build user-facing text from the final text generation response."""
-    final_text = structured_response.get("artifact_final_text") or ""
+    artifact_estimation = structured_response.get("artifact_estimation")
+    artifact_final_text = structured_response.get("artifact_final_text", "")
+    final_text = artifact_estimation or "" + "\n" if artifact_estimation else "" + artifact_final_text
 
     return final_text
 
@@ -316,6 +318,7 @@ def confirmation_node(state: ArtifactAgentState,
         "type": "choice",
         "artifact_id": state["current_artifact_id"],
         "artifact_name": artifact_name,
+        #"content": prettify(current_artifact["artifact_estimation"] + "\n" + current_artifact["artifact_final_text"]),
         "content": prettify(current_artifact["artifact_final_text"]),
         "question": f"Подтвердите артефакт \"{artifact_name}\" или скажите, что нужно изменить.",
     }
@@ -390,7 +393,8 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
             f"Компоненты: {',\n-'.join(_artifact_def['components'])}\n"
             f"Методология: {_artifact_def['methodology']}\n"
             f"Критерии: {',\n-'.join(_artifact_def['criteria'])}\n\n"
-            "Предложи 2-3 варианта для этого артефакта, основываясь на предыдущем контексте.\n\n"
+            f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
+            "Предложи несколько вариантов для этого артефакта, основываясь на предыдущем контексте.\n\n"
             "Каждый вариант должен удовлетворять всем критериям.\n\n"
             "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
         )
@@ -491,6 +495,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             f"Мы работаем над этапом {_artifact_id + 1}: {_artifact_def['name']}.\n"
             f"Цель: {_artifact_def['goal']}\n"
             f"Методология: {_artifact_def['methodology']}\n"
+            f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
             f"{context_str}\n"
             "Пользователь прислал ответ. \n"
             f"Вариант {_artifact_id + 1}: {selected_option["artifact_option"]}\n"
@@ -541,7 +546,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
 
         result["current_artifact_text"] = result.get("structured_response", {}).get("artifact_final_text", "")   
         result_details = result_artifacts.get(_artifact_id)# or details
-        result_details["artifact_final_text"] = result.get("structured_response", {}).get("artifact_final_text", "")   
+        result_details["artifact_final_text"] = result.get("structured_response", {}).get("artifact_final_text", "")  +  "\n" + result.get("structured_response", {}).get("artifact_estimation", "") 
         result_artifacts[_artifact_id] = result_details
         result["messages"] = _update_last_ai_message_content(
             result.get("messages") or [], formatted_final_text
