@@ -7,7 +7,28 @@ from xml.etree import ElementTree as ET
 import trafilatura
 from duckduckgo_search.utils import _normalize, _normalize_url
 
+from agents.llm_utils import get_llm
 import logging
+
+
+
+summariser_llm = get_llm("nano", provider="openai", temperature=0)
+def summarise_content(content: str, thematic: str, maxlen: int = 4096) -> str:
+    if len(content) <= maxlen:
+        return content
+    try:    
+        prompt = ("You have as an input a content of a webpage specific for a given thematic.\n" 
+            "Please prepare summary of the content related to the information for a given thematic.\n" 
+            "Always answer in Russian.\n" 
+            f"Content: {content}.\n"
+            f"Thematic: {thematic}."
+            f"The length of the response shall not exceed {maxlen} characters.")
+        result = summariser_llm.invoke(prompt)
+    except Exception as e:
+        logging.error("Error occured at summarise_request.\nException: {e}")
+        raise e
+    return result.content
+
 
 # Input schema for the tool
 class YandexSearchInput(BaseModel):
@@ -26,13 +47,16 @@ class YandexSearchTool(BaseTool):
     folder_id: str
     max_results: int = 5
     max_size: int = 16384
+    summarize: bool = False
+    
+    query: str = ""
 
     def _run(self, query: str) -> str:
         headers = {
             "Authorization": f"Api-Key {self.api_key}",
             "Content-Type": "application/json",
         }
-
+        self.query = query
         endpoint = "https://searchapi.api.cloud.yandex.net/v2/web/search"
         payload = {
             "query": {
@@ -74,6 +98,8 @@ class YandexSearchTool(BaseTool):
             except Exception as e:
                 continue
             href = _normalize_url(href)
+            if self.summarize:
+                body = summarise_content(_normalize(body)[:self.max_size], self.query, 2048)
             results.append(
                 {
                     "title": _normalize(title),

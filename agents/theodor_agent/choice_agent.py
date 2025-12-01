@@ -15,6 +15,7 @@ from langchain.agents.structured_output import (
 )
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.modifier import RemoveMessage
 from langchain_core.runnables import RunnableConfig
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -49,7 +50,7 @@ from .artifacts_defs import (
 )
 from agents.structured_prompt_utils import build_json_prompt
 
-DEBUG = True
+DEBUG = False
 def debug_log(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -75,23 +76,31 @@ def create_init_node(artifact_id: int):
     def init_node(state: ArtifactAgentState, 
                 config: RunnableConfig,
                 runtime: Runtime[ArtifactAgentContext],) -> ArtifactAgentState:
+        original_messages = state.get("messages", [])
+        remove_ops = _sanitize_messages(original_messages)
         
         if runtime is None or runtime.context is None or "user_prompt" not in runtime.context:
-            if not state["messages"]:
-                return state          
-            last_user_msg = state["messages"][-1]
-            # We only augment on real user turns
-            if last_user_msg.type != "human":
+            if not original_messages:
                 return state
+            last_user_msg = None
+            for msg in reversed(original_messages):
+                if isinstance(msg, HumanMessage) or getattr(msg, "type", "") == "human":
+                    last_user_msg = msg
+                    break
+            if last_user_msg is None:
+                return state  # no human message to seed prompt
             user_prompt = last_user_msg.content
         else:
             user_prompt = runtime.context["user_prompt"]
 
-        state["user_prompt"] = user_prompt
-        state["current_artifact_state"] = ArtifactState.INIT
-        state["current_artifact_id"] = artifact_id
-        #state["user_info"] = config.
-        return state
+        return Command(
+            update={
+                "messages": remove_ops,
+                "user_prompt": user_prompt,
+                "current_artifact_state": ArtifactState.INIT,
+                "current_artifact_id": artifact_id,
+            }
+        )
     return init_node
 
 """
@@ -232,6 +241,27 @@ def _update_last_ai_message_content(messages: List[Any], text: str) -> List[Any]
     return updated_messages
 
 
+def _sanitize_messages(messages: List[Any]) -> List[RemoveMessage]:
+    """Decide which messages to remove while leaving all others untouched."""
+    remove_ops: List[RemoveMessage] = []
+    for msg in messages or []:
+        if isinstance(msg, ToolMessage):
+            if getattr(msg, "id", None):
+                remove_ops.append(RemoveMessage(id=msg.id))
+            continue
+        if isinstance(msg, AIMessage):
+            has_tool_payload = bool(
+                getattr(msg, "tool_calls", None)
+                or getattr(msg, "invalid_tool_calls", None)
+                or (getattr(msg, "additional_kwargs", {}) or {}).get("tool_calls")
+            )
+            if has_tool_payload and getattr(msg, "id", None):
+                remove_ops.append(RemoveMessage(id=msg.id))
+            continue
+        # untouched messages are left in place
+    return remove_ops
+
+
 @debug_log
 def select_option_node(state: ArtifactAgentState, 
               config: RunnableConfig,
@@ -367,7 +397,8 @@ def provider_then_tool(request: ModelRequest, handler):
 _yandex_tool = YandexSearchTool(
     api_key=config.YA_API_KEY,
     folder_id=config.YA_FOLDER_ID,
-    max_results=10
+    max_results=10,
+    summarize=True
 )
 _think_tool = ThinkTool()
 

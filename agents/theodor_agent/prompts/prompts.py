@@ -178,6 +178,70 @@ Examples (adapt to the current artifact):
 - Checks: do revenues align with metrics? is TCO timeline within target? any cost omissions?
 - Next: fill metric→revenue mapping; add scenario table; check TCO horizon.
 </think_tool_example_fin_model>
+
+<think_tool_example_stakeholders>
+Артефакт: Карта стейкхолдеров (Stage: Ideation)
+- Rules/criteria: полный список стейкхолдеров; матрица власть/интерес; коммуникации по квадрантам.
+- Missing: пустые квадранты? влияние/интерес не оценены?
+- Checks: коммуникации соответствуют квадранту? нет ли конфликтов?
+- Next: добавить недостающих стейкхолдеров; расставить по матрице; дописать план коммуникаций.
+</think_tool_example_stakeholders>
+
+<think_tool_example_hypotheses>
+Артефакт: Бэклог гипотез (Stage: Discovery)
+- Rules/criteria: If/Then формулировка, сегмент, метрика, приоритет, способ проверки.
+- Missing: риск/ценность приоритезации? метрика/порог?
+- Checks: метод проверки соответствует гипотезе? порядок по риску/ценности?
+- Next: уточнить метрики/пороги; переприоритезировать; выбрать первые проверки.
+</think_tool_example_hypotheses>
+
+<think_tool_example_custdev_plan>
+Артефакт: План/результаты глубинных интервью (Stage: Discovery)
+- Rules/criteria: цели, гипотезы, открытые вопросы, тайминг; фиксация инсайтов.
+- Missing: ретроспективные вопросы? 5 почему? рекрут соответствует сегменту?
+- Checks: вопросы избегают форсайта? покрыты ключевые гипотезы?
+- Next: поправить скрипт; забронировать интервью; занести инсайты в таблицу.
+</think_tool_example_custdev_plan>
+
+<think_tool_example_process_as_is>
+Артефакт: Карта бизнес-процесса AS-IS (Stage: Discovery)
+- Rules/criteria: роли, действия, длительности, инструменты, узкие места.
+- Missing: вход/выход процесса? пустые роли/шаги? тайминги?
+- Checks: узкие места зафиксированы? гипотезы улучшений есть?
+- Next: дописать шаги; отметить bottlenecks; подготовить TO-BE идеи.
+</think_tool_example_process_as_is>
+
+<think_tool_example_competitors>
+Артефакт: Конкурентный анализ (Stage: Discovery)
+- Rules/criteria: конкуренты (прямые/косвенные), сегменты, УТП, монетизация, фичи, цена, отзывы.
+- Missing: косвенные конкуренты? пользовательский взгляд?
+- Checks: УТП vs наши сегменты/ценность? пробелы/возможности?
+- Next: добавить конкурентов; выписать дифференциацию.
+</think_tool_example_competitors>
+
+<think_tool_example_uvp>
+Артефакт: УТП (Stage: Discovery)
+- Rules/criteria: ЦА, проблема, решение/продукт, уникальное отличие.
+- Missing: доказательства уникальности? связь с pains/gains и конкурентами?
+- Checks: формулировка конкретна, ценна сегменту, запоминается?
+- Next: ужать one-liner; привязать к доказательствам; контрастировать с конкурентами.
+</think_tool_example_uvp>
+
+<think_tool_example_roadmap>
+Артефакт: Roadmap (Stage: Design)
+- Rules/criteria: задачи/пакеты, сроки, ответственные, вехи, критический путь.
+- Missing: зависимости? владельцы? буферы под риски?
+- Checks: вехи соответствуют стадиям? критический путь ясен?
+- Next: добавить зависимости/ответственных; расставить вехи; заложить буферы.
+</think_tool_example_roadmap>
+
+<think_tool_example_project_card>
+Артефакт: Карточка проекта (Stage: Design)
+- Rules/criteria: резюме, валидированные сегменты/проблемы, MVP scope, метрики успеха, экономика, команда/FTE, риски, roadmap.
+- Missing: ссылки на валидацию? команда/алокации? митигации рисков?
+- Checks: scope MVP соотнесен с метриками/экономикой? риски покрыты?
+- Next: добавить доказательства; уточнить MVP scope; финализировать команду/риски.
+</think_tool_example_project_card>
 """
 
 FORMAT_OPTIONS_PROMPT = f"###СТРУКТУРА ОТВЕТА:\nВсегда отвечай в формате JSON: {build_json_prompt(ArtifactOptions)}\n"
