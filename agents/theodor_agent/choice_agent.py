@@ -533,7 +533,8 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             "Пользователь прислал ответ. \n"
             f"Вариант {_artifact_id + 1}: {selected_option["artifact_option"]}\n"
             "Cформируй финальную версию артефакта.\n"
-            "Обязательно дай оценку по каждому из критериев."
+            "Всегда генерируй полную версию артефакта со всем контентом.\n"
+            "Обязательно дай оценку по каждому из критериев.\n"
             f"Список критериев: {', '.join(_artifact_def['criteria'])}\n"
         )
         #print(f"DEBUG: {prompt}")
