@@ -10,6 +10,7 @@ from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
 from agents.ingos_product_agent import initialize_agent as init_product_agent
 from agents.bi_agent import initialize_agent as init_aibi_agent
+from agents.ideator_agent import initialize_agent as init_ideator_agent
 from agents.theodor_agent.agent import initialize_agent as init_theodor_agent
 from agents.utils import ModelType
 
@@ -88,6 +89,14 @@ class AgentRegistry:
                 name="Theodor AI (Product Mentor)",
                 description="Продуктовый наставник. Ведет по методологии Фёдора (13 артефактов).",
                 factory=lambda provider: init_theodor_agent(provider=provider),
+                default_provider=default_provider,
+                supported_content_types=default_content_types,
+            ),
+            "ideator": AgentDefinition(
+                id="ideator",
+                name="Ideator (Новости → идеи)",
+                description="Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+                factory=lambda provider: init_ideator_agent(provider=provider),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
             ),
