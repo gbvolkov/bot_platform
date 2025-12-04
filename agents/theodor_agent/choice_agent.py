@@ -48,7 +48,7 @@ from .artifacts_defs import (
     ArtifactAgentContext,
     AftifactFinalText,
 )
-from agents.structured_prompt_utils import build_json_prompt
+from agents.structured_prompt_utils import provider_then_tool
 
 DEBUG = False
 def debug_log(func):
@@ -378,21 +378,6 @@ def confirmation_node(state: ArtifactAgentState,
     )
 
 response_format = AutoStrategy(schema=ArtifactOptions)
-
-@wrap_model_call
-def provider_then_tool(request: ModelRequest, handler):
-    try:
-        return handler(request)
-    except (ValueError, StructuredOutputValidationError):
-        rf = request.response_format
-        if isinstance(rf, AutoStrategy):
-            schema = rf.schema
-        elif isinstance(rf, ProviderStrategy):
-            schema = rf.schema
-        else:
-            raise  # already in ToolStrategy; bubble up
-        # Retry using tool-based structured output
-        return handler(request.override(response_format=ToolStrategy(schema=schema)))
 
 _yandex_tool = YandexSearchTool(
     api_key=config.YA_API_KEY,

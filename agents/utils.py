@@ -149,7 +149,6 @@ def summarise_image(image_uri: str) -> str:
     )
 
     parts = [{"type": "text", "text": prompt}]
-
     if image_uri.startswith("data:"):
         # Already a valid data URL → pass through
         parts.append({"type": "image_url", "image_url": {"url": image_uri}})

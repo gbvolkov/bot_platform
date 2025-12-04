@@ -1,7 +1,14 @@
 import json
-from typing import Any, Annotated, get_args, get_origin, get_type_hints
+from typing import Any, Annotated, NotRequired, get_args, get_origin, get_type_hints
 
 from typing_extensions import is_typeddict
+from langchain.agents.middleware import ModelRequest, wrap_model_call
+from langchain.agents.structured_output import (
+    AutoStrategy,
+    ProviderStrategy,
+    ToolStrategy,
+    StructuredOutputValidationError,
+)
 
 
 def _unwrap_annotated(tp: Any) -> Any:
@@ -25,6 +32,11 @@ def _example_for_type(tp: Any) -> Any:
     """Build a minimal example value for a type hint."""
     tp = _unwrap_annotated(tp)
     origin = get_origin(tp)
+
+    if origin is NotRequired:
+        args = get_args(tp)
+        inner = args[0] if args else Any
+        return _example_for_type(inner)
 
     if is_typeddict(tp):
         return _example_from_typed_dict(tp)
@@ -63,6 +75,10 @@ def _collect_field_descriptions(schema: Any, prefix: str = "") -> list[str]:
         if desc:
             descriptions.append(f"{field_name}: {desc}")
         base = _unwrap_annotated(tp)
+        origin = get_origin(base)
+        if origin is NotRequired:
+            args = get_args(base)
+            base = args[0] if args else Any
         if is_typeddict(base):
             descriptions.extend(_collect_field_descriptions(base, prefix=f"{field_name}."))
     return descriptions
@@ -88,6 +104,22 @@ def build_json_prompt(schema: Any) -> str:
         "No additional keys."
         + ("\n" + desc_block if desc_block else "")
     )
+
+@wrap_model_call
+def provider_then_tool(request: ModelRequest, handler):
+    """Retry structured output via tool strategy if provider strategy fails."""
+    try:
+        return handler(request)
+    except (ValueError, StructuredOutputValidationError):
+        rf = request.response_format
+        if isinstance(rf, AutoStrategy):
+            schema = rf.schema
+        elif isinstance(rf, ProviderStrategy):
+            schema = rf.schema
+        else:
+            raise  # already in ToolStrategy; bubble up
+        # Retry using tool-based structured output
+        return handler(request.override(response_format=ToolStrategy(schema=schema)))
 
 
 __all__ = ["build_json_prompt"]
