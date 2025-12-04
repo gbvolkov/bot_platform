@@ -57,6 +57,7 @@ dependencies = [
     "aiogram>=3.4",
     "openai-whisper",
     "flowmark>=0.5.7",
+    "jq>=1.10.0",
 ]
 
 [tool.uv.sources]
