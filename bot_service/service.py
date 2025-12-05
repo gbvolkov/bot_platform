@@ -127,13 +127,20 @@ def build_human_message(payload: MessagePayload, raw_text_override: Optional[str
     return HumanMessage(content=content)
 
 
-def build_agent_config(conversation_id: str, user_id: str, user_role: Optional[str]) -> RunnableConfig:
+def build_agent_config(
+    conversation_id: str,
+    user_id: str,
+    user_role: Optional[str],
+    raw_attachments: Optional[List[Dict[str, Any]]] = None,
+) -> RunnableConfig:
     role = user_role or settings.default_user_role
     configurable: ConfigSchema = {
         "user_id": user_id,
         "user_role": role,
         "thread_id": conversation_id,
     }
+    if raw_attachments:
+        configurable["attachments"] = raw_attachments
     return {"configurable": configurable}
 
 
@@ -146,10 +153,21 @@ async def invoke_agent(
     pending_interrupt: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     raw_user_text = None
+    raw_attachments: List[Dict[str, Any]] = []
     if isinstance(payload.metadata, dict):
         raw_user_text = payload.metadata.get("raw_user_text")
+        raw_attachments_value = payload.metadata.get("raw_attachments")
+        if isinstance(raw_attachments_value, list):
+            raw_attachments = [item for item in raw_attachments_value if isinstance(item, dict)]
     human = build_human_message(payload, raw_text_override=raw_user_text if pending_interrupt else None)
-    config = build_agent_config(conversation_id, user_id, user_role)
+    config = build_agent_config(
+        conversation_id,
+        user_id,
+        user_role,
+        raw_attachments=raw_attachments or None,
+    )
+
+    runtime_context: Optional[Dict[str, Any]] = None
 
     def _invoke() -> Dict[str, Any]:
         if pending_interrupt:
@@ -159,9 +177,15 @@ async def invoke_agent(
                 pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
                 len(raw_user_text or payload.text or ""),
             )
-            response = agent.invoke(Command(resume=raw_user_text or payload.text or ""), config=config)
+            response = agent.invoke(
+                Command(resume=raw_user_text or payload.text or ""),
+                config=config,
+            )
         else:
-            response = agent.invoke({"messages": [human]}, config=config)
+            initial_state: Dict[str, Any] = {"messages": [human]}
+            if raw_attachments:
+                initial_state["attachments"] = raw_attachments
+            response = agent.invoke(initial_state, config=config)
         if isinstance(response, dict):
             return response
         return {"messages": response}

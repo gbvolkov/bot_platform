@@ -28,7 +28,9 @@ import config
 from agents.tools.think import ThinkTool
 from agents.utils import ModelType, get_llm
 from agents.structured_prompt_utils import build_json_prompt, provider_then_tool
+from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
+
 
 from .models import ArticleRecord, IdeatorReport
 from .prompts import (
@@ -36,12 +38,18 @@ from .prompts import (
     IDEAS_INSTRUCTION,
     IDEATOR_SYSTEM_PROMPT,
     SENSE_LINE_INSTRUCTION,
+    TOOL_POLICY_PROMPT,
 )
 from .report_loader import load_report
 from .state import IdeatorAgentContext, IdeatorAgentState
 
 LOG = logging.getLogger(__name__)
 
+
+class ArticleRef(TypedDict):
+    id: Annotated[int, "Id from the provided list"]
+    title: Annotated[str, "Title of the article"]
+    summary: Annotated[str, "Summary of the article"]
 
 class Decision(TypedDict, total=False):
     selected_line_index: Annotated[Optional[int], "1-based line index if chosen"]
@@ -58,12 +66,13 @@ class SenseLineItem(TypedDict):
     id: Annotated[str, "Stable id like L1/L2"]
     short_title: Annotated[str, "Short name of the sense line"]
     description: Annotated[str, "1-2 sentences grounded in the provided articles"]
-    article_ids: Annotated[List[int], "Ids from the provided list only"]
+    #article_ids: Annotated[List[int], "Ids from the provided list only"]
+    articles: Annotated[List[ArticleRef], "List of articles from the provided list only"]
     region_note: Annotated[str, "Region applicability note"]
 
 
 class SenseLineResponse(TypedDict):
-    assistant_message: Annotated[str, "Natural language reply for the user"]
+    assistant_message: Annotated[str, "Natural language reply for the user for matted for MarkdownV2"]
     sense_lines: List[SenseLineItem]
     decision: NotRequired[Decision]
 
@@ -71,7 +80,8 @@ class SenseLineResponse(TypedDict):
 class IdeaItem(TypedDict):
     title: Annotated[str, "Idea headline (1 short sentence)"]
     summary: Annotated[str, "1-2 sentences grounded strictly in provided articles"]
-    article_ids: Annotated[List[int], "Ids from the provided list only"]
+    #article_ids: Annotated[List[int], "Ids from the provided list only"]
+    articles: Annotated[List[ArticleRef], "List of articles from the provided list only"]
     region_note: Annotated[str, "Region applicability note"]
     importance_hint: Annotated[NotRequired[str], "High/Medium/Low or empty"]
 
@@ -92,20 +102,26 @@ def _format_articles(articles: List[ArticleRecord], limit_chars: int = 400) -> s
         if len(summary) > limit_chars:
             summary = summary[:limit_chars] + "..."
         lines.append(
-            f"[{art.id}] ({art.norm_importance()}; {art.region_label()}) "
-            f"{art.display_title()} — {summary} | {art.url}"
+            f"- [{art.id}] ({art.norm_importance()}; {art.region_label()})\n"
+            f"  {summary}\n"
+            f"  [{art.display_title()}]({art.url})"
         )
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def _format_sense_lines(lines: List[Dict[str, Any]]) -> str:
     formatted: List[str] = []
     for idx, line in enumerate(lines or [], start=1):
+        articles = line.get("articles") or []
+        articles_label = ", ".join(
+            f"[{art.get('id', i)}] {art.get('title','')}" if isinstance(art, dict) else str(art)
+            for i, art in enumerate(articles, 1)
+        )
         formatted.append(
             f"{idx}) {line.get('id') or f'L{idx}'} | {line.get('short_title','')}\n"
             f"{line.get('description','')}\n"
             f"region: {line.get('region_note','')}\n"
-            f"articles: {line.get('article_ids', [])}"
+            f"articles: {articles_label}"
         )
     return "\n\n".join(formatted)
 
@@ -113,17 +129,90 @@ def _format_sense_lines(lines: List[Dict[str, Any]]) -> str:
 def _format_ideas(ideas: List[Dict[str, Any]]) -> str:
     formatted: List[str] = []
     for idx, idea in enumerate(ideas or [], start=1):
+        articles = idea.get("articles") or []
+        articles_label = ", ".join(
+            f"[{art.get('id', i)}] {art.get('title','')}" if isinstance(art, dict) else str(art)
+            for i, art in enumerate(articles, 1)
+        )
         formatted.append(
             f"{idx}) {idea.get('title','')}\n"
             f"{idea.get('summary','')}\n"
             f"region: {idea.get('region_note','')}\n"
-            f"articles: {idea.get('article_ids', [])}"
+            f"articles: {articles_label}"
         )
     return "\n\n".join(formatted)
 
 
 def _fact_refs_for(report: IdeatorReport, article_ids: List[int]) -> List[str]:
     return [art.fact_ref() for art in report.filter_by_ids(article_ids)]
+
+
+def _links_md_for(report: IdeatorReport, article_ids: List[int], limit: int = 5) -> str:
+    links: List[str] = []
+    for art in report.filter_by_ids(article_ids)[:limit]:
+        if art.url:
+            links.append(f"- [{art.display_title()}]({art.url})")
+    return "\n".join(links)
+
+
+def _fact_links_md(report: IdeatorReport, article_ids: List[int], limit: int = 5) -> str:
+    links: List[str] = []
+    for art in report.filter_by_ids(article_ids)[:limit]:
+        if art.url:
+            country = (art.search_country or "").lower()
+            if country in {"ru", "rus", "russia", "рф", "россия"}:
+                relevance = "РФ — релевантно"
+            elif country:
+                relevance = f"{country.upper()} — релевантно"
+            else:
+                relevance = "регион: н/д"
+            importance = art.norm_importance()
+            links.append(f"- [{art.display_title()}]({art.url}) ({relevance}; важность: {importance})")
+    return "\n".join(links)
+
+
+def _fact_links_from_articles(articles: List[ArticleRecord], limit: int = 5) -> str:
+    links: List[str] = []
+    for art in articles[:limit]:
+        if art.url:
+            country = (art.search_country or "").lower()
+            if country in {"ru", "rus", "russia", "рф", "россия"}:
+                relevance = "РФ — релевантно"
+            elif country:
+                relevance = f"{country.upper()} — релевантно"
+            else:
+                relevance = "регион: н/д"
+            importance = art.norm_importance()
+            links.append(f"- [{art.display_title()}]({art.url}) ({relevance}; важность: {importance})")
+    return "\n".join(links)
+
+
+def _extract_articles(obj: Dict[str, Any], report: IdeatorReport) -> List[ArticleRecord]:
+    raw_articles = obj.get("articles")
+    if isinstance(raw_articles, list) and raw_articles:
+        if all(isinstance(a, ArticleRecord) for a in raw_articles):
+            return list(raw_articles)  # type: ignore
+        articles: List[ArticleRecord] = []
+        for item in raw_articles:
+            if isinstance(item, dict) and "id" in item:
+                try:
+                    articles.extend(report.filter_by_ids([int(item["id"])]))
+                except Exception:
+                    continue
+        if articles:
+            return articles
+    ids = obj.get("article_ids") or []
+    if isinstance(ids, list):
+        return report.filter_by_ids([int(i) for i in ids if isinstance(i, (int, str))])
+    return []
+
+
+def _links_md_for(report: IdeatorReport, article_ids: List[int], limit: int = 5) -> str:
+    links: List[str] = []
+    for art in report.filter_by_ids(article_ids)[:limit]:
+        if art.url:
+            links.append(f"- [{art.display_title()}]({art.url})")
+    return "\n".join(links)
 
 
 def _build_sense_agent(model: BaseChatModel):
@@ -150,7 +239,7 @@ def _build_sense_agent(model: BaseChatModel):
                 f"{_format_sense_lines(existing_lines)}\n\n"
             )
         prompt += f"{build_json_prompt(SenseLineResponse)}"
-        return prompt
+        return prompt + TOOL_POLICY_PROMPT
 
     return create_agent(
         model=model,
@@ -167,8 +256,10 @@ def _build_ideas_agent(model: BaseChatModel):
     def build_prompt(request: ModelRequest) -> str:
         state: IdeatorAgentState = request.state
         report: IdeatorReport = state.get("report")  # type: ignore
-        filtered_ids = state.get("filtered_article_ids") or []
-        articles = report.filter_by_ids(filtered_ids) if report else []
+        articles = state.get("filtered_articles") or []
+        if not articles and report:
+            filtered_ids = state.get("filtered_article_ids") or []
+            articles = report.filter_by_ids(filtered_ids)
         existing_ideas = state.get("ideas") or []
         prompt = (
             IDEATOR_SYSTEM_PROMPT
@@ -187,7 +278,7 @@ def _build_ideas_agent(model: BaseChatModel):
                 f"{_format_ideas(existing_ideas)}\n\n"
             )
         prompt += f"{build_json_prompt(IdeaListResponse)}"
-        return prompt
+        return prompt + TOOL_POLICY_PROMPT
 
     return create_agent(
         model=model,
@@ -200,13 +291,34 @@ def _build_ideas_agent(model: BaseChatModel):
 
 
 def create_init_node():
+    def _find_report_path_from_attachments(state: IdeatorAgentState) -> Optional[str]:
+        sources = []
+        attachments = state.get("attachments")
+        if isinstance(attachments, list):
+            sources.extend(attachments)
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            filename = (item.get("filename") or "").lower()
+            ctype = (item.get("content_type") or "").lower()
+            if not path:
+                continue
+            if filename.endswith(".json") or "json" in ctype:
+                return path
+        return None
+
     def init_node(
         state: IdeatorAgentState,
         config: RunnableConfig,
         runtime: Runtime[IdeatorAgentContext],
     ) -> IdeatorAgentState:
+        report_path = None
         if runtime.context and runtime.context.get("report_path"):
             report_path = runtime.context["report_path"]
+        if report_path is None:
+            report_path = _find_report_path_from_attachments(state)
+        if report_path:
             state["report_path"] = report_path
             state["report"] = load_report(report_path)
         if "ideas_cache" not in state:
@@ -218,7 +330,10 @@ def create_init_node():
         if "phase" not in state:
             state["phase"] = "lines"
         if not state.get("greeted"):
-            greet = "Привет! Я — Генератор идей. Отчёт загружен, готов выделить смысловые линии."
+            greet = ("Привет! Я — Генератор идей.\n"
+                    "Помогаю превращать ваши разведданные в понятные, собранные, основанные на фактах продуктовые идеи. \n"
+                    "По ходу работы можно в любой момент сравнивать идеи, дорабатывать их или возвращаться на предыдущие шаги — просто скажите об этом.\n"
+                    "Отчёт загружен, готов выделить смысловые линии." if state.get("report") else "Пожалуйста, загрузите отчёт — и я начну разбор")
             state["messages"] = (state.get("messages") or []) + [AIMessage(content=greet)]
             state["greeted"] = True
         return state
@@ -247,26 +362,36 @@ def create_sense_lines_node(model: BaseChatModel):
         result.pop("structured_response", None)
         LOG.info("sense_lines_node: generated %d lines", len(sense_lines))
 
+        content = ""
         if assistant_message:
-            result["messages"] = result.get("messages", []) + [AIMessage(content=assistant_message)]
+            #content = prettify(assistant_message)
+            content = assistant_message
         elif sense_lines:
             report: IdeatorReport = state.get("report")  # type: ignore
             formatted_lines = []
             for idx, line in enumerate(sense_lines, start=1):
-                fact_refs = _fact_refs_for(report, line.get("article_ids", [])) if report else []
+                articles = _extract_articles(line, report) if report else []
+                fact_links_md = _fact_links_from_articles(articles) if report else ""
+                extras: List[str] = []
+                if fact_links_md:
+                    extras.append("Факты (ссылки):\n" + fact_links_md)
                 formatted_lines.append(
                     f"{idx}) {line.get('short_title','')}\n"
                     f"{line.get('description','')}\n"
                     f"{line.get('region_note','')}\n"
-                    + "\n".join(fact_refs)
+                    + "\n".join(extras)
                 )
             fallback = "Смысловые линии:\n" + "\n\n".join(formatted_lines)
-            result["messages"] = result.get("messages", []) + [AIMessage(content=fallback)]
+            #content = prettify(fallback)
+            content = fallback
+
+        result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
 
         if decision.get("regen_lines"):
             result["force_regen_lines"] = True
             result.pop("selected_line_id", None)
             result.pop("filtered_article_ids", None)
+            result.pop("filtered_articles", None)
             result["phase"] = "lines"
 
         selected_idx = decision.get("selected_line_index")
@@ -276,13 +401,16 @@ def create_sense_lines_node(model: BaseChatModel):
         if ready_for_ideas and selected_idx and 1 <= selected_idx <= len(sense_lines):
             selected = sense_lines[selected_idx - 1]
             result["selected_line_id"] = selected.get("id") or f"L{selected_idx}"
-            result["filtered_article_ids"] = [int(i) for i in selected.get("article_ids", [])]
+            articles = _extract_articles(selected, report) if report else []
+            result["filtered_articles"] = articles
+            result["filtered_article_ids"] = []
             result["force_regen"] = True
             result["phase"] = "ideas"
         elif ready_for_ideas and custom_line_text:
-            top_ids = [a.id for a in (report.sorted_articles()[:20] if report else [])]
+            top_articles = report.sorted_articles()[:20] if report else []
             result["selected_line_id"] = "custom_line"
-            result["filtered_article_ids"] = top_ids
+            result["filtered_articles"] = top_articles
+            result["filtered_article_ids"] = []
             result["force_regen"] = True
             result["phase"] = "ideas"
         elif decision.get("finish"):
@@ -316,22 +444,31 @@ def create_ideas_node(model: BaseChatModel):
         result.pop("structured_response", None)
         LOG.info("ideas_node: generated %d ideas", len(ideas))
 
+        content = ""
         if assistant_message:
-            result["messages"] = result.get("messages", []) + [AIMessage(content=assistant_message)]
-        else:
+            #content = prettify(assistant_message)
+            content = assistant_message
+        elif ideas:
             report: IdeatorReport = state.get("report")  # type: ignore
             formatted = []
             for idea in ideas:
-                fact_refs = _fact_refs_for(report, idea.get("article_ids", [])) if report else []
+                articles = _extract_articles(idea, report) if report else []
+                fact_links = _fact_links_from_articles(articles) if report else ""
+                extras = f"{idea.get('region_note','')}\n"
+                if fact_links:
+                    extras += f"Факты (ссылки):\n{fact_links}"
                 formatted.append(
                     f"- {idea.get('title','')}: {idea.get('summary','')}\n"
-                    f"{idea.get('region_note','')}\n" + "\n".join(fact_refs)
+                    f"{extras}"
                 )
             if formatted:
                 fallback = "Идеи по выбранной линии:\n" + "\n\n".join(formatted)
             else:
                 fallback = "Не удалось сгенерировать идеи по выбранной линии. Попробуйте выбрать другую линию или уточнить запрос."
-            result["messages"] = result.get("messages", []) + [AIMessage(content=fallback)]
+            #content = prettify(fallback)
+            content = fallback
+
+        result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
 
         if decision.get("more_ideas"):
             result["force_regen"] = True
@@ -363,9 +500,7 @@ def route(state: IdeatorAgentState) -> str:
         return "sense_lines"
 
     if phase == "ideas":
-        if state.get("force_regen") or not state.get("ideas"):
-            return "ideas"
-        return "await"
+        return "ideas"
 
     if phase == "finish":
         return "await"

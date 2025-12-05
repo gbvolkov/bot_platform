@@ -143,7 +143,7 @@ C) Переформулирование
 Формат финальной идеи:
 • 1–2 предложения — чёткая суть идеи,
 • 1 предложение — какую проблему она решает,
-• 3–5 fact_ref,
+• 3–5 fact_ref в MarkdownV2,
 • региональные пометки при необходимости.
 Формулировка должна быть компактной и готовой к передаче в Продуктолог.ai без дополнительных преобразований, без каких-либо артефактов или методологических блоков.
 После этого спроси:
@@ -159,7 +159,7 @@ C) Переформулирование
 Каждая альтернативная идея должна:
 • быть сформулирована в одном предложении,
 • опираться только на факты отчёта,
-• содержать 1–2 fact_ref в Markdown,
+• содержать 1–2 fact_ref в MarkdownV2,
 • иметь региональную пометку (РФ / зарубежный рынок — требует адаптации),
 • быть конкретной и отличаться от основной идеи по механике, фокусу или роли ИИ.
 
@@ -199,7 +199,7 @@ C) Переформулирование
 """
 
 
-SENSE_LINE_INSTRUCTION = """
+SENSE_LINE_INSTRUCTION_OLD = """
 Generate 3-4 concise sense lines grounded only in the provided articles.
 Each line must include:
 - short_title (brief label);
@@ -208,7 +208,7 @@ Each line must include:
 - region_note (region applicability if relevant).
 Always return the `sense_lines` array, even when continuing a discussion instead of choosing.
 Dialogue and decision rules:
-- Put your user-facing reply into `assistant_message` (recap options, clarify needs, offer tweaks).
+- Put your user-facing reply into `assistant_message` (recap options, clarify needs, offer tweaks), formatted as MarkdownV2.
 - Keep ids/order stable between turns unless the user clearly asks to regenerate lines.
 - decision reflects clear user intent:
   * selected_line_index - 1-based index from sense_lines when the user picked one;
@@ -219,9 +219,31 @@ Dialogue and decision rules:
   When the user confirms a choice, set consent_generate=true so the flow can switch to idea generation.
   If the user is still clarifying or comparing, leave decision fields null/false and keep the conversation going without forcing a choice.
 """
+SENSE_LINE_INSTRUCTION = """
+Сгенерируй 3–4 краткие sense lines, опираясь только на предоставленные статьи.
+Каждая строка должна включать:
+- short_title (краткий ярлык);
+- description (1–2 фактических предложения, связанных с этими статьями);
+- articles (ссылки на статьи из предоставленного списка, минимум 1);
+- region_note (уточнение применимости по региону, если релевантно).
+
+Всегда возвращай массив sense_lines, даже если ты продолжаешь обсуждение, а не делаешь окончательный выбор.
+Правила диалога и принятия решений:
+- Свой ответ, видимый пользователю, помещай в поле assistant_message (кратко перескажи варианты, уточни потребности, предложи доработки), формат — MarkdownV2. **ВАЖНО** Если генерируешь новые смысловые линии - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
+- Сохраняй id и порядок строк стабильными между ходами, если только пользователь явно не просит всё пересобрать.
+- Поле decision отражает явное намерение пользователя:
+  * selected_line_index — индекс (нумерация с 1) из sense_lines, когда пользователь выбрал одну из строк;
+  * custom_line_text — когда пользователь предлагает свою собственную формулировку строки;
+  * consent_generate — true только если пользователь подтвердил переход к генерации идей для выбранной строки;
+  * regen_lines — true, если пользователь попросил новые/обновлённые варианты строк;
+  * finish — true, если пользователь хочет завершить работу.
+
+Когда пользователь подтверждает выбор, установи consent_generate = true, чтобы можно было перейти к этапу генерации идей.
+Если пользователь всё ещё уточняет или сравнивает варианты, оставляй поля decision пустыми/null/false и продолжай диалог, не навязывая выбор.
+"""
 
 
-IDEAS_INSTRUCTION = """
+IDEAS_INSTRUCTION_EN = """
 Generate 5-10 concrete ideas for the selected sense line, grounded only in the provided articles.
 Each idea must include:
 - title: 1 short headline;
@@ -241,7 +263,40 @@ Dialogue and decision rules:
 """
 
 
+IDEAS_INSTRUCTION = """
+Сгенерируй 5–10 конкретных идей для выбранной смысловой линии, опираясь только на предоставленные статьи.
+Каждая идея должна включать:
+- title: 1 краткий заголовок;
+- summary: 1–2 фактических предложения, связанных с этими статьями;
+- articles (ссылки на статьи из предоставленного списка,  рекомендуется 2 и более);
+- region_note: применимость по региону, если это релевантно;
+- importance_hint: high / medium / low.
+
+Правила диалога и принятия решений:
+- Разговорный ответ помещай в assistant_message (краткие резюме, сравнения, следующие шаги). **ВАЖНО** Если генерируешь новые идеи - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
+- Всегда возвращай массив ideas; сохраняй порядок стабильным между ходами, если только явно не запрошена регенерация.
+- Поле decision отражает явное намерение пользователя:
+  * selected_idea_index — индекс (нумерация с 1) из ideas, когда пользователь выбрал одну идею;
+  * custom_idea_text — когда пользователь предлагает свою собственную идею;
+  * more_ideas — true, если пользователь просит больше вариантов по той же sense line;
+  * finish — true, если пользователь хочет завершить работу.
+Пока пользователь всё ещё обсуждает или уточняет, оставляй поля decision пустыми/false и не форсируй выбор.
+"""
+
+
 FACT_REF_HINT = """
-fact_ref формат: [<страна> | <importance> | "<title>" | <date> | <url>]
+fact_ref формат: (<страна>; <importance>; <date>) | ["<title>"] (<url>)
 Если нет даты — используй processed_at[:10]; если нет title — возьми первые слова summary.
+"""
+
+TOOL_POLICY_PROMPT = """
+### Think Tool (internal scratchpad)
+## Using the think tool (internal scratchpad)
+Before taking any action or responding to the user, **ALWAYS** use the `think_tool` tool to:
+- List the specific rules/criteria that apply to the current stage.
+- Check if all required information is collected.
+- Verify that the planned action complies with the stage goal and criteria.
+- Iterate over tool results for correctness and consistency.
+- Check if format requirements met.
+- Check if all refferences properly provided.
 """

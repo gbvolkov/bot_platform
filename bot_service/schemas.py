@@ -17,6 +17,7 @@ class ContentType(str, Enum):
     EXCELS = "excels"
     SOUNDS = "sounds"
     VIDEOS = "videos"
+    JSONS = "jsons"
 
 
 class AgentInfo(BaseModel):

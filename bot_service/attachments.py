@@ -4,6 +4,7 @@ import base64
 import logging
 import tempfile
 import uuid
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -21,6 +22,7 @@ _EXTENSION_CATEGORY_MAP: Dict[ContentType, Tuple[str, ...]] = {
     ContentType.IMAGES: (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff"),
     ContentType.PDFS: (".pdf",),
     ContentType.TEXT_FILES: (".txt", ".text", ".log"),
+    ContentType.JSONS: (".json",),
     ContentType.MARKDOWN: (".md", ".markdown"),
     ContentType.DOCX_DOCUMENTS: (".doc", ".docx"),
     ContentType.CSVS: (".csv",),
@@ -34,6 +36,7 @@ _MIME_PREFIX_CATEGORIES: Tuple[Tuple[str, ContentType], ...] = (
     ("video/", ContentType.VIDEOS),
     ("audio/", ContentType.SOUNDS),
     ("text/plain", ContentType.TEXT_FILES),
+    ("application/json", ContentType.JSONS),
     ("text/markdown", ContentType.MARKDOWN),
     ("application/pdf", ContentType.PDFS),
     ("application/msword", ContentType.DOCX_DOCUMENTS),
@@ -51,6 +54,7 @@ class ProcessedAttachment:
     supported: bool
     text: Optional[str]
     error: Optional[str] = None
+    stored_path: Optional[str] = None
 
     def as_metadata(self) -> Dict[str, Any]:
         return {
@@ -116,6 +120,18 @@ def _write_temp_file(base_dir: Path, attachment: AttachmentPayload) -> Path:
     return target
 
 
+def _persist_file(source: Path, target_dir: Path, filename: str) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(filename)
+    target = target_dir / safe_name
+    counter = 1
+    while target.exists():
+        target = target_dir / f"{Path(safe_name).stem}_{counter}{Path(safe_name).suffix}"
+        counter += 1
+    shutil.copy2(source, target)
+    return target
+
+
 def _documents_to_text(documents: Sequence[Document]) -> str:
     parts: List[str] = []
     for doc in documents:
@@ -130,6 +146,8 @@ def process_attachments(
     supported_categories: Iterable[ContentType],
     *,
     tmp_dir: Optional[Path] = None,
+    persist_raw: bool = False,
+    persist_dir: Optional[Path] = None,
 ) -> List[ProcessedAttachment]:
     supported_set = set(supported_categories)
     if not attachments:
@@ -142,6 +160,11 @@ def process_attachments(
     else:
         base_dir = tmp_dir
         base_dir.mkdir(parents=True, exist_ok=True)
+
+    storage_dir: Optional[Path] = None
+    if persist_raw:
+        storage_dir = persist_dir or (Path(tempfile.gettempdir()) / "bot_att_store")
+        storage_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         processed: List[ProcessedAttachment] = []
@@ -160,6 +183,7 @@ def process_attachments(
                 continue
 
             temp_file: Optional[Path] = None
+            stored_path: Optional[str] = None
             try:
                 temp_file = _write_temp_file(base_dir, attachment)
             except Exception as exc:  # noqa: BLE001
@@ -173,6 +197,30 @@ def process_attachments(
                         error=str(exc),
                     )
                 )
+                continue
+
+            if storage_dir is not None:
+                try:
+                    stored_path = str(_persist_file(temp_file, storage_dir, attachment.filename))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to persist attachment '%s': %s", attachment.filename, exc)
+
+            if persist_raw and supported:
+                # Agent can handle this type directly; skip text extraction.
+                processed.append(
+                    ProcessedAttachment(
+                        attachment=attachment,
+                        category=category,
+                        supported=supported,
+                        text=None,
+                        stored_path=stored_path,
+                    )
+                )
+                if temp_file is not None:
+                    try:
+                        temp_file.unlink(missing_ok=True)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("Could not remove temp file %s", temp_file)
                 continue
 
             try:
@@ -200,13 +248,14 @@ def process_attachments(
             if not text_content and not supported:
                 text_content = ""
             processed.append(
-                ProcessedAttachment(
-                    attachment=attachment,
-                    category=category,
-                    supported=supported,
-                    text=text_content or None,
+                    ProcessedAttachment(
+                        attachment=attachment,
+                        category=category,
+                        supported=supported,
+                        text=text_content or None,
+                        stored_path=stored_path,
+                    )
                 )
-            )
         return processed
     finally:
         if cleanup is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..agent_registry import agent_registry
 from ..attachments import attachment_to_text_segment, process_attachments
+from ..config import settings
 from ..models import Conversation, Message
 from ..schemas import (
     ConversationCreate,
@@ -161,8 +163,15 @@ async def post_message(
 
     processed_attachments = []
     if payload.payload.attachments:
+        allow_raw = agent_registry.allows_raw_attachments(conversation.agent_id)
+        persist_dir = Path(settings.attachment_store_dir).resolve() if allow_raw else None
         supported_types = agent_registry.supported_content_types(conversation.agent_id)
-        processed_attachments = process_attachments(payload.payload.attachments, supported_types)
+        processed_attachments = process_attachments(
+            payload.payload.attachments,
+            supported_types,
+            persist_raw=allow_raw,
+            persist_dir=persist_dir,
+        )
         fatal_attachments = [
             item
             for item in processed_attachments
@@ -182,6 +191,18 @@ async def post_message(
         metadata = dict(payload.payload.metadata)
         if processed_attachments:
             metadata["attachments"] = [item.as_metadata() for item in processed_attachments]
+            if allow_raw:
+                raw_links = [
+                    {
+                        "filename": item.attachment.filename,
+                        "content_type": item.attachment.content_type,
+                        "path": item.stored_path,
+                    }
+                    for item in processed_attachments
+                    if item.stored_path
+                ]
+                if raw_links:
+                    metadata["raw_attachments"] = raw_links
         if attachment_segments:
             metadata["attachment_text_segments"] = attachment_segments
         payload.payload.metadata = metadata

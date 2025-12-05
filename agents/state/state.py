@@ -1,4 +1,4 @@
-from typing import Annotated, Optional
+from typing import Annotated, Optional, List
 from typing_extensions import TypedDict
 
 from langgraph.graph.message import AnyMessage, add_messages, Messages
@@ -28,3 +28,4 @@ class ConfigSchema(TypedDict):
     user_role: Optional[str]
     model: Optional[str]
     thread_id: Optional[str]
+    attachments: Optional[List[dict]]

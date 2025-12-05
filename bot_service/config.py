@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         default=120.0,
         description="Timeout applied to agent inference calls.",
     )
+    attachment_store_dir: str = Field(
+        default=".attachments_store",
+        description="Directory for persisting raw attachments when pass-through to agents is enabled.",
+    )
     api_base_path: str = Field(default="/api")
 
 

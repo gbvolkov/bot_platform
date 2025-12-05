@@ -36,8 +36,22 @@ async def run_simulation():
     user_llm = get_llm(model="mini", provider="openai")
     logging.info("Simulation started")
 
-    config = {"configurable": {"thread_id": "ideator_simulation_thread"}}
-    ctx = {"report_path": str(REPORT_PATH)}
+    config = {
+        "configurable": {
+            "thread_id": "ideator_simulation_thread",
+        }
+    }
+    # Simulate raw attachment pass-through (as provided by bot_service)
+    initial_state = {
+        "messages": [],
+        "attachments": [
+            {
+                "filename": REPORT_PATH.name,
+                "content_type": "application/json",
+                "path": str(REPORT_PATH.resolve()),
+            }
+        ],
+    }
 
     # last user message to send into the graph
     messages = [HumanMessage(content="Привет! Запусти генератор идей по отчёту Разведчика.")]
@@ -45,7 +59,7 @@ async def run_simulation():
 
     max_steps = 12
     for step in range(max_steps):
-        result = agent_graph.invoke({"messages": messages}, config=config, context=ctx)
+        result = agent_graph.invoke(initial_state | {"messages": messages}, config=config)
         state_snapshot = agent_graph.get_state(config)
         phase = state_snapshot.values.get("phase")
 

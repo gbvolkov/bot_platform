@@ -31,11 +31,13 @@ class IdeatorAgentState(AgentState[Dict[str, Any]]):
     """State schema for ideator agent graph."""
 
     messages: Annotated[List[BaseMessage], add_messages]
+    attachments: NotRequired[List[Dict[str, Any]]]
     report: Annotated[NotRequired[IdeatorReport], _keep_first]
     report_path: Annotated[NotRequired[str], _keep_first]
     sense_lines: Annotated[NotRequired[List[Dict[str, Any]]], _keep_first]
     selected_line_id: NotRequired[str]
     filtered_article_ids: NotRequired[List[int]]
+    filtered_articles: NotRequired[List[Any]]
     ideas: NotRequired[List[Dict[str, Any]]]
     # phases: ready -> lines (choose/discuss lines) -> ideas (generate/discuss ideas) -> finish
     phase: NotRequired[str]

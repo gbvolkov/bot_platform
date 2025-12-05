@@ -2,7 +2,7 @@ from langchain_huggingface import HuggingFacePipeline
 from agents.llm_utils import get_llm
 from langchain_core.prompts import PromptTemplate
 
-prettify_llm = get_llm(model="nano", provider="openai", temperature=0.0)
+prettify_llm = get_llm(model="mini", provider="openai", temperature=0.0)
 #HuggingFacePipeline.from_model_id(
 #    model_id="microsoft/Phi-3-mini-4k-instruct",  # 3.8B Phi-3 Mini instruct model
 #    task="text-generation",
@@ -20,6 +20,9 @@ Rewrite the text below as clean, well-structured Markdown:
 - Add headings where it makes sense.
 - Use bullet or numbered lists when appropriate.
 - Use code fences for code or commands.
+- **IMPORTANT** Format links properly! Pay attention to titles!
+- **IMPORTANT** Do not change wording!
+- **IMPORTANT** Do not remove or cut any information!
 - Fix obvious grammar and spacing.
 - Use fency icons to highlight important information.
 - Output ONLY Markdown, no explanation.

@@ -26,6 +26,7 @@ class AgentDefinition:
     factory: Callable[[ModelType], Any]
     default_provider: ModelType
     supported_content_types: Tuple[ContentType, ...]
+    allow_raw_attachments: bool = False
 
 
 PROVIDER_MAPPING: Dict[str, ModelType] = {
@@ -98,7 +99,8 @@ class AgentRegistry:
                 description="Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
                 factory=lambda provider: init_ideator_agent(provider=provider),
                 default_provider=default_provider,
-                supported_content_types=default_content_types,
+                supported_content_types=default_content_types + (ContentType.JSONS,),
+                allow_raw_attachments=True,
             ),
         }
         self._definitions.update(self._build_product_definitions(default_provider, default_content_types))
@@ -220,6 +222,11 @@ class AgentRegistry:
         if agent_id not in self._definitions:
             raise KeyError(f"Unknown agent '{agent_id}'")
         return self._definitions[agent_id].supported_content_types
+
+    def allows_raw_attachments(self, agent_id: str) -> bool:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        return self._definitions[agent_id].allow_raw_attachments
 
     def preload_all(self) -> None:
         for agent_id in self._definitions:
