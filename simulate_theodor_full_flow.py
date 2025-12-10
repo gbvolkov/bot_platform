@@ -98,13 +98,15 @@ async def run_simulation():
             current_idx = state_snapshot.values.get("current_step_index", 0)
 
             logging.info("Current step index: %s", current_idx)
+            print("=========================================================================\n\n")
+            f.write("=========================================================================\n\n")
             interrupts = result.get("__interrupt__")
             if interrupts:
                 payload = getattr(interrupts[-1], "value", interrupts[-1])
                 last_ai = payload.get("content", "")
                 #print(f"Interrupt payload: {payload}")
                 if SIMULATE:
-                    message = f"**Ответ продуктолога**:\n{last_ai}\n" 
+                    message = f"\n**Ответ продуктолога**:\n{last_ai}\n" 
                     print(message)
                     f.write(message)
                     prompt = f"{message}\nТвой ответ:"
@@ -116,14 +118,14 @@ async def run_simulation():
                     user_reply: str = user_llm.invoke(sim_messages).content
                     print("-----------------------------------------------------------------\n")
                     f.write("-----------------------------------------------------------------\n")
-                    message = f"**Ответ эксперта**:\n {user_reply}"
+                    message = f"\n**Ответ эксперта**:\n {user_reply}"
                     print(message)
                     f.write(message)
                 else:
-                    message = f"**Ответ продуктолога**:\n{last_ai}\n\n"
+                    message = f"\n**Ответ продуктолога**:\n{last_ai}\n\n"
                     print(message)
                     f.write(message)
-                    user_reply = input("**Ответ эксперта**:")
+                    user_reply = input("\n**Ответ эксперта**:")
                 next_input = Command(resume=user_reply)
                 await asyncio.sleep(1)
                 continue
@@ -136,13 +138,11 @@ async def run_simulation():
                             break
                 if last_ai:
                     #print(f"Bot: {last_ai}")
-                    message = f"**Ответ продуктолога**:\n{last_ai}\n\n"
+                    message = f"\n**Ответ продуктолога**:\n{last_ai}\n\n"
                     print(message)
                     f.write(message)
                     #logging.info("Bot: %s", last_ai)
             #break
-            print("=========================================================================\n\n")
-            f.write("=========================================================================\n\n")
 
     print("ФСЁ")
 

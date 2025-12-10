@@ -3,6 +3,11 @@ base = "gpt-5.1"
 mini = "gpt-4.1-mini"
 nano = "gpt-4.1-nano"
 
+[providers.openai_4]
+base = "gpt-4.1"
+mini = "gpt-4.1-mini"
+nano = "gpt-4.1-nano"
+
 [providers.anthropic]
 base = "claude-3.5-sonnet"
 mini = "claude-3.5-haiku"
