@@ -76,7 +76,7 @@ _PRIMARY_RETRY_ATTEMPTS = 3
 
 _llm = get_llm(model="base", provider="openai", temperature=1)
 #_llm_fallback = get_llm(model="base", provider="openai", temperature=1)
-_llm_fallback = get_llm(model="base", provider="mistral", temperature=1)
+_llm_fallback = get_llm(model="base", provider="openai_4", temperature=1)
 _llm_fallback_middleware = build_model_fallback_middleware(
     primary_llm=_llm,
     alternative_llm=_llm_fallback,
