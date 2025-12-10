@@ -9,6 +9,7 @@ import tomllib  # built-in on Python 3.11+
 
 import config
 
+from langchain.agents.middleware import ModelFallbackMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from langchain_openai import ChatOpenAI
@@ -105,3 +106,39 @@ def get_llm(
             model_uri=model_name,
             temperature=temperature
             )
+
+
+def build_model_fallback_middleware(
+    primary_llm: BaseChatModel,
+    *,
+    alternative_llm: BaseChatModel,
+    primary_retries: int = 3,
+) -> ModelFallbackMiddleware:
+    """
+    Create a ModelFallbackMiddleware that retries the primary model first.
+
+    It will retry the primary model `primary_retries` times (so the first N
+    fallbacks are still the same model) before switching to the alternative.
+    """
+    if primary_retries < 0:
+        raise ValueError("primary_retries must be >= 0")
+    fallback_chain = [primary_llm] * primary_retries + [alternative_llm]
+    return ModelFallbackMiddleware(*fallback_chain)
+
+
+def with_llm_fallbacks(
+    primary_llm: BaseChatModel,
+    *,
+    alternative_llm: BaseChatModel,
+    primary_retries: int = 3,
+) -> BaseChatModel:
+    """
+    Wrap an LLM runnable with retry-then-fallback behavior using instances.
+
+    The primary model will be retried `primary_retries` times before the
+    alternative model is attempted.
+    """
+    if primary_retries < 0:
+        raise ValueError("primary_retries must be >= 0")
+    fallback_chain = [primary_llm] * primary_retries + [alternative_llm]
+    return primary_llm.with_fallbacks(fallback_chain)

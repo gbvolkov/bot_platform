@@ -6,7 +6,7 @@ import time
 from typing import Annotated, Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 from langchain.agents import AgentState, create_agent
-from langchain.agents.middleware import ModelRequest, dynamic_prompt, wrap_model_call
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain.agents.structured_output import (
     AutoStrategy,
     ProviderStrategy,
@@ -36,7 +36,12 @@ from .prompts.prompts import (
 
 from ..tools.yandex_search import YandexSearchTool
 from ..tools.think import ThinkTool
-from agents.utils import ModelType, get_llm
+from agents.llm_utils import (
+    build_model_fallback_middleware,
+    get_llm,
+    with_llm_fallbacks,
+)
+from agents.utils import ModelType
 from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
 from .artifacts_defs import (
@@ -67,8 +72,23 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+_PRIMARY_RETRY_ATTEMPTS = 3
+
 _llm = get_llm(model="base", provider="openai", temperature=1)
-_user_analyser_llm = get_llm(model="mini", provider="openai", temperature=0)
+_llm_fallback = get_llm(model="base", provider="openai", temperature=1)
+_llm_fallback_middleware = build_model_fallback_middleware(
+    primary_llm=_llm,
+    alternative_llm=_llm_fallback,
+    primary_retries=_PRIMARY_RETRY_ATTEMPTS,
+)
+
+_user_analyser_primary_llm = get_llm(model="mini", provider="openai", temperature=0)
+_user_analyser_alternative_llm = get_llm(model="base", provider="openai", temperature=0)
+_user_analyser_llm = with_llm_fallbacks(
+    _user_analyser_primary_llm,
+    alternative_llm=_user_analyser_alternative_llm,
+    primary_retries=_PRIMARY_RETRY_ATTEMPTS,
+)
 
 
 def create_init_node(artifact_id: int):
@@ -423,7 +443,7 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
         model=model,
         tools=[_think_tool, _yandex_tool], # Includes internal scratchpad and search
         #system_prompt=SYSTEM_PROMPT + "\n\n" + prompt,
-        middleware=[build_agent_prompt, provider_then_tool],
+        middleware=[build_agent_prompt, provider_then_tool, _llm_fallback_middleware],
         response_format=ArtifactOptions,
         state_schema=ArtifactAgentState,
         context_schema=ArtifactAgentContext,
@@ -529,7 +549,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
     _agent = create_agent(
         model=model,
         tools= [_think_tool, _yandex_tool], # Includes internal scratchpad and search
-        middleware=[build_agent_prompt, provider_then_tool],
+        middleware=[build_agent_prompt, provider_then_tool, _llm_fallback_middleware],
         response_format=AftifactFinalText,
         state_schema=ArtifactAgentState,
         context_schema=ArtifactAgentContext,

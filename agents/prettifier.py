@@ -1,8 +1,14 @@
 from langchain_huggingface import HuggingFacePipeline
-from agents.llm_utils import get_llm
+from agents.llm_utils import get_llm, with_llm_fallbacks
 from langchain_core.prompts import PromptTemplate
 
-prettify_llm = get_llm(model="mini", provider="openai", temperature=0.0)
+_prettify_primary_llm = get_llm(model="mini", provider="openai", temperature=0.0)
+_prettify_alternative_llm = get_llm(model="base", provider="openai", temperature=0.0)
+prettify_llm = with_llm_fallbacks(
+    _prettify_primary_llm,
+    alternative_llm=_prettify_alternative_llm,
+    primary_retries=3,
+)
 #HuggingFacePipeline.from_model_id(
 #    model_id="microsoft/Phi-3-mini-4k-instruct",  # 3.8B Phi-3 Mini instruct model
 #    task="text-generation",
