@@ -87,7 +87,7 @@ async def run_simulation():
                                generated_artifacts = [])
 
     SIMULATE = True
-    with open("simulate_theodor_full_flow.md", "w", encoding="utf-8") as f:
+    with open("docs/simulate_theodor_full_flow.md", "w", encoding="utf-8") as f:
         while True:
             result = agent_graph.invoke(next_input, config=config, context=ctx)
             await asyncio.sleep(1)
