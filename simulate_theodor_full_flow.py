@@ -24,15 +24,21 @@ from agents.theodor_agent.artifacts_defs import ArtifactAgentContext
 from agents.utils import get_llm
 
 
-USER_SIMULATOR_PROMPT = """
-Ты — основатель стартапа "Uber для выгула собак".
-Ты общаешься с "Продуктовым Наставником" (AI), который ведет тебя по методологии создания продукта.
+import time
 
-Твоя задача:
-1. Отвечать на вопросы наставника кратко и по делу.
-2. Если наставник предлагает варианты (A, B, C), выбери один (например, "Выбираю вариант A"),  либо предложи исправления.
-3. Если наставник спрашивает "Подтверждаете?", отвечай "Подтверждаю", либо предложи исправления.
-4. Твоя цель — пройти все 13 шагов и получить лучший результат.
+USER_SIMULATOR_PROMPT = """
+Ты - ответственный секретарь Управляюшего комитета по новым продуктам страховой компани Ингосстрах.
+Ты отвечаешь за то, чтобы предоставляемые материалы были качественно проработаны и потенциально приносили ценность компании.
+Ты оцениваешь идеи с точки зрения методологии RICE.
+
+Твой собеседник - продуктолог. Он прорабатывает идею нового продукта для компании и предоставляет тебе различные варианты артефактов по методологии 13 шагов.
+Твоя задача - обеспечить максимальное качество материалов и оценить потенциальную ценность идеи.
+Ты рассматриваешь предоставленные артефакты, критикуешь их, выбираешь один их предоставленных вариантов.
+
+Вместе с твоим обеседником вы должны пройти все 13 шагов и получить лучший результат.
+
+На каждый артефакт или расммотрение вариантов артефакта ты можешь тратить не более трёх итераций, после чео ты должен сделать выбор, зафиксировать окончательный вариант артефакта и двигаться дальше.
+Там, где это уместно давай оценку вариантов/артефактов/идей с точки зрения RICE.
 """
 
 
@@ -40,7 +46,7 @@ async def run_simulation():
 
     print("Initializing Theodor Agent...")
     agent_graph = initialize_agent()
-    user_llm = get_llm(model="mini", provider="openai")
+    user_llm = get_llm(model="base", provider="openai")
     logging.info("Simulation started")
 
     config = {"configurable": {"thread_id": "simulation_thread_1"}}
@@ -49,8 +55,13 @@ async def run_simulation():
         "messages": [
             HumanMessage(
                 content=(
-                    "Привет! У меня есть идея стартапа: Uber для выгула собак. "
-                    "Помоги мне проработать её."
+                    "###Идея:\n"
+                    "***Для покупателей квартир на вторичном рынке***,  \n"
+                    "которые боятся стать жертвами мошенников и потерять деньги и недвижимость,  \n"
+                    "**наш продукт** — это комплексный онлайн-сервис юридической и технической проверки квартиры,  \n"
+                    "**который** выявляет все скрытые риски и юридические проблемы до сделки,  \n"
+                    "**в отличие** от разрозненных проверок через Росреестр, нотариусов и риелторов,  \n"
+                    "**наш продукт** проводит автоматизированную проверку по 50+ параметрам за 24 часа с юридической гарантией результата."
                 )
             )
         ]
@@ -64,47 +75,62 @@ async def run_simulation():
                                generated_artifacts = [])
 
     SIMULATE = True
-    while True:
-        result = agent_graph.invoke(next_input, config=config, context=ctx)
-        #res = agent_graph.get_state(config, subgraphs=True)
-        state_snapshot = agent_graph.get_state(config)
-        if len(state_snapshot.next) == 0:
-            break
-        current_idx = state_snapshot.values.get("current_step_index", 0)
-
-        logging.info("Current step index: %s", current_idx)
-        interrupts = result.get("__interrupt__")
-        if interrupts:
-            payload = getattr(interrupts[-1], "value", interrupts[-1])
-            last_ai = payload.get("content", "")
-            #print(f"Interrupt payload: {payload}")
-            if SIMULATE:
-                prompt = f"Ответ наставника:\n{last_ai}\n\nТвой ответ:"
-                print(prompt)
-                sim_messages = [
-                    SystemMessage(content=USER_SIMULATOR_PROMPT),
-                    HumanMessage(content=prompt),
-                ]
-
-                user_reply: str = user_llm.invoke(sim_messages).content
-                print(f"Your answer: {user_reply}")
-            else:
-                print(f"Ответ наставника:\n{last_ai}\n\n")
-                user_reply = input("Твой ответ:")
-            next_input = Command(resume=user_reply)
+    with open("simulate_theodor_full_flow.md", "w", encoding="utf-8") as f:
+        while True:
+            result = agent_graph.invoke(next_input, config=config, context=ctx)
             await asyncio.sleep(1)
-            continue
-        else:
-            last_ai = ""
-            if result.get("messages"):
-                for msg in reversed(result["messages"]):
-                    if isinstance(msg, AIMessage):
-                        last_ai = msg.content
-                        break
-            if last_ai:
-                #print(f"Bot: {last_ai}")
-                logging.info("Bot: %s", last_ai)
-        #break
+            #res = agent_graph.get_state(config, subgraphs=True)
+            state_snapshot = agent_graph.get_state(config)
+            if len(state_snapshot.next) == 0:
+                break
+            current_idx = state_snapshot.values.get("current_step_index", 0)
+
+            logging.info("Current step index: %s", current_idx)
+            interrupts = result.get("__interrupt__")
+            if interrupts:
+                payload = getattr(interrupts[-1], "value", interrupts[-1])
+                last_ai = payload.get("content", "")
+                #print(f"Interrupt payload: {payload}")
+                if SIMULATE:
+                    message = f"**Ответ продуктолога**:\n{last_ai}\n" 
+                    print(message)
+                    f.write(message)
+                    prompt = f"{message}\nТвой ответ:"
+                    sim_messages = [
+                        SystemMessage(content=USER_SIMULATOR_PROMPT),
+                        HumanMessage(content=prompt),
+                    ]
+
+                    user_reply: str = user_llm.invoke(sim_messages).content
+                    print("-----------------------------------------------------------------\n")
+                    f.write("-----------------------------------------------------------------\n")
+                    message = f"**Ответ эксперта**:\n {user_reply}"
+                    print(message)
+                    f.write(message)
+                else:
+                    message = f"**Ответ продуктолога**:\n{last_ai}\n\n"
+                    print(message)
+                    f.write(message)
+                    user_reply = input("**Ответ эксперта**:")
+                next_input = Command(resume=user_reply)
+                await asyncio.sleep(1)
+                continue
+            else:
+                last_ai = ""
+                if result.get("messages"):
+                    for msg in reversed(result["messages"]):
+                        if isinstance(msg, AIMessage):
+                            last_ai = msg.content
+                            break
+                if last_ai:
+                    #print(f"Bot: {last_ai}")
+                    message = f"**Ответ продуктолога**:\n{last_ai}\n\n"
+                    print(message)
+                    f.write(message)
+                    #logging.info("Bot: %s", last_ai)
+            #break
+            print("=========================================================================\n\n")
+            f.write("=========================================================================\n\n")
 
     print("ФСЁ")
 
