@@ -2,6 +2,9 @@ from langchain_huggingface import HuggingFacePipeline
 from agents.llm_utils import get_llm, with_llm_fallbacks
 from langchain_core.prompts import PromptTemplate
 
+import config
+import logging
+
 _prettify_primary_llm = get_llm(model="mini", provider="openai", temperature=0.0)
 _prettify_alternative_llm = get_llm(model="base", provider="openai", temperature=0.0)
 prettify_llm = with_llm_fallbacks(
@@ -42,5 +45,9 @@ Text:
 prettify_chain = prettify_prompt | prettify_llm
 
 def prettify(text: str)-> str:
-    result = prettify_chain.invoke({"text": text})
+    try:
+        result = prettify_chain.invoke({"text": text})
+    except Exception as e:
+        logging.error(f"Error occured during prettify tool calling.\nException: {e}")
+        return text
     return result.content

@@ -21,7 +21,12 @@ from langgraph.types import Command
 
 from agents.theodor_agent.agent import initialize_agent
 from agents.theodor_agent.artifacts_defs import ArtifactAgentContext
-from agents.utils import get_llm
+
+from agents.llm_utils import (
+    get_llm,
+    with_llm_fallbacks,
+)
+_PRIMARY_RETRY_ATTEMPTS = 3
 
 
 import time
@@ -46,7 +51,14 @@ async def run_simulation():
 
     print("Initializing Theodor Agent...")
     agent_graph = initialize_agent()
-    user_llm = get_llm(model="base", provider="openai")
+    _user_primary_llm = get_llm(model="base", provider="openai")
+    _user_alternative_llm = get_llm(model="base", provider="openai", temperature=0)
+    user_llm = with_llm_fallbacks(
+        _user_primary_llm,
+        alternative_llm=_user_alternative_llm,
+        primary_retries=_PRIMARY_RETRY_ATTEMPTS,
+    )
+
     logging.info("Simulation started")
 
     config = {"configurable": {"thread_id": "simulation_thread_1"}}
