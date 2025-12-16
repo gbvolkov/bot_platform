@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.types import Command
 
 from agents.theodor_agent.agent import initialize_agent
-from agents.theodor_agent.artifacts_defs import ArtifactAgentContext
+from agents.theodor_agent.artifacts_defs import ArtifactAgentContext, ArtifactState
 
 from agents.llm_utils import (
     get_llm,
@@ -30,6 +30,8 @@ _PRIMARY_RETRY_ATTEMPTS = 3
 
 
 import time
+
+_MAX_ATTTEMPTS = 3
 
 USER_SIMULATOR_PROMPT = """
 Ты - ответственный секретарь Управляюшего комитета по новым продуктам страховой компани Ингосстрах.
@@ -42,7 +44,6 @@ USER_SIMULATOR_PROMPT = """
 
 Вместе с твоим обеседником вы должны пройти все 13 шагов и получить лучший результат.
 
-На каждый артефакт или расммотрение вариантов артефакта ты можешь тратить не более трёх итераций, после чего ты должен сделать выбор, зафиксировать окончательный вариант артефакта и двигаться дальше.
 Там, где это уместно давай оценку вариантов/артефактов/идей с точки зрения RICE.
 """
 
@@ -97,6 +98,9 @@ async def run_simulation():
     from agents.utils import show_graph
 
     #show_graph(agent_graph)
+    current_artifact_id = -1
+    current_state = ArtifactState.INIT
+    attempts = 0
 
     SIMULATE = True
     with open("docs/simulate_theodor_full_flow.md", "w", encoding="utf-8") as f:
@@ -110,9 +114,8 @@ async def run_simulation():
             await asyncio.sleep(1)
             #res = agent_graph.get_state(config, subgraphs=True)
             state_snapshot = agent_graph.get_state(config)
-            current_idx = state_snapshot.values.get("current_step_index", 0)
 
-            logging.info("Current step index: %s", current_idx)
+            logging.info("Current step index: %s", current_artifact_id)
             print("=========================================================================\n\n")
             f.write("=========================================================================\n\n")
 
@@ -148,14 +151,32 @@ async def run_simulation():
 
             if isinstance(interrupt_payload, dict):
                 last_ai = interrupt_payload.get("content", "")
+
+                current_artifact_id_new = state_snapshot.values.get("current_artifact_id", 0)
+                current_state_new = interrupt_payload.get("current_artifact_state", ArtifactState.INIT)
+                if current_artifact_id_new != current_artifact_id or current_state != current_state_new:
+                    attempts = 1
+                    current_artifact_id = current_artifact_id_new
+                    current_state = current_state_new
+                else:
+                    attempts = attempts + 1
+
                 #print(f"Interrupt payload: {payload}")
                 if SIMULATE:
                     message = f"\n**Ответ продуктолога**:\n{last_ai}\n" 
                     print(message)
                     f.write(message)
-                    prompt = f"{message}\nТвой ответ:"
+                    prompt = f"{message}\nТвой ответ (это {attempts} итерация):"
+                    
+                    sys_prompt = USER_SIMULATOR_PROMPT
+                    if attempts >= _MAX_ATTTEMPTS:
+                        if current_state in (ArtifactState.INIT, ArtifactState.OPTIONS_GENERATED):
+                            sys_prompt += "\n**ВАЖНО**: Сейчас ты ДОЛЖЕН выбрать один из предложенных тебе вариантов. Дальнейшие изменения НЕВОЗМОЖНЫ! Не давай замечаний - просто выбери вариант."
+                        else:
+                            sys_prompt += "\n**ВАЖНО**: Сейчас ты ДОЛЖЕН подтвердить арефакт словом 'подтверждаю'.\nДальнейшие изменения НЕВОЗМОЖНЫ! Не давай замечаний - просто скажи 'подтверждаю'."
+
                     sim_messages = [
-                        SystemMessage(content=USER_SIMULATOR_PROMPT),
+                        SystemMessage(content=sys_prompt),
                         HumanMessage(content=prompt),
                     ]
 

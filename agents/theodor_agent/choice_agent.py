@@ -75,9 +75,9 @@ logging.basicConfig(
 
 _PRIMARY_RETRY_ATTEMPTS = 3
 
-_llm = get_llm(model="base", provider="openai", temperature=1)
+_llm = get_llm(model="base", provider="openai", temperature=0.9)
 #_llm_fallback = get_llm(model="base", provider="openai", temperature=1)
-_llm_fallback = get_llm(model="base", provider="openai_4", temperature=1)
+_llm_fallback = get_llm(model="base", provider="openai_4", temperature=0.9)
 _llm_fallback_middleware = build_model_fallback_middleware(
     primary_llm=_llm,
     alternative_llm=_llm_fallback,
@@ -441,6 +441,7 @@ def select_option_node(state: ArtifactAgentState,
         "type": "choice",
         "artifact_id": state["current_artifact_id"],
         "artifact_name": artifact_name,
+        "current_artifact_state": ArtifactState.OPTIONS_GENERATED,
         "content": prettify(state["current_artifact_text"]),
         "question": "Выберите один из предложенных вариантов или скажите, что нужно поправить.",
     }
@@ -517,6 +518,7 @@ def confirmation_node(state: ArtifactAgentState,
         "type": "choice",
         "artifact_id": state["current_artifact_id"],
         "artifact_name": artifact_name,
+        "current_artifact_state": ArtifactState.ARTIFACT_GENERATED,
         #"content": prettify(current_artifact["artifact_estimation"] + "\n" + current_artifact["artifact_final_text"]),
         "content": prettify(current_artifact["artifact_final_text"]),
         "question": f"Подтвердите артефакт \"{artifact_name}\" или скажите, что нужно изменить.",
@@ -583,11 +585,11 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
             f"Методология: {_artifact_def['methodology']}\n"
             f"Критерии: {',\n-'.join(_artifact_def['criteria'])}\n\n"
             f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
-            f"**ВАЖНО**: Ты должен генерировать варианты ТОЛЬКО для артефакта {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
-            "Тебе ЗАПРЕЩЕНО генерировать варианты или обсуждать любые другие артефакты.\n\n"
             "Предложи несколько вариантов для этого артефакта, основываясь на предыдущем контексте.\n\n"
             "Каждый вариант должен удовлетворять всем критериям.\n\n"
             "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
+            f"##ОГРАНИЧЕНИЯ:\n**ВАЖНО**: Ты работаешь ТОЛЬКО с артефактом {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
+            f"**ВАЖНО**: Тебе **ЗАПРЕЩЕНО** формировать версии, готовить варианты или даже просто обсуждать любые другие артефакты, кроме {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
         )
         #print(f"DEBUG: {prompt}")
         return SYSTEM_PROMPT + "\n\n" + prompt + "\n\n" + FORMAT_OPTIONS_PROMPT + "\n\n" + TOOL_POLICY_PROMPT
@@ -699,11 +701,11 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             "====================================================================================\n\n"
             "Пользователь прислал ответ. \n"
             f"Вариант {_artifact_id + 1}: {selected_option["artifact_option"]}\n"
-            f"**ВАЖНО**: Ты должен формировать **полную** финальную версию ТОЛЬКО для артефакта {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
-            "Тебе ЗАПРЕЩЕНО формировать версию или обсуждать любые другие артефакты.\n\n"
             "ВСЕГДА формируй **полную** финальную версию артефакта.\n"
             "Обязательно включай оценку по каждому из критериев.\n"
             f"Список критериев: {', '.join(_artifact_def['criteria'])}\n"
+            f"##ОГРАНИЧЕНИЯ:\n**ВАЖНО**: Ты работаешь ТОЛЬКО с артефактом {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
+            f"**ВАЖНО**: Тебе **ЗАПРЕЩЕНО** формировать версии, готовить варианты или даже просто обсуждать любые другие артефакты, кроме {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
         )
         #print(f"DEBUG: {prompt}")
         return SYSTEM_PROMPT + "\n\n" + prompt + "\n\n" + TOOL_POLICY_PROMPT
