@@ -1,7 +1,7 @@
 [providers.openai]
-base = "gpt-5.1"
-mini = "gpt-4.1-mini"
-nano = "gpt-4.1-nano"
+base = "gpt-5.2"
+mini = "gpt-5-mini"
+nano = "gpt-5-nano"
 
 [providers.openai_4]
 base = "gpt-4.1"

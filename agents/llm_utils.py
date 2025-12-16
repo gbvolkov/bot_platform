@@ -85,9 +85,15 @@ def get_llm(
         provider = config.LLM_PROVIDER
     llm_model = get_model(provider, model)
     if provider == "openai":
-        return ChatOpenAI(model=llm_model, temperature=temperature, frequency_penalty=frequency_penalty)
+        return ChatOpenAI(model=llm_model, 
+                          temperature=temperature, 
+                          frequency_penalty=frequency_penalty,
+                          model_kwargs={"verbosity": "low"}
+                          )
     elif provider == "openai_4":
-        return ChatOpenAI(model=llm_model, temperature=temperature, frequency_penalty=frequency_penalty)
+        return ChatOpenAI(model=llm_model, 
+                          temperature=temperature, 
+                          frequency_penalty=frequency_penalty)
     elif provider == "gigachat":
         raise NotImplementedError
         #return GigaChat(

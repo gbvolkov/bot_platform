@@ -9,6 +9,7 @@ from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.modifier import RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -33,6 +34,75 @@ from .artifacts_defs import (
     #AftifactFinalText,
 )
 from .choice_agent import initialize_agent as build_choice_agent
+from .context_reduction import (
+    ARTIFACT_SUMMARY_TAG,
+    build_pruned_history,
+    extract_text,
+    last_summary_index,
+    summarize_artifact_discussion,
+)
+
+_CONFIRMED_BANNER_BORDER = "────────────────────────────────"
+_PROGRESS_BANNER_BORDER = "════════════════════════════════"
+
+
+def _format_confirmed_banner(
+    *,
+    artifact_number: int,
+    artifact_name: str,
+    next_artifact_number: Optional[int],
+    next_artifact_name: Optional[str],
+) -> str:
+    if next_artifact_number is not None and next_artifact_name:
+        next_line = f"Перейти дальше: к Артефакту {next_artifact_number} — {next_artifact_name}"
+    else:
+        next_line = "Перейти дальше: завершение"
+
+    return "\n".join(
+        [
+            _CONFIRMED_BANNER_BORDER,
+            f"✅ АРТЕФАКТ ПОДТВЕРЖДЁН: Артефакт {artifact_number} — {artifact_name}",
+            next_line,
+            _CONFIRMED_BANNER_BORDER,
+        ]
+    )
+
+
+def _format_progress_banner(
+    *,
+    completed_count: int,
+    total_count: int,
+    current_artifact_number: int,
+    current_artifact_name: str,
+    next_artifact_number: Optional[int],
+    next_artifact_name: Optional[str],
+) -> str:
+    completed_count = max(0, min(int(completed_count), int(total_count)))
+    total_count = max(0, int(total_count))
+    bar = ("■" * completed_count) + ("□" * max(total_count - completed_count, 0))
+
+    if next_artifact_number is not None and next_artifact_name:
+        next_line = f"СЛЕДУЮЩИЙ: Артефакт {next_artifact_number} — {next_artifact_name}"
+    else:
+        next_line = "СЛЕДУЮЩИЙ: завершение"
+
+    return "\n".join(
+        [
+            _PROGRESS_BANNER_BORDER,
+            f"ПРОГРЕСС: {bar} ({completed_count}/{total_count})",
+            f"ТЕКУЩИЙ: Артефакт {current_artifact_number} — {current_artifact_name}",
+            next_line,
+            _PROGRESS_BANNER_BORDER,
+        ]
+    )
+
+
+def create_append_banner_node(*, content: str):
+    def _node(state: ArtifactAgentState, config: RunnableConfig) -> ArtifactAgentState:
+        return Command(update={"messages": [AIMessage(content=content)]})
+
+    return _node
+
 
 def init_node(state: ArtifactAgentState, 
               config: RunnableConfig) -> ArtifactAgentState:
@@ -48,6 +118,97 @@ def init_node(state: ArtifactAgentState,
     state["current_artifact_id"] = 0
     #state["user_info"] = config.
     return state
+
+
+def create_post_choice_cleanup_node(
+    *,
+    artifact_id: int,
+    artifact_name: str,
+    summary_model: BaseChatModel,
+    keep_first_user_messages: int = 5,
+    keep_last_messages: int = 5,
+):
+    def _node(
+        state: ArtifactAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[ArtifactAgentContext],
+    ) -> ArtifactAgentState:
+        messages = state.get("messages") or []
+        artifacts = state.get("artifacts") or {}
+        details = artifacts.get(artifact_id) or {}
+
+        user_prompt = (state.get("user_prompt") or "").strip()
+        if not user_prompt and runtime is not None and runtime.context is not None:
+            user_prompt = str(runtime.context.get("user_prompt") or "").strip()
+
+        selected_idx = details.get("selected_option", -1)
+        selected_label = ""
+        selected_text = ""
+        try:
+            if selected_idx is not None and int(selected_idx) >= 0:
+                selected_idx = int(selected_idx)
+                selected_label = chr(ord("A") + selected_idx)
+                options = details.get("artifact_options") or []
+                if 0 <= selected_idx < len(options):
+                    selected_text = str((options[selected_idx] or {}).get("artifact_option") or "").strip()
+        except Exception:  # noqa: BLE001
+            selected_label = ""
+            selected_text = ""
+
+        window_start = last_summary_index(messages, exclude_artifact_id=artifact_id)
+        window = messages[window_start + 1 :] if window_start >= 0 else list(messages)
+        user_notes: List[str] = []
+        for msg in window:
+            if getattr(msg, "type", "") != "human":
+                continue
+            note = extract_text(getattr(msg, "content", ""))
+            if not note:
+                continue
+            if user_prompt and note.strip() == user_prompt:
+                continue
+            if len(note) > 4000:
+                note = note[:3999].rstrip() + "…"
+            user_notes.append(note)
+
+        summary_text = summarize_artifact_discussion(
+            model=summary_model,
+            artifact_id=artifact_id,
+            artifact_name=artifact_name,
+            user_prompt=user_prompt,
+            selected_option_label=selected_label,
+            selected_option_text=selected_text,
+            user_notes=user_notes,
+        ).strip()
+        if not summary_text:
+            summary_text = "- Artifact completed; no additional notes captured."
+
+        summary_message = SystemMessage(
+            content=f"Artifact {artifact_id} — {artifact_name}\n{summary_text}",
+            additional_kwargs={
+                "type": ARTIFACT_SUMMARY_TAG,
+                "artifact_id": artifact_id,
+                "artifact_name": artifact_name,
+            },
+        )
+
+        pruned_history = build_pruned_history(
+            messages=messages,
+            keep_first_user_messages=keep_first_user_messages,
+            keep_last_messages=keep_last_messages,
+            drop_summary_for_artifact_id=artifact_id,
+        )
+
+        updated_details = dict(details)
+        updated_details["artifact_summary"] = summary_text
+
+        return Command(
+            update={
+                "messages": [RemoveMessage(id="__remove_all__"), *pruned_history, summary_message],
+                "artifacts": {artifact_id: updated_details},
+            }
+        )
+
+    return _node
 
 
 def initialize_agent(
@@ -70,18 +231,79 @@ def initialize_agent(
 
     memory = MemorySaver() # Always use memory for this agent
 
+    summary_llm = get_llm(model="mini", provider=provider.value, temperature=0)
+
     builder = StateGraph(ArtifactAgentState)
 
     builder.add_node("init", init_node)
     prev_node = "init"
 
     builder.add_edge(START, "init")
+    total_artifacts = len(ARTIFACTS)
     for artifact in ARTIFACTS:
-        _choice_agent = build_choice_agent(provider=provider, role=role, use_platform_store=use_platform_store, notify_on_reload=notify_on_reload, artifact_id=artifact['id'], uset_parental_memory=True)
-        next_node = f"choice_agent_{artifact['id']}"
-        builder.add_node(next_node, _choice_agent)
-        builder.add_edge(prev_node, next_node)
-        prev_node = next_node
+        artifact_id = int(artifact["id"])
+        artifact_number = artifact_id + 1
+        artifact_name = str(artifact.get("name") or f"artifact_{artifact_id}")
+
+        next_def = ARTIFACTS[artifact_id + 1] if artifact_id + 1 < total_artifacts else None
+        next_number = int(next_def["id"]) + 1 if next_def else None
+        next_name = str(next_def.get("name") or f"artifact_{next_def['id']}") if next_def else None
+
+        progress_node = f"progress_banner_{artifact_id}"
+        _choice_agent = build_choice_agent(
+            provider=provider,
+            role=role,
+            use_platform_store=use_platform_store,
+            notify_on_reload=notify_on_reload,
+            artifact_id=artifact["id"],
+            uset_parental_memory=True,
+        )
+        choice_node = f"choice_agent_{artifact['id']}"
+        cleanup_node = f"cleanup_{artifact['id']}"
+        confirmed_node = f"confirmed_banner_{artifact_id}"
+
+        builder.add_node(
+            progress_node,
+            create_append_banner_node(
+                content=_format_progress_banner(
+                    completed_count=artifact_id,
+                    total_count=total_artifacts,
+                    current_artifact_number=artifact_number,
+                    current_artifact_name=artifact_name,
+                    next_artifact_number=next_number,
+                    next_artifact_name=next_name,
+                )
+            ),
+        )
+
+        builder.add_node(choice_node, _choice_agent)
+        builder.add_node(
+            cleanup_node,
+            create_post_choice_cleanup_node(
+                artifact_id=artifact["id"],
+                artifact_name=artifact.get("name", f"artifact_{artifact['id']}"),
+                summary_model=summary_llm,
+                keep_first_user_messages=5,
+                keep_last_messages=5,
+            ),
+        )
+        builder.add_node(
+            confirmed_node,
+            create_append_banner_node(
+                content=_format_confirmed_banner(
+                    artifact_number=artifact_number,
+                    artifact_name=artifact_name,
+                    next_artifact_number=next_number,
+                    next_artifact_name=next_name,
+                )
+            ),
+        )
+
+        builder.add_edge(prev_node, progress_node)
+        builder.add_edge(progress_node, choice_node)
+        builder.add_edge(choice_node, cleanup_node)
+        builder.add_edge(cleanup_node, confirmed_node)
+        prev_node = confirmed_node
     builder.add_edge(prev_node, END)
 
     graph = builder.compile(

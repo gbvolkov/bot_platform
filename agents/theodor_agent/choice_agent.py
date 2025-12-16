@@ -1,12 +1,13 @@
 from __future__ import annotations
 import functools
 
+import re
 import logging
 import time
 from typing import Annotated, Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 from langchain.agents import AgentState, create_agent
-from langchain.agents.middleware import ModelRequest, dynamic_prompt
+from langchain.agents.middleware import ModelRequest, SummarizationMiddleware, dynamic_prompt
 from langchain.agents.structured_output import (
     AutoStrategy,
     ProviderStrategy,
@@ -34,7 +35,7 @@ from .prompts.prompts import (
     FORMAT_OPTIONS_PROMPT,
 )
 
-from ..tools.yandex_search import YandexSearchTool
+from ..tools.yandex_search import YandexSearchTool as SearchTool
 from ..tools.think import ThinkTool
 from agents.llm_utils import (
     build_model_fallback_middleware,
@@ -91,6 +92,14 @@ _user_analyser_llm = with_llm_fallbacks(
     primary_retries=_PRIMARY_RETRY_ATTEMPTS,
 )
 
+_SUMMARY_MAX_TOKENS = 16000
+_SUMMARY_KEEP_MESSAGES = 12
+_summarization_middleware = SummarizationMiddleware(
+    model=_user_analyser_llm,
+    max_tokens_before_summary=_SUMMARY_MAX_TOKENS,
+    messages_to_keep=_SUMMARY_KEEP_MESSAGES,
+)
+
 
 def create_init_node(artifact_id: int):
     @debug_log
@@ -128,21 +137,21 @@ def create_init_node(artifact_id: int):
 #Текущий артефакт
 class ArtifactDetails:
     artifact_definition: ArtifactDefinition
-    artifact_options: ArtifactOptions
-    selected_option: int
-    artifact_final_text: str
+    artifact_options: List[ArtifactOption]
+    selected_option: int  # 0-based, -1 if not chosen yet
+    artifact_final_text: str  # rendered final text + estimation
 
 state:
 class ArtifactAgentState(AgentState[ArtifactOptions]):
     user_info: NotRequired[Dict[str, Any]]
     user_prompt: str #Определяем на этапе инициализации
-    artifacts: NotRequired[List[ArtifactDetails]]   # При входе в узе init - пусто;
+    artifacts: NotRequired[Dict[int, ArtifactDetails]]   # При входе в uзе init - пусто;
                                                     # При входе в generate_options_node 
                                                     # Или добавляем новый артефакт или изменяем существующий
                                                     # - заполняем artifact_definition (копируем по ID)
                                                     # artifact_final_text - ""
                                                     # При выходе в generate_options_node 
-                                                    # - заполняем artifact_options - пусто
+                                                    # - заполняем artifact_options - список вариантов
                                                     # - selected_option - пусто (или -1)
                                                     # artifact_final_text - ""
                                                     # При выходе из select_option_node:
@@ -184,8 +193,96 @@ def _user_select_option(text: str, options_text: str):
         )
     )
     user = HumanMessage(content=f"User reply: {text}")
-    result = clf.invoke([system, user])
-    return result
+    try:
+        result = clf.invoke([system, user])
+        if isinstance(result, dict):
+            return result
+    except Exception as e:
+        logging.warning("User option classifier failed, falling back. Error: %s", e)
+
+    return _heuristic_user_selected_option(text)
+
+
+def _resolve_selected_option_index(
+    user_text: str,
+    estimated: Optional[UserSelectedOption],
+    num_options: int,
+) -> Optional[int]:
+    """Resolve user's chosen option to a 0-based index."""
+    if num_options <= 0:
+        return None
+
+    if estimated:
+        raw_num = estimated.get("selected_option_number")
+        try:
+            if raw_num is not None:
+                idx = int(raw_num) - 1
+                if 0 <= idx < num_options:
+                    return idx
+        except (TypeError, ValueError):
+            pass
+
+    text = user_text.strip()
+
+    # Match single-letter choices like "A", "B", "C" (latin) or "А", "Б", "В" (cyrillic).
+    m = re.search(r"\b([ABCАБВ])\b", text, flags=re.IGNORECASE)
+    if m:
+        letter = m.group(1).upper()
+        letter_map = {"A": 0, "B": 1, "C": 2, "А": 0, "Б": 1, "В": 2}
+        idx = letter_map.get(letter)
+        if idx is not None and idx < num_options:
+            return idx
+
+    # Match explicit numbers.
+    m = re.search(r"\b(\d+)\b", text)
+    if m:
+        try:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < num_options:
+                return idx
+        except ValueError:
+            pass
+
+    return None
+
+
+def _heuristic_user_selected_option(text: str) -> UserSelectedOption:
+    """Heuristic fallback for option selection."""
+    normalized = (text or "").lower()
+
+    change_markers = [
+        "исправ", "поправ", "поменя", "измен", "не так", "не то", "добав", "передел",
+    ]
+    if any(marker in normalized for marker in change_markers):
+        return {
+            "change_request": {
+                "is_change_requested": True,
+                "change_request": text,
+            }
+        }
+
+    # Letters A/B/C (latin) or А/Б/В (cyrillic).
+    m = re.search(r"\b([abcабв])\b", normalized, flags=re.IGNORECASE)
+    if m:
+        letter = m.group(1).upper()
+        letter_map = {"A": 1, "B": 2, "C": 3, "А": 1, "Б": 2, "В": 3}
+        num = letter_map.get(letter)
+        if num is not None:
+            return {
+                "selected_option_number": num,
+                "change_request": {"is_change_requested": False},
+            }
+
+    # Digits 1/2/3.
+    m = re.search(r"\b([1-3])\b", normalized)
+    if m:
+        return {
+            "selected_option_number": int(m.group(1)),
+            "change_request": {"is_change_requested": False},
+        }
+
+    # Unclear answer: let the caller re-ask for clarification.
+    return {"change_request": {"is_change_requested": False}}
 
 def _is_user_confirmed(text: str, artifact_text: str):
     """
@@ -203,8 +300,35 @@ def _is_user_confirmed(text: str, artifact_text: str):
         )
     )
     user = HumanMessage(content=f"User reply: {text}")
-    result = clf.invoke([system, user])
-    return result
+    try:
+        result = clf.invoke([system, user])
+        if isinstance(result, dict):
+            return result
+    except Exception as e:
+        logging.warning("User confirmation classifier failed, falling back. Error: %s", e)
+
+    return _heuristic_user_change_request(text)
+
+
+def _heuristic_user_change_request(text: str) -> UserChangeRequest:
+    """Heuristic fallback for confirmation/change detection."""
+    normalized = (text or "").lower()
+
+    change_markers = [
+        "исправ", "поправ", "поменя", "измен", "не так", "не то", "добав", "передел",
+    ]
+    if any(marker in normalized for marker in change_markers):
+        return {"is_change_requested": True, "change_request": text}
+
+    confirm_markers = [
+        "подтверждаю", "подтвердить", "да", "ок", "окей", "согласен", "approve", "дальше",
+        "верно", "хорошо", "норм",
+    ]
+    if any(marker in normalized for marker in confirm_markers):
+        return {"is_change_requested": False}
+
+    # Default to change request when unclear to enforce explicit confirmation.
+    return {"is_change_requested": True, "change_request": text}
 
 def _format_artifact_options_text(structured_response: Dict[str, Any]) -> str:
     """Build user-facing text from the structured options response."""
@@ -230,11 +354,16 @@ def _format_artifact_options_text(structured_response: Dict[str, Any]) -> str:
 
 def _format_artifact_final_text(structured_response: Dict[str, Any]) -> str:
     """Build user-facing text from the final text generation response."""
-    artifact_estimation = structured_response.get("artifact_estimation")
-    artifact_final_text = structured_response.get("artifact_final_text", "")
-    final_text = artifact_estimation or "" + "\n" if artifact_estimation else "" + artifact_final_text
+    artifact_estimation = structured_response.get("artifact_estimation") or ""
+    artifact_final_text = structured_response.get("artifact_final_text") or ""
 
-    return final_text
+    parts: List[str] = []
+    if str(artifact_estimation).strip():
+        parts.append(str(artifact_estimation).strip())
+    if str(artifact_final_text).strip():
+        parts.append(str(artifact_final_text).strip())
+
+    return "\n\n".join(parts)
 
 
 def _update_last_ai_message_content(messages: List[Any], text: str) -> List[Any]:
@@ -303,8 +432,9 @@ def select_option_node(state: ArtifactAgentState,
 
 
     #_SELECTED_OPTION = 0 #TODO: use interrupt to get option from user
-    artifacts = state.get("artifacts", {})
-    current_artifact = artifacts.get(state["current_artifact_id"], {})
+    artifact_id = state["current_artifact_id"]
+    artifacts = state.get("artifacts") or {}
+    current_artifact = artifacts.get(artifact_id) or {}
     artifact_name = current_artifact.get("artifact_definition", {}).get("name", "")
 
     interrupt_payload = {
@@ -320,15 +450,32 @@ def select_option_node(state: ArtifactAgentState,
     message_update = [HumanMessage(content=str(user_response))]    
 
     #current_artifact["selected_option"] = _SELECTED_OPTION
-    user_response_estimated: UserSelectedOption = _user_select_option(str(user_response), state["current_artifact_text"])
+    user_response_str = str(user_response)
+    user_response_estimated: UserSelectedOption = _user_select_option(
+        user_response_str, state["current_artifact_text"]
+    )
 
     if not user_response_estimated.get("change_request", {}).get("is_change_requested", False):
-        state["current_artifact_state"] = ArtifactState.OPTION_SELECTED
+        options = current_artifact.get("artifact_options") or []
+        selected_idx = _resolve_selected_option_index(
+            user_response_str, user_response_estimated, len(options)
+        )
+        if selected_idx is None:
+            # Ask the user to clarify their choice.
+            return Command(
+                goto="select_option",
+                update={"messages": message_update},
+            )
+
+        current_artifact["selected_option"] = selected_idx
+        artifacts[artifact_id] = current_artifact
+
         return Command(
             goto="generate_aftifact",
             update={
                 "messages": message_update,
-                "current_artifact_state": ArtifactState.OPTION_SELECTED
+                "current_artifact_state": ArtifactState.OPTION_SELECTED,
+                "artifacts": artifacts,
             },
         )
 
@@ -400,10 +547,10 @@ def confirmation_node(state: ArtifactAgentState,
 
 response_format = AutoStrategy(schema=ArtifactOptions)
 
-_yandex_tool = YandexSearchTool(
+_yandex_tool = SearchTool(
     api_key=config.YA_API_KEY,
     folder_id=config.YA_FOLDER_ID,
-    max_results=10,
+    max_results=3,
     summarize=True
 )
 _think_tool = ThinkTool()
@@ -417,14 +564,17 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
     def build_agent_prompt(request: ModelRequest) -> str:
         agent_state = request.state
         artifacts_in_state = agent_state.get("artifacts") or {}
-        context_str = "\n".join(
-            f"{a['artifact_definition']['id']} {a['artifact_definition']['name']}: {a['artifact_final_text']}"
+        context_str = "\n------------------------------------------------------------------------\n\n".join(
+            f"##{a['artifact_definition']['id'] + 1} {a['artifact_definition']['name']}:\n"
+            f"{a['artifact_final_text'] or 'В работе'}"
             for a in artifacts_in_state.values()
         )
         #format_requirements = build_json_prompt(ArtifactOptions)
         prompt = (
-            f"Мы прорабатываем {agent_state.get("user_prompt", "")}\n\n"
+            f"Мы прорабатываем: {agent_state.get("user_prompt", "")}\n\n"
+            "====================================================================================\n#Артефакты:\n"
             f"{context_str}\n"
+            "====================================================================================\n#Конец артефактов.\n\n"
             f"Мы находимся на этапе {_artifact_def['stage']}.\n"
             f"Цель этапа: {_artifact_def['stage_goal']}.\n"
             f"Мы переходим к артефакту {_artifact_id + 1}: {_artifact_def['name']}.\n"
@@ -433,6 +583,8 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
             f"Методология: {_artifact_def['methodology']}\n"
             f"Критерии: {',\n-'.join(_artifact_def['criteria'])}\n\n"
             f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
+            f"**ВАЖНО**: Ты должен генерировать варианты ТОЛЬКО для артефакта {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
+            "Тебе ЗАПРЕЩЕНО генерировать варианты или обсуждать любые другие артефакты.\n\n"
             "Предложи несколько вариантов для этого артефакта, основываясь на предыдущем контексте.\n\n"
             "Каждый вариант должен удовлетворять всем критериям.\n\n"
             "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
@@ -444,7 +596,12 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
         model=model,
         tools=[_think_tool, _yandex_tool], # Includes internal scratchpad and search
         #system_prompt=SYSTEM_PROMPT + "\n\n" + prompt,
-        middleware=[build_agent_prompt, provider_then_tool, _llm_fallback_middleware],
+        middleware=[
+            #_summarization_middleware,
+            build_agent_prompt,
+            provider_then_tool,
+            _llm_fallback_middleware,
+        ],
         response_format=ArtifactOptions,
         state_schema=ArtifactAgentState,
         context_schema=ArtifactAgentContext,
@@ -513,10 +670,12 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
     def build_agent_prompt(request: ModelRequest) -> str:
         agent_state: ArtifactAgentState = request.state
         artifacts_in_state = agent_state.get("artifacts") or {}
-        context_str = "\n".join(
-            f"{a['artifact_definition']['id']} {a['artifact_definition']['name']}: {a['artifact_final_text']}"
+        context_str = "\n========================================\n\n".join(
+            f"##{a['artifact_definition']['id']+1} {a['artifact_definition']['name']}:\n"
+            f"{a['artifact_final_text'] or 'В работе'}"
             for a in artifacts_in_state.values()
         )
+
         current_artifact = artifacts_in_state.get(_artifact_id)
         options = current_artifact.get("artifact_options")
         selected_option = options[current_artifact["selected_option"]]
@@ -535,12 +694,15 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             f"Цель: {_artifact_def['goal']}\n"
             f"Методология: {_artifact_def['methodology']}\n"
             f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
+            "====================================================================================\n#Артефакты:\n"
             f"{context_str}\n"
+            "====================================================================================\n\n"
             "Пользователь прислал ответ. \n"
             f"Вариант {_artifact_id + 1}: {selected_option["artifact_option"]}\n"
-            "Cформируй финальную версию артефакта.\n"
-            "Всегда генерируй полную версию артефакта со всем контентом.\n"
-            "Обязательно дай оценку по каждому из критериев.\n"
+            f"**ВАЖНО**: Ты должен формировать **полную** финальную версию ТОЛЬКО для артефакта {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
+            "Тебе ЗАПРЕЩЕНО формировать версию или обсуждать любые другие артефакты.\n\n"
+            "ВСЕГДА формируй **полную** финальную версию артефакта.\n"
+            "Обязательно включай оценку по каждому из критериев.\n"
             f"Список критериев: {', '.join(_artifact_def['criteria'])}\n"
         )
         #print(f"DEBUG: {prompt}")
@@ -550,7 +712,12 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
     _agent = create_agent(
         model=model,
         tools= [_think_tool, _yandex_tool], # Includes internal scratchpad and search
-        middleware=[build_agent_prompt, provider_then_tool, _llm_fallback_middleware],
+        middleware=[
+            #_summarization_middleware,
+            build_agent_prompt,
+            provider_then_tool,
+            _llm_fallback_middleware,
+        ],
         response_format=AftifactFinalText,
         state_schema=ArtifactAgentState,
         context_schema=ArtifactAgentContext,

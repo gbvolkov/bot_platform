@@ -17,11 +17,11 @@ def summarise_content(content: str, thematic: str, maxlen: int = 4096) -> str:
     if len(content) <= maxlen:
         return content
     try:    
-        prompt = ("You have as an input a content of a webpage specific for a given thematic.\n" 
+        prompt = ("You have as an input a content of webpages specific for a given thematic.\n" 
             "Please prepare summary of the content related to the information for a given thematic.\n" 
             "Always answer in Russian.\n" 
-            f"Content: {content}.\n"
             f"Thematic: {thematic}."
+            f"Content: {content}.\n"
             f"The length of the response shall not exceed {maxlen} characters.")
         result = summariser_llm.invoke(prompt)
     except Exception as e:
@@ -30,12 +30,33 @@ def summarise_content(content: str, thematic: str, maxlen: int = 4096) -> str:
     return result.content
 
 
+def _build_payload(api_key: str, query: str, max_results: int, folder_id: str):
+    _headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json",
+    }
+    _endpoint = "https://searchapi.api.cloud.yandex.net/v2/web/search"
+    _payload = {
+        "query": {
+            "searchType": "SEARCH_TYPE_RU",
+            "queryText": query
+        },
+        "groupSpec": {
+            "groupMode": "GROUP_MODE_FLAT",
+            "groupsOnPage": max_results,
+        },
+        "folderId": folder_id,
+        "responseFormat": "FORMAT_XML"
+    }
+    return _endpoint, _headers, _payload
+
+
 # Input schema for the tool
 class YandexSearchInput(BaseModel):
     query: str = Field(..., description="Search query for web search. Can be in Russian (prefferred) on in English.")
 
 class YandexSearchTool(BaseTool):
-    name: str = "yandex_web_search"
+    name: str = "web_search_summary"
     description: str = (
         "A wrapper around Yandex Search. "
         "Useful for when you need an information from internet."
@@ -52,29 +73,14 @@ class YandexSearchTool(BaseTool):
     query: str = ""
 
     def _run(self, query: str) -> str:
-        headers = {
-            "Authorization": f"Api-Key {self.api_key}",
-            "Content-Type": "application/json",
-        }
         self.query = query
-        endpoint = "https://searchapi.api.cloud.yandex.net/v2/web/search"
-        payload = {
-            "query": {
-                "searchType": "SEARCH_TYPE_RU",
-                "queryText": query
-            },
-            "groupSpec": {
-                "groupMode": "GROUP_MODE_FLAT",
-                "groupsOnPage": self.max_results,
-            },
-            "folderId": self.folder_id,
-            "responseFormat": "FORMAT_XML"
-        }
+
+        endpoint, headers, payload = _build_payload(self.api_key, query, self.max_results, self.folder_id)
 
         try:
             return self._get_data(endpoint, headers, payload)
         except Exception as e:
-            logging.error("Error occured at summarise_request.\nException: {e}")
+            logging.error(f"Error occured at summarise_request.\nException: {e}")
             return f"Yandex Search failed: {e}"
 
     def _extract_url_content(self, url: str) -> str:
@@ -109,3 +115,25 @@ class YandexSearchTool(BaseTool):
             )
 
         return "\n\n".join(r["body"] for r in results)
+
+
+
+class YandexRetrieveSummaryTool(YandexSearchTool):
+    name: str = "web_search_summary"
+    description: str = (
+        "A wrapper and summariser around Yandex Search. "
+        "You shall use the tool to get summary of related information from the internet. "
+        "Input should be a search query."
+    )
+
+    def _run(self, query: str) -> str:
+        self.query = query
+
+        endpoint, headers, payload = _build_payload(self.api_key, query, self.max_results, self.folder_id)
+
+        try:
+            docs = self._get_data(endpoint, headers, payload)
+            return summarise_content(docs, self.query, maxlen=8096)
+        except Exception as e:
+            logging.error(f"Error occured on data scrapping and summarisation.\nException: {e}")
+            return f"Yandex Search failed: {e}"

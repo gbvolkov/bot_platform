@@ -9,7 +9,7 @@ class ThinkInput(BaseModel):
 
 
 class ThinkTool(BaseTool):
-    name: str = "think"
+    name: str = "think_tool"
     description: str = (
         "Use the tool to think about something.\n"
         "It will not obtain new information or change the database, but just append the thought to the log.\n"
