@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Optional
+import os
 
 from dataclasses import dataclass
 from functools import lru_cache
@@ -92,6 +93,11 @@ def get_llm(
                           )
     elif provider == "openai_4":
         return ChatOpenAI(model=llm_model, 
+                          temperature=temperature, 
+                          frequency_penalty=frequency_penalty)
+    elif provider == "openai_gv":
+        return ChatOpenAI(model=llm_model, 
+                          api_key=os.getenv("OPENAI_API_KEY_PERSONAL"),
                           temperature=temperature, 
                           frequency_penalty=frequency_penalty)
     elif provider == "gigachat":

@@ -11,6 +11,7 @@ from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
 from agents.ingos_product_agent import initialize_agent as init_product_agent
 from agents.bi_agent import initialize_agent as init_aibi_agent
 from agents.ideator_agent import initialize_agent as init_ideator_agent
+from agents.ismart_tutor_agent import initialize_agent as init_ismart_tutor_agent
 from agents.theodor_agent.agent import initialize_agent as init_theodor_agent
 from agents.utils import ModelType
 
@@ -101,6 +102,14 @@ class AgentRegistry:
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.JSONS,),
                 allow_raw_attachments=True,
+            ),
+            "ismart_tutor_agent": AgentDefinition(
+                id="ismart_tutor_agent",
+                name="iSmart Tutor",
+                description="Educational tutor that provides concise hints and clarifying questions (without giving full solutions).",
+                factory=lambda provider: init_ismart_tutor_agent(provider=provider),
+                default_provider=default_provider,
+                supported_content_types=default_content_types,
             ),
         }
         self._definitions.update(self._build_product_definitions(default_provider, default_content_types))

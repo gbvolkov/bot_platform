@@ -24,6 +24,8 @@ class ModelType(Enum):
     #LOCAL = ("local", "Local")
     MISTRAL = ("mistral", "MistralAI")
     #GGUF = ("gguf", "GGUF")
+    GPT4 = ("openai_4", "GPT4")
+    GPT_PERS = ("openai_pers", "GPT_PERS")
 
     def __init__(self, value, display_name):
         self._value_ = value
