@@ -437,8 +437,14 @@ def create_generate_hint_node(model):
         config: RunnableConfig,
         runtime: Runtime[IsmartTutorAgentContext],
     ) -> IsmartTutorAgentState:
+        source_messages = state.get("messages") or []
+        last_user = next((m for m in reversed(source_messages) if getattr(m, "type", None) == "human"), None)
+        image_parts = _extract_image_parts(last_user) if last_user else []
+        if not image_parts:
+            image_parts = _attachments_to_image_parts(state.get("attachments"))
+
         last_user_text = _clean_string(state.get("last_user_text")) or ""
-        if not last_user_text:
+        if not last_user_text and not image_parts:
             state["needs_question"] = True
             state["hint_raw"] = "Жду текст задания."
             return state
@@ -477,12 +483,8 @@ def create_generate_hint_node(model):
         if extra_system:
             messages.append(SystemMessage(content=extra_system))
 
-        user_prompt = USER_PROMPT_TEMPLATE.format(question=last_user_text)
-        source_messages = state.get("messages") or []
-        last_user = next((m for m in reversed(source_messages) if getattr(m, "type", None) == "human"), None)
-        image_parts = _extract_image_parts(last_user) if last_user else []
-        if not image_parts:
-            image_parts = _attachments_to_image_parts(state.get("attachments"))
+        question_text = last_user_text or "(No text provided. Use the attached image(s).)"
+        user_prompt = USER_PROMPT_TEMPLATE.format(question=question_text)
 
         if image_parts:
             messages.append(HumanMessage(content=[{"type": "text", "text": user_prompt}, *image_parts]))

@@ -3,7 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from .prompts import get_locale
+
 IMPORTANCE_SCORE = {"high": 3, "medium": 2, "low": 1}
+
+_LOCALE = get_locale()
+_REGION_TEXT = _LOCALE["regions"]
+_MODEL_TEXT = _LOCALE["models"]
+
+
+def set_locale(locale: str = "ru") -> None:
+    global _LOCALE, _REGION_TEXT, _MODEL_TEXT
+    _LOCALE = get_locale(locale)
+    _REGION_TEXT = _LOCALE["regions"]
+    _MODEL_TEXT = _LOCALE["models"]
 
 
 @dataclass
@@ -26,10 +39,10 @@ class ArticleRecord:
     def region_label(self) -> str:
         country = (self.search_country or "").lower()
         if country in ("ru", "rus", "russia", "россия"):
-            return "РФ — релевантно"
+            return _REGION_TEXT["ru_relevant"]
         if country:
-            return "Зарубежный рынок — требует адаптации"
-        return "Регион не указан"
+            return _REGION_TEXT["foreign_adapt"]
+        return _REGION_TEXT["unknown"]
 
     def norm_importance(self) -> str:
         val = (self.importance or "").lower()
@@ -42,18 +55,18 @@ class ArticleRecord:
         if self.title:
             return self.title
         snippet = self.summary.split()
-        return " ".join(snippet[:fallback_words]) if snippet else "<без заголовка>"
+        return " ".join(snippet[:fallback_words]) if snippet else _MODEL_TEXT["title_missing"]
 
     def display_date(self) -> str:
         if self.date:
             return self.date[:10]
         if self.processed_at:
             return self.processed_at[:10]
-        return "n/a"
+        return _MODEL_TEXT["na"]
 
     def fact_ref(self) -> str:
         return (
-            f"[{self.search_country or 'n/a'} | "
+            f"[{self.search_country or _MODEL_TEXT['na']} | "
             f"{self.norm_importance()} | "
             f"\"{self.display_title()}\" | "
             f"{self.display_date()} | "

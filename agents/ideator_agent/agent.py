@@ -32,13 +32,14 @@ from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
 
 
-from .models import ArticleRecord, IdeatorReport
+from .models import ArticleRecord, IdeatorReport, set_locale as set_models_locale
 from .prompts import (
     FACT_REF_HINT,
     IDEAS_INSTRUCTION,
     IDEATOR_SYSTEM_PROMPT,
     SENSE_LINE_INSTRUCTION,
     TOOL_POLICY_PROMPT,
+    get_locale,
 )
 from .report_loader import load_report
 from .state import IdeatorAgentContext, IdeatorAgentState
@@ -93,6 +94,23 @@ class IdeaListResponse(TypedDict):
 
 
 _think_tool = ThinkTool()
+_LOCALE: Dict[str, Any] = {}
+_AGENT_TEXT: Dict[str, str] = {}
+_PROMPT_FRAGMENTS: Dict[str, str] = {}
+_REGION_TEXT: Dict[str, str] = {}
+_PROMPTS: Dict[str, str] = {}
+
+
+def set_locale(locale: str = "ru") -> None:
+    global _LOCALE, _AGENT_TEXT, _PROMPT_FRAGMENTS, _REGION_TEXT, _PROMPTS
+    _LOCALE = get_locale(locale)
+    _AGENT_TEXT = _LOCALE["agent"]
+    _PROMPT_FRAGMENTS = _LOCALE["prompt_fragments"]
+    _REGION_TEXT = _LOCALE["regions"]
+    _PROMPTS = _LOCALE["prompts"]
+
+
+set_locale()
 
 
 def _format_articles(articles: List[ArticleRecord], limit_chars: int = 400) -> str:
@@ -161,13 +179,20 @@ def _fact_links_md(report: IdeatorReport, article_ids: List[int], limit: int = 5
         if art.url:
             country = (art.search_country or "").lower()
             if country in {"ru", "rus", "russia", "рф", "россия"}:
-                relevance = "РФ — релевантно"
+                relevance = _REGION_TEXT["ru_relevant"]
             elif country:
-                relevance = f"{country.upper()} — релевантно"
+                relevance = _REGION_TEXT["relevance_country"].format(country=country.upper())
             else:
-                relevance = "регион: н/д"
+                relevance = _REGION_TEXT["relevance_unknown"]
             importance = art.norm_importance()
-            links.append(f"- [{art.display_title()}]({art.url}) ({relevance}; важность: {importance})")
+            links.append(
+                _AGENT_TEXT["fact_link_item"].format(
+                    title=art.display_title(),
+                    url=art.url,
+                    relevance=relevance,
+                    importance=importance,
+                )
+            )
     return "\n".join(links)
 
 
@@ -177,13 +202,20 @@ def _fact_links_from_articles(articles: List[ArticleRecord], limit: int = 5) -> 
         if art.url:
             country = (art.search_country or "").lower()
             if country in {"ru", "rus", "russia", "рф", "россия"}:
-                relevance = "РФ — релевантно"
+                relevance = _REGION_TEXT["ru_relevant"]
             elif country:
-                relevance = f"{country.upper()} — релевантно"
+                relevance = _REGION_TEXT["relevance_country"].format(country=country.upper())
             else:
-                relevance = "регион: н/д"
+                relevance = _REGION_TEXT["relevance_unknown"]
             importance = art.norm_importance()
-            links.append(f"- [{art.display_title()}]({art.url}) ({relevance}; важность: {importance})")
+            links.append(
+                _AGENT_TEXT["fact_link_item"].format(
+                    title=art.display_title(),
+                    url=art.url,
+                    relevance=relevance,
+                    importance=importance,
+                )
+            )
     return "\n".join(links)
 
 
@@ -223,23 +255,29 @@ def _build_sense_agent(model: BaseChatModel):
         articles = report.sorted_articles()[:80] if report else []
         existing_lines = state.get("sense_lines") or []
         prompt = (
-            IDEATOR_SYSTEM_PROMPT
+            _PROMPTS["ideator_system_prompt"]
             + "\n"
-            + SENSE_LINE_INSTRUCTION
+            + _PROMPTS["sense_line_instruction"]
             + "\n"
-            + FACT_REF_HINT
+            + _PROMPTS["fact_ref_hint"]
             + "\n\n"
-            f"search_goal: {report.search_goal if report else ''}\n"
-            f"Всего статей в отчёте: {report.total_articles if report else 0}. В выборке для анализа: {len(articles)}.\n"
-            f"Список статей (id, importance, region, title, summary, url):\n{_format_articles(articles)}\n\n"
+            + _PROMPT_FRAGMENTS["search_goal_line"].format(
+                search_goal=report.search_goal if report else ""
+            )
+            + _PROMPT_FRAGMENTS["articles_stats_line"].format(
+                total=report.total_articles if report else 0,
+                count=len(articles),
+            )
+            + _PROMPT_FRAGMENTS["articles_list_block"].format(
+                articles=_format_articles(articles)
+            )
         )
         if existing_lines:
-            prompt += (
-                "Текущие смысловые линии (сохраняй id и порядок, если идёт обсуждение прошлых вариантов):\n"
-                f"{_format_sense_lines(existing_lines)}\n\n"
+            prompt += _PROMPT_FRAGMENTS["existing_sense_lines_block"].format(
+                lines=_format_sense_lines(existing_lines)
             )
         prompt += f"{build_json_prompt(SenseLineResponse)}"
-        return prompt + TOOL_POLICY_PROMPT
+        return prompt + _PROMPTS["tool_policy_prompt"]
 
     return create_agent(
         model=model,
@@ -262,23 +300,26 @@ def _build_ideas_agent(model: BaseChatModel):
             articles = report.filter_by_ids(filtered_ids)
         existing_ideas = state.get("ideas") or []
         prompt = (
-            IDEATOR_SYSTEM_PROMPT
+            _PROMPTS["ideator_system_prompt"]
             + "\n"
-            + IDEAS_INSTRUCTION
+            + _PROMPTS["ideas_instruction"]
             + "\n"
-            + FACT_REF_HINT
+            + _PROMPTS["fact_ref_hint"]
             + "\n\n"
-            f"Активная смысловая линия: {state.get('selected_line_id', '')}\n"
-            f"Статей в контексте: {len(articles)}.\n"
-            f"Доступные статьи (id, importance, region, title, summary, url):\n{_format_articles(articles)}\n\n"
+            + _PROMPT_FRAGMENTS["active_sense_line_line"].format(
+                line=state.get("selected_line_id", "")
+            )
+            + _PROMPT_FRAGMENTS["articles_in_context_line"].format(count=len(articles))
+            + _PROMPT_FRAGMENTS["available_articles_block"].format(
+                articles=_format_articles(articles)
+            )
         )
         if existing_ideas:
-            prompt += (
-                "Текущие идеи (сохраняй порядок при обсуждении и уточнениях):\n"
-                f"{_format_ideas(existing_ideas)}\n\n"
+            prompt += _PROMPT_FRAGMENTS["existing_ideas_block"].format(
+                ideas=_format_ideas(existing_ideas)
             )
         prompt += f"{build_json_prompt(IdeaListResponse)}"
-        return prompt + TOOL_POLICY_PROMPT
+        return prompt + _PROMPTS["tool_policy_prompt"]
 
     return create_agent(
         model=model,
@@ -330,10 +371,11 @@ def create_init_node():
         if "phase" not in state:
             state["phase"] = "lines"
         if not state.get("greeted"):
-            greet = ("Привет! Я — Генератор идей.\n"
-                    "Помогаю превращать ваши разведданные в понятные, собранные, основанные на фактах продуктовые идеи. \n"
-                    "По ходу работы можно в любой момент сравнивать идеи, дорабатывать их или возвращаться на предыдущие шаги — просто скажите об этом.\n"
-                    "Отчёт загружен, готов выделить смысловые линии." if state.get("report") else "Пожалуйста, загрузите отчёт — и я начну разбор")
+            greet = (
+                _AGENT_TEXT["greeting_with_report"]
+                if state.get("report")
+                else _AGENT_TEXT["greeting_no_report"]
+            )
             state["messages"] = (state.get("messages") or []) + [AIMessage(content=greet)]
             state["greeted"] = True
         return state
@@ -374,14 +416,14 @@ def create_sense_lines_node(model: BaseChatModel):
                 fact_links_md = _fact_links_from_articles(articles) if report else ""
                 extras: List[str] = []
                 if fact_links_md:
-                    extras.append("Факты (ссылки):\n" + fact_links_md)
+                    extras.append(f"{_AGENT_TEXT['fact_links_label']}\n{fact_links_md}")
                 formatted_lines.append(
                     f"{idx}) {line.get('short_title','')}\n"
                     f"{line.get('description','')}\n"
                     f"{line.get('region_note','')}\n"
                     + "\n".join(extras)
                 )
-            fallback = "Смысловые линии:\n" + "\n\n".join(formatted_lines)
+            fallback = f"{_AGENT_TEXT['sense_lines_label']}\n" + "\n\n".join(formatted_lines)
             #content = prettify(fallback)
             content = fallback
 
@@ -456,15 +498,15 @@ def create_ideas_node(model: BaseChatModel):
                 fact_links = _fact_links_from_articles(articles) if report else ""
                 extras = f"{idea.get('region_note','')}\n"
                 if fact_links:
-                    extras += f"Факты (ссылки):\n{fact_links}"
+                    extras += f"{_AGENT_TEXT['fact_links_label']}\n{fact_links}"
                 formatted.append(
                     f"- {idea.get('title','')}: {idea.get('summary','')}\n"
                     f"{extras}"
                 )
             if formatted:
-                fallback = "Идеи по выбранной линии:\n" + "\n\n".join(formatted)
+                fallback = f"{_AGENT_TEXT['ideas_label']}\n" + "\n\n".join(formatted)
             else:
-                fallback = "Не удалось сгенерировать идеи по выбранной линии. Попробуйте выбрать другую линию или уточнить запрос."
+                fallback = _AGENT_TEXT["ideas_generation_failed"]
             #content = prettify(fallback)
             content = fallback
 
@@ -511,7 +553,10 @@ def route(state: IdeatorAgentState) -> str:
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
     use_platform_store: bool = False,
+    locale: str = "ru",
 ):
+    set_locale(locale)
+    set_models_locale(locale)
     log_name = f"ideator_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]

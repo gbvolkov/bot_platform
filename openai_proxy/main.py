@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, AsyncIterator, Dict, List
+from pathlib import Path
+from typing import Annotated, Any, AsyncIterator, Dict, List, Optional
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,6 +43,118 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MAX_LOGGED_BODY_BYTES = 4096
+MAX_REMOTE_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+
+def _clean_content_type(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.split(";", 1)[0].strip()
+    return cleaned or None
+
+
+def _parse_data_url(url: str) -> tuple[Optional[str], Optional[str]]:
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None, None
+    header, sep, payload = url.partition(",")
+    if not sep:
+        return None, None
+    meta = header[5:]
+    mime = None
+    is_base64 = False
+    if meta:
+        parts = [part.strip() for part in meta.split(";") if part.strip()]
+        if parts:
+            mime = parts[0]
+        is_base64 = "base64" in parts[1:]
+    if not is_base64:
+        return None, None
+    return (mime or None), (payload.strip() or None)
+
+
+def _guess_content_type(filename: Optional[str], url: Optional[str]) -> Optional[str]:
+    if filename:
+        guessed, _ = mimetypes.guess_type(filename)
+        if guessed:
+            return guessed
+    if url:
+        path = urlparse(url).path
+        if path:
+            guessed, _ = mimetypes.guess_type(path)
+            if guessed:
+                return guessed
+    return None
+
+
+def _ensure_filename(attachment: Dict[str, Any]) -> None:
+    if attachment.get("filename"):
+        return
+    content_type = _clean_content_type(attachment.get("content_type"))
+    ext = None
+    if content_type:
+        ext = mimetypes.guess_extension(content_type)
+    if not ext:
+        url_value = attachment.get("url")
+        if isinstance(url_value, str) and url_value:
+            ext = Path(urlparse(url_value).path).suffix or None
+    if not ext:
+        ext = ".bin"
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    attachment["filename"] = f"attachment_{uuid.uuid4().hex}{ext}"
+
+
+async def _fetch_url_data(url: str) -> tuple[Optional[str], Optional[str]]:
+    timeout = httpx.Timeout(15.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            content_type = _clean_content_type(response.headers.get("content-type"))
+            buffer = bytearray()
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > MAX_REMOTE_ATTACHMENT_BYTES:
+                    raise ValueError(f"Remote attachment exceeds {MAX_REMOTE_ATTACHMENT_BYTES} bytes")
+            data = base64.b64encode(bytes(buffer)).decode("ascii")
+            return content_type, data
+
+
+async def _hydrate_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    hydrated: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        item = dict(attachment)
+        _ensure_filename(item)
+        if item.get("data") or item.get("text"):
+            item.pop("url", None)
+            if not item.get("content_type"):
+                item["content_type"] = _guess_content_type(item.get("filename"), None)
+            hydrated.append(item)
+            continue
+        url_value = item.get("url")
+        if isinstance(url_value, str) and url_value:
+            mime, data = _parse_data_url(url_value)
+            if data:
+                item["data"] = data
+                if mime and not item.get("content_type"):
+                    item["content_type"] = mime
+                item.pop("url", None)
+                hydrated.append(item)
+                continue
+            if url_value.startswith(("http://", "https://")):
+                mime, data = await _fetch_url_data(url_value)
+                if data:
+                    item["data"] = data
+                if mime and not item.get("content_type"):
+                    item["content_type"] = mime
+                item.pop("url", None)
+                if not item.get("content_type"):
+                    item["content_type"] = _guess_content_type(item.get("filename"), url_value)
+                hydrated.append(item)
+                continue
+        hydrated.append(item)
+    return hydrated
 
 
 bot_client = BotServiceClient(
@@ -379,6 +496,25 @@ async def create_chat_completion(
                     for attachment in message.attachments
                 ]
             break
+    if latest_attachments:
+        try:
+            latest_attachments = await _hydrate_attachments(latest_attachments)
+        except Exception as exc:
+            logger.error("Attachment hydration failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to prepare attachments: {exc}",
+            ) from exc
+        invalid = [
+            attachment.get("filename")
+            for attachment in latest_attachments
+            if not attachment.get("data") and not attachment.get("text")
+        ]
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Attachments missing data or text: {', '.join(invalid)}",
+            )
 
     if default_prompt_used:
         logger.debug(

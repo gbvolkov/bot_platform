@@ -109,7 +109,8 @@ class AgentRegistry:
                 description="Educational tutor that provides concise hints and clarifying questions (without giving full solutions).",
                 factory=lambda provider: init_ismart_tutor_agent(provider=provider),
                 default_provider=default_provider,
-                supported_content_types=default_content_types,
+                supported_content_types=default_content_types + (ContentType.IMAGES,),
+                allow_raw_attachments=True,
             ),
         }
         self._definitions.update(self._build_product_definitions(default_provider, default_content_types))
