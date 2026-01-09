@@ -25,7 +25,7 @@ from langfuse.langchain import CallbackHandler
 import config as cfg
 
 from agents.state.state import ConfigSchema
-from agents.utils import ModelType, get_llm
+from agents.utils import ModelType, get_llm, _extract_text
 from platform_utils.llm_logger import JSONFileTracer
 
 from .prompts import (
@@ -43,27 +43,6 @@ from .state import (
 LOG = logging.getLogger(__name__)
 
 _NOSOLOGY_PATH = Path("data") / "nosologies.json"
-
-
-def _extract_text(message: BaseMessage) -> str:
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts: List[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                if item.get("type") == "text":
-                    text = (item.get("text") or "").strip()
-                    if text:
-                        parts.append(text)
-            elif isinstance(item, str):
-                text = item.strip()
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
-    return str(content).strip()
-
 
 _IMAGE_PART_TYPES = {"image_url", "input_image"}
 

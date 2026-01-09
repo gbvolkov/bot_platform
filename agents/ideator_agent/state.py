@@ -32,7 +32,7 @@ class IdeatorAgentState(AgentState[Dict[str, Any]]):
 
     messages: Annotated[List[BaseMessage], add_messages]
     attachments: NotRequired[List[Dict[str, Any]]]
-    report: Annotated[NotRequired[IdeatorReport], _keep_first]
+    report: Annotated[NotRequired[IdeatorReport | str], _keep_first]
     report_path: Annotated[NotRequired[str], _keep_first]
     sense_lines: Annotated[NotRequired[List[Dict[str, Any]]], _keep_first]
     selected_line_id: NotRequired[str]

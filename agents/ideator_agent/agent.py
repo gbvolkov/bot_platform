@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Annotated, Any, Dict, List, NotRequired, Optional, TypedDict
@@ -25,27 +26,30 @@ from langfuse.langchain import CallbackHandler
 
 import config
 
+from utils.utils import is_valid_json_string
 from agents.tools.think import ThinkTool
-from agents.utils import ModelType, get_llm
+from agents.tools.yandex_search import YandexSearchTool as SearchTool
+
+from agents.utils import ModelType, get_llm, _extract_text
 from agents.structured_prompt_utils import build_json_prompt, provider_then_tool
 from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
 
-
 from .models import ArticleRecord, IdeatorReport, set_locale as set_models_locale
 from .prompts import (
-    FACT_REF_HINT,
-    IDEAS_INSTRUCTION,
-    IDEATOR_SYSTEM_PROMPT,
-    SENSE_LINE_INSTRUCTION,
-    TOOL_POLICY_PROMPT,
+    #FACT_REF_HINT,
+    #IDEAS_INSTRUCTION,
+    #IDEATOR_SYSTEM_PROMPT,
+    #SENSE_LINE_INSTRUCTION,
+    #TOOL_POLICY_PROMPT,
     get_locale,
 )
-from .report_loader import load_report
+from .report_loader import load_report, process_report
 from .state import IdeatorAgentContext, IdeatorAgentState
 
 LOG = logging.getLogger(__name__)
 
+MIN_REPORT_LENGTH = 2000
 
 class ArticleRef(TypedDict):
     id: Annotated[int, "Id from the provided list"]
@@ -73,7 +77,7 @@ class SenseLineItem(TypedDict):
 
 
 class SenseLineResponse(TypedDict):
-    assistant_message: Annotated[str, "Natural language reply for the user for matted for MarkdownV2"]
+    assistant_message: Annotated[str, "Natural language reply for the user, including a brief summary of generated sense_lines (if any) and summary of decision."]
     sense_lines: List[SenseLineItem]
     decision: NotRequired[Decision]
 
@@ -88,12 +92,20 @@ class IdeaItem(TypedDict):
 
 
 class IdeaListResponse(TypedDict):
-    assistant_message: Annotated[str, "Natural language reply for the user."]
+    assistant_message: Annotated[str, "Natural language reply for the user, including a brief summary of generated ideas (if any) and summary of decision."]
     ideas: Annotated[List[IdeaItem], "List of generated ideas."]
     decision: NotRequired[Decision]
 
 
 _think_tool = ThinkTool()
+_yandex_tool = SearchTool(
+    api_key=config.YA_API_KEY,
+    folder_id=config.YA_FOLDER_ID,
+    max_results=3,
+    summarize=True
+)
+
+
 _LOCALE: Dict[str, Any] = {}
 _AGENT_TEXT: Dict[str, str] = {}
 _PROMPT_FRAGMENTS: Dict[str, str] = {}
@@ -118,7 +130,7 @@ def _format_articles(articles: List[ArticleRecord], limit_chars: int = 400) -> s
     for art in articles:
         summary = art.summary
         if len(summary) > limit_chars:
-            summary = summary[:limit_chars] + "..."
+            summary = f"{summary[:limit_chars]}..."
         lines.append(
             f"- [{art.id}] ({art.norm_importance()}; {art.region_label()})\n"
             f"  {summary}\n"
@@ -167,9 +179,11 @@ def _fact_refs_for(report: IdeatorReport, article_ids: List[int]) -> List[str]:
 
 def _links_md_for(report: IdeatorReport, article_ids: List[int], limit: int = 5) -> str:
     links: List[str] = []
-    for art in report.filter_by_ids(article_ids)[:limit]:
-        if art.url:
-            links.append(f"- [{art.display_title()}]({art.url})")
+    links.extend(
+        f"- [{art.display_title()}]({art.url})"
+        for art in report.filter_by_ids(article_ids)[:limit]
+        if art.url
+    )
     return "\n".join(links)
 
 
@@ -241,9 +255,11 @@ def _extract_articles(obj: Dict[str, Any], report: IdeatorReport) -> List[Articl
 
 def _links_md_for(report: IdeatorReport, article_ids: List[int], limit: int = 5) -> str:
     links: List[str] = []
-    for art in report.filter_by_ids(article_ids)[:limit]:
-        if art.url:
-            links.append(f"- [{art.display_title()}]({art.url})")
+    links.extend(
+        f"- [{art.display_title()}]({art.url})"
+        for art in report.filter_by_ids(article_ids)[:limit]
+        if art.url
+    )
     return "\n".join(links)
 
 
@@ -251,8 +267,9 @@ def _build_sense_agent(model: BaseChatModel):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state: IdeatorAgentState = request.state
-        report: IdeatorReport = state.get("report")  # type: ignore
-        articles = report.sorted_articles()[:80] if report else []
+        report: IdeatorReport | str = state.get("report")  # type: ignore
+        use_report = isinstance(report, IdeatorReport)
+        articles = report.sorted_articles()[:80] if use_report else []
         existing_lines = state.get("sense_lines") or []
         prompt = (
             _PROMPTS["ideator_system_prompt"]
@@ -262,10 +279,10 @@ def _build_sense_agent(model: BaseChatModel):
             + _PROMPTS["fact_ref_hint"]
             + "\n\n"
             + _PROMPT_FRAGMENTS["search_goal_line"].format(
-                search_goal=report.search_goal if report else ""
+                search_goal=report.search_goal if use_report else ""
             )
             + _PROMPT_FRAGMENTS["articles_stats_line"].format(
-                total=report.total_articles if report else 0,
+                total=report.total_articles if use_report else 0,
                 count=len(articles),
             )
             + _PROMPT_FRAGMENTS["articles_list_block"].format(
@@ -277,7 +294,7 @@ def _build_sense_agent(model: BaseChatModel):
                 lines=_format_sense_lines(existing_lines)
             )
         prompt += f"{build_json_prompt(SenseLineResponse)}"
-        return prompt + _PROMPTS["tool_policy_prompt"]
+        return prompt + _PROMPTS["think_tool_policy_prompt"]
 
     return create_agent(
         model=model,
@@ -293,9 +310,10 @@ def _build_ideas_agent(model: BaseChatModel):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state: IdeatorAgentState = request.state
-        report: IdeatorReport = state.get("report")  # type: ignore
+        report: IdeatorReport | str = state.get("report")  # type: ignore
+        use_report = isinstance(report, IdeatorReport)
         articles = state.get("filtered_articles") or []
-        if not articles and report:
+        if not articles and use_report:
             filtered_ids = state.get("filtered_article_ids") or []
             articles = report.filter_by_ids(filtered_ids)
         existing_ideas = state.get("ideas") or []
@@ -319,11 +337,11 @@ def _build_ideas_agent(model: BaseChatModel):
                 ideas=_format_ideas(existing_ideas)
             )
         prompt += f"{build_json_prompt(IdeaListResponse)}"
-        return prompt + _PROMPTS["tool_policy_prompt"]
+        return prompt + _PROMPTS["think_tool_policy_prompt"] + "\n\n" + _PROMPTS["search_tool_policy_prompt"]
 
     return create_agent(
         model=model,
-        tools=[_think_tool],
+        tools=[_think_tool, _yandex_tool],
         middleware=[build_prompt, provider_then_tool],
         response_format=IdeaListResponse,
         state_schema=IdeatorAgentState,
@@ -362,6 +380,20 @@ def create_init_node():
         if report_path:
             state["report_path"] = report_path
             state["report"] = load_report(report_path)
+        if not report_path and not state.get("report"):
+            messages = state.get("messages") or []
+            last_message = messages[-1] if messages else None
+            if last_message and getattr(last_message, "type", None) == "human":
+                content = _extract_text(last_message)
+                #content = content.replace("\xa0", "")
+                #getattr(last_message, "content", "")
+                if is_valid_json_string(content):
+                    data = json.loads(content)
+                    state["report"] = process_report(data)
+                else:
+                    if content and len(content) >= MIN_REPORT_LENGTH:
+                        state["report"] = content
+
         if "ideas_cache" not in state:
             state["ideas_cache"] = {}
         if "force_regen_lines" not in state:
@@ -404,16 +436,18 @@ def create_sense_lines_node(model: BaseChatModel):
         result.pop("structured_response", None)
         LOG.info("sense_lines_node: generated %d lines", len(sense_lines))
 
+        report: IdeatorReport | str= state.get("report")  # type: ignore
+        use_report = isinstance(report, IdeatorReport)
+
         content = ""
         if assistant_message:
             #content = prettify(assistant_message)
             content = assistant_message
         elif sense_lines:
-            report: IdeatorReport = state.get("report")  # type: ignore
             formatted_lines = []
             for idx, line in enumerate(sense_lines, start=1):
-                articles = _extract_articles(line, report) if report else []
-                fact_links_md = _fact_links_from_articles(articles) if report else ""
+                articles = _extract_articles(line, report) if use_report else []
+                fact_links_md = _fact_links_from_articles(articles) if use_report else ""
                 extras: List[str] = []
                 if fact_links_md:
                     extras.append(f"{_AGENT_TEXT['fact_links_label']}\n{fact_links_md}")
@@ -425,7 +459,7 @@ def create_sense_lines_node(model: BaseChatModel):
                 )
             fallback = f"{_AGENT_TEXT['sense_lines_label']}\n" + "\n\n".join(formatted_lines)
             #content = prettify(fallback)
-            content = fallback
+            content += "\n" + fallback
 
         result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
 
@@ -439,17 +473,16 @@ def create_sense_lines_node(model: BaseChatModel):
         selected_idx = decision.get("selected_line_index")
         custom_line_text = decision.get("custom_line_text")
         ready_for_ideas = decision.get("consent_generate")
-        report: IdeatorReport = state.get("report")  # type: ignore
         if ready_for_ideas and selected_idx and 1 <= selected_idx <= len(sense_lines):
             selected = sense_lines[selected_idx - 1]
             result["selected_line_id"] = selected.get("id") or f"L{selected_idx}"
-            articles = _extract_articles(selected, report) if report else []
+            articles = _extract_articles(selected, report) if use_report else []
             result["filtered_articles"] = articles
             result["filtered_article_ids"] = []
             result["force_regen"] = True
             result["phase"] = "ideas"
         elif ready_for_ideas and custom_line_text:
-            top_articles = report.sorted_articles()[:20] if report else []
+            top_articles = report.sorted_articles()[:20] if use_report else []
             result["selected_line_id"] = "custom_line"
             result["filtered_articles"] = top_articles
             result["filtered_article_ids"] = []
@@ -491,11 +524,12 @@ def create_ideas_node(model: BaseChatModel):
             #content = prettify(assistant_message)
             content = assistant_message
         elif ideas:
-            report: IdeatorReport = state.get("report")  # type: ignore
+            report: IdeatorReport | str = state.get("report")  # type: ignore
+            use_report = isinstance(report, IdeatorReport)
             formatted = []
             for idea in ideas:
-                articles = _extract_articles(idea, report) if report else []
-                fact_links = _fact_links_from_articles(articles) if report else ""
+                articles = _extract_articles(idea, report) if use_report else []
+                fact_links = _fact_links_from_articles(articles) if use_report else ""
                 extras = f"{idea.get('region_note','')}\n"
                 if fact_links:
                     extras += f"{_AGENT_TEXT['fact_links_label']}\n{fact_links}"
@@ -508,7 +542,7 @@ def create_ideas_node(model: BaseChatModel):
             else:
                 fallback = _AGENT_TEXT["ideas_generation_failed"]
             #content = prettify(fallback)
-            content = fallback
+            content += "\n" + fallback
 
         result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
 

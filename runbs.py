@@ -9,9 +9,7 @@ import uvicorn
 def _env_flag(name: str, default: bool) -> bool:
     """Convert env var to bool using common truthy strings."""
     raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.lower() in {"1", "true", "yes", "on"}
+    return default if raw is None else raw.lower() in {"1", "true", "yes", "on"}
 
 
 def main() -> None:

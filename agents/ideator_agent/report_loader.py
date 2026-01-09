@@ -9,15 +9,11 @@ from .models import ArticleRecord, IdeatorReport
 
 def _norm_importance(val: str) -> str:
     val = (val or "").lower().strip()
-    if val in ("high", "medium", "low"):
-        return val
-    return "medium"
+    return val if val in ("high", "medium", "low") else "medium"
 
 
 def _safe_str(val: Any) -> str:
-    if val is None:
-        return ""
-    return str(val)
+    return "" if val is None else str(val)
 
 
 def _as_int(val: Any, default: int = 0) -> int:
@@ -27,30 +23,31 @@ def _as_int(val: Any, default: int = 0) -> int:
         return default
 
 
-def load_report(path: str | Path) -> IdeatorReport:
-    data: Dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
-
+def process_report(data: Dict[str, Any]) -> IdeatorReport:
     articles: List[ArticleRecord] = []
-    for idx, raw in enumerate(data.get("articles", [])):
-        articles.append(
-            ArticleRecord(
-                id=idx,
-                title=_safe_str(raw.get("title", "")).strip(),
-                summary=_safe_str(raw.get("summary", "")).strip(),
-                url=_safe_str(raw.get("url", "")).strip(),
-                importance=_norm_importance(raw.get("importance", "")),
-                date=_safe_str(raw.get("date", ""))[:10],
-                processed_at=_safe_str(raw.get("processed_at", "")),
-                search_country=_safe_str(raw.get("search_country", "")).lower(),
-                search_language=_safe_str(raw.get("search_language", "")).lower(),
-                source_file=_safe_str(raw.get("source_file", "")),
-                word_count=_as_int(raw.get("word_count", 0)),
-                importance_reasoning=_safe_str(raw.get("importance_reasoning", "")),
-                search_keywords=[_safe_str(k) for k in raw.get("search_keywords", [])],
-                raw=raw,
-            )
+    articles.extend(
+        ArticleRecord(
+            id=idx,
+            title=_safe_str(raw.get("title", "")).strip(),
+            summary=_safe_str(raw.get("summary", "")).strip(),
+            url=_safe_str(raw.get("url", "")).strip(),
+            importance=_norm_importance(raw.get("importance", "")),
+            date=_safe_str(raw.get("date", ""))[:10],
+            processed_at=_safe_str(raw.get("processed_at", "")),
+            search_country=_safe_str(raw.get("search_country", "")).lower(),
+            search_language=_safe_str(raw.get("search_language", "")).lower(),
+            source_file=_safe_str(raw.get("source_file", "")),
+            word_count=_as_int(raw.get("word_count", 0)),
+            importance_reasoning=_safe_str(
+                raw.get("importance_reasoning", "")
+            ),
+            search_keywords=[
+                _safe_str(k) for k in raw.get("search_keywords", [])
+            ],
+            raw=raw,
         )
-
+        for idx, raw in enumerate(data.get("articles", []))
+    )
     search_goal = ""
     search_prompt = ""
     if data.get("articles"):
@@ -69,6 +66,10 @@ def load_report(path: str | Path) -> IdeatorReport:
         search_prompt=search_prompt,
         articles=articles,
     )
+
+def load_report(path: str | Path) -> IdeatorReport:
+    data: Dict[str, Any] = json.loads(Path(path).read_text(encoding="utf-8"))
+    return process_report(data)
 
 
 __all__ = ["load_report"]

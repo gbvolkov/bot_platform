@@ -256,7 +256,7 @@ Each idea must include:
 - importance_hint: high / medium / low.
 
 Dialogue and decision rules:
-- Put the conversational reply in assistant_message (brief summaries, comparisons, next steps). **IMPORTANT** If you generate new ideas, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
+- Put the conversational reply in assistant_message (short summary of the structured response, brief summaries, comparisons, next steps). **IMPORTANT** If you generate new ideas, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
 - Always return the ideas array; keep the order stable between turns unless regeneration is explicitly requested.
 - Always reply in English.
 - The decision field reflects clear user intent:
@@ -278,7 +278,7 @@ IDEAS_INSTRUCTION = """
 - importance_hint: high / medium / low.
 
 Правила диалога и принятия решений:
-- Разговорный ответ помещай в assistant_message (краткие резюме, сравнения, следующие шаги). **ВАЖНО** Если генерируешь новые идеи - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
+- Разговорный ответ помещай в assistant_message (краткое резюме структурированного ответа, краткие резюме, сравнения, следующие шаги). **ВАЖНО** Если генерируешь новые идеи - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
 - Всегда генерируй ответ на русском языке.
 - Всегда возвращай массив ideas; сохраняй порядок стабильным между ходами, если только явно не запрошена регенерация.
 - Поле decision отражает явное намерение пользователя:
@@ -295,7 +295,7 @@ fact_ref формат: (<страна>; <importance>; <date>) | ["<title>"] (<ur
 Если нет даты — используй processed_at[:10]; если нет title — возьми первые слова summary.
 """
 
-TOOL_POLICY_PROMPT = """
+THINK_TOOL_POLICY_PROMPT = """
 ### Think Tool (internal scratchpad)
 ## Using the think tool (internal scratchpad)
 Before taking any action or responding to the user, **ALWAYS** use the `think_tool` tool to:
@@ -306,6 +306,25 @@ Before taking any action or responding to the user, **ALWAYS** use the `think_to
 - Check if format requirements met.
 - Check if all refferences properly provided.
 """
+
+SEARCH_TOOL_POLICY_PROMPT = """
+### Yandex Web Search
+1. **Context check.**  
+   Immediately inspect the preceding conversation for knowledge-base snippets.  
+2. **Call of `web_search_summary`.**  
+   If you need information from internet on the best practices oк or competitor analysis, you **MAY** call `web_search_summary`. 
+   If user asked you use information from internet or from external sources, you **MUST** call `web_search_summary`. 
+3. **Language.**  
+   Always try to query first in Russsian and only then in English.  
+4. **Persistent search.**  
+   Should the first query return no or insufficient results, broaden it (synonyms, alternative terms) and repeat until you obtain adequate data or exhaust reasonable options.
+   *IMPORTANT*: You may repeat search MAX 3 times in turn.
+5. **No hallucinations & no external citations.**  
+   Present information as your own. If data is still lacking, inform the user that additional investigation is required.  
+6. **Answer timing.**  
+   Do **not** send any free-text response to the user until you have processed the results of `web_search_summary` (if invoked).
+"""
+
 
 IDEATOR_SYSTEM_PROMPT_EN = """
 1. ROLE
@@ -527,7 +546,8 @@ LOCALES = {
             "sense_line_instruction": SENSE_LINE_INSTRUCTION,
             "ideas_instruction": IDEAS_INSTRUCTION,
             "fact_ref_hint": FACT_REF_HINT,
-            "tool_policy_prompt": TOOL_POLICY_PROMPT,
+            "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
+            "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT,
         },
         "prompt_fragments": {
             "search_goal_line": "search_goal: {search_goal}\n",
@@ -587,7 +607,8 @@ LOCALES = {
             "sense_line_instruction": SENSE_LINE_INSTRUCTION_EN,
             "ideas_instruction": IDEAS_INSTRUCTION_EN,
             "fact_ref_hint": FACT_REF_HINT_EN,
-            "tool_policy_prompt": TOOL_POLICY_PROMPT,
+            "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
+            "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT,
         },
         "prompt_fragments": {
             "search_goal_line": "search_goal: {search_goal}\n",

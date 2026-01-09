@@ -1,8 +1,12 @@
 import os
 import config
 from enum import Enum
+from typing import List
+import re
+import unicodedata
 
-from langchain_core.messages import ToolMessage
+
+from langchain_core.messages import ToolMessage, BaseMessage
 from langchain_core.runnables import RunnableLambda
 
 from langgraph.prebuilt import ToolNode
@@ -79,6 +83,51 @@ def _print_response(event: dict, _printed: set, max_length=1500):
             _printed.add(message.id)
 
 
+
+# JSON allows: space, tab, LF, CR as whitespace outside strings.
+# Many real-world sources include other Unicode spaces, esp. NBSP (U+00A0).
+UNICODE_SPACES = {
+    "\u00A0": " ",  # NBSP
+    "\u2007": " ",  # figure space
+    "\u202F": " ",  # narrow NBSP
+    "\u200B": "",   # zero-width space (often best removed)
+    "\uFEFF": "",   # BOM/zero-width no-break space
+}
+
+# Remove ASCII control chars that are illegal in JSON text (outside strings)
+# Note: if your JSON contains literal control characters inside string values,
+# that JSON is invalid anyway; removing them is usually the best salvage strategy.
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+def clean_text(s: str) -> str:
+    # Normalize unicode to reduce weird variants
+    s = unicodedata.normalize("NFC", s)
+
+    # Translate common problematic unicode whitespace
+    s = s.translate(str.maketrans(UNICODE_SPACES))
+
+    # Remove illegal control characters
+    s = CONTROL_CHARS_RE.sub("", s)
+
+    return s
+
+
+def _extract_text(message: BaseMessage) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return clean_text(content).strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    if text := clean_text((item.get("text") or "")).strip():
+                        parts.append(text)
+            elif isinstance(item, str):
+                if text := clean_text(item).strip():
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return str(content).strip()
 
 def send_text_element(chat_id, element_content, bot, usr_msg = None):
     chunks = [element_content[i:i+3800] for i in range(0, len(element_content), 3800)]
