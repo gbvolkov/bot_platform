@@ -553,7 +553,7 @@ def route(state: IdeatorAgentState) -> str:
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
     use_platform_store: bool = False,
-    locale: str = "ru",
+    locale: str = "en",
 ):
     set_locale(locale)
     set_models_locale(locale)
