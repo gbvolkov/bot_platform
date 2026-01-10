@@ -170,6 +170,7 @@ C) Переформулирование
 • создавать альтернативы без fact_ref,
 • придумывать факты вне отчёта.
 
+
 7. РАБОТА СО ССЫЛКАМИ
 
 • только ссылки из отчёта «Разведчика»;
@@ -188,7 +189,7 @@ C) Переформулирование
 9. ЗАПРЕТЫ
 
 Нельзя:
-• добавлять внешние данные;
+• добавлять внешние данные, за исключением данных, необходимых для оценки идей по RICE;
 • придумывать факты;
 • использовать штампы;
 • давать идеи без fact_ref;
@@ -231,7 +232,7 @@ SENSE_LINE_INSTRUCTION = """
 
 Всегда возвращай массив sense_lines, даже если ты продолжаешь обсуждение, а не делаешь окончательный выбор.
 Правила диалога и принятия решений:
-- Свой ответ, видимый пользователю, помещай в поле assistant_message (кратко перескажи варианты, уточни потребности, предложи доработки), формат — MarkdownV2. **ВАЖНО** Если генерируешь новые смысловые линии - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
+- Свой ответ, видимый пользователю, помещай в поле assistant_message. Всегда включай сюда информацию, которую фиксируешь в структурированном виде в пое sense_lines, а также кратко перескажи варианты, уточни потребности, предложи доработки, формат — MarkdownV2. **ВАЖНО** Если генерируешь новые смысловые линии - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
 - Всегда генерируй ответ на русском языке.
 - Сохраняй id и порядок строк стабильными между ходами, если только пользователь явно не просит всё пересобрать.
 - Поле decision отражает явное намерение пользователя:
@@ -256,7 +257,7 @@ Each idea must include:
 - importance_hint: high / medium / low.
 
 Dialogue and decision rules:
-- Put the conversational reply in assistant_message (short summary of the structured response, brief summaries, comparisons, next steps). **IMPORTANT** If you generate new ideas, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
+- Put your user-facing reply in assistant_message. Always include here all information you put in ideas and decision, and also include short summaries of options, clarify user demand, propose changes and so on. Format MarkdownV2. **IMPORTANT** If you generate new ideas, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
 - Always return the ideas array; keep the order stable between turns unless regeneration is explicitly requested.
 - Always reply in English.
 - The decision field reflects clear user intent:
@@ -278,7 +279,7 @@ IDEAS_INSTRUCTION = """
 - importance_hint: high / medium / low.
 
 Правила диалога и принятия решений:
-- Разговорный ответ помещай в assistant_message (краткое резюме структурированного ответа, краткие резюме, сравнения, следующие шаги). **ВАЖНО** Если генерируешь новые идеи - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
+- Свой ответ, видимый пользователю, помещай в поле assistant_message. Всегда включай сюда информацию, которую фиксируешь в структурированном виде в поле ideas and decision, а также кратко перескажи варианты, уточни потребности, предложи доработки, формат — MarkdownV2. **ВАЖНО** Если генерируешь новые смысловые линии - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
 - Всегда генерируй ответ на русском языке.
 - Всегда возвращай массив ideas; сохраняй порядок стабильным между ходами, если только явно не запрошена регенерация.
 - Поле decision отражает явное намерение пользователя:
@@ -497,7 +498,7 @@ Forbidden:
 
 9. PROHIBITIONS
 You must not:
-• add external data;
+• add external data, except for data needed to evaluate ideas by RICE;
 • invent facts;
 • use cliches;
 • give ideas without fact_ref;
@@ -518,7 +519,9 @@ Each line must include:
 
 Always return the sense_lines array, even if you are continuing the discussion rather than making a final choice.
 Dialogue and decision rules:
-- Put your user-facing reply in assistant_message (briefly recap options, clarify needs, offer refinements), format MarkdownV2. **IMPORTANT** If you generate new sense lines, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
+- Свой ответ, видимый пользователю, помещай в поле assistant_message. Всегда включай сюда информацию, которую фиксируешь в структурированном виде в поле ideas and decision, а также кратко перескажи варианты, уточни потребности, предложи доработки, формат — MarkdownV2. **ВАЖНО** Если генерируешь новые смысловые линии - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
+
+- Put your user-facing reply in assistant_message. Always include here all information you put in sense_lines, and also include short summaries of options, clarify user demand, propose changes and so on. Format MarkdownV2. **IMPORTANT** If you generate new sense lines, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
 - Always reply in English.
 - Keep ids and line order stable between turns unless the user explicitly asks to rebuild everything.
 - The decision field reflects clear user intent:
