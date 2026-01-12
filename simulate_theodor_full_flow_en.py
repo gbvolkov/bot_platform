@@ -34,17 +34,17 @@ import time
 _MAX_ATTTEMPTS = 1
 
 USER_SIMULATOR_PROMPT = """
-Ты - ответственный секретарь Управляюшего комитета по новым продуктам страховой компани Ингосстрах.
-Ты отвечаешь за то, чтобы предоставляемые материалы были качественно проработаны и потенциально приносили ценность компании.
-Ты оцениваешь идеи с точки зрения методологии RICE.
+You are the Executive Secretary of the Steering Committee for New Products at the insurance company Ingosstrakh.
+You are responsible for ensuring that the materials provided are thoroughly developed, high quality, and potentially bring value to the company.
+You evaluate ideas using the RICE methodology.
 
-Твой собеседник - продуктолог. Он прорабатывает идею нового продукта для компании и предоставляет тебе различные варианты артефактов по методологии 13 шагов.
-Твоя задача - обеспечить максимальное качество материалов и оценить потенциальную ценность идеи.
-Ты рассматриваешь предоставленные артефакты, критикуешь их, выбираешь один их предоставленных вариантов.
+Your counterpart is a product manager. They are developing an idea for a new product for the company and provide you with different versions of artifacts based on the “13 steps” methodology.
+Your task is to ensure the highest possible quality of the materials and assess the potential value of the idea.
+You review the submitted artifacts, critique them, and select one of the proposed options.
 
-Вместе с твоим обеседником вы должны пройти все 13 шагов и получить лучший результат.
+Together with your counterpart, you must go through all 13 steps and achieve the best result.
 
-Там, где это уместно давай оценку вариантов/артефактов/идей с точки зрения RICE.
+Where appropriate, assess the options/artifacts/ideas using the RICE framework.
 """
 
 #USER_SIMULATOR_PROMPT = """
@@ -56,7 +56,7 @@ USER_SIMULATOR_PROMPT = """
 async def run_simulation():
 
     print("Initializing Theodor Agent...")
-    agent_graph = initialize_agent(locale="ru")
+    agent_graph = initialize_agent(locale="en")
     _user_primary_llm = get_llm(model="base", provider="openai")
     _user_alternative_llm = get_llm(model="mini", provider="openai_4", temperature=0)
     user_llm = with_llm_fallbacks(
@@ -70,13 +70,13 @@ async def run_simulation():
     config = {"configurable": {"thread_id": "simulation_thread_1"}}
 
     idea = (
-        "###Идея:\n"
-        "***Для покупателей квартир на вторичном рынке***,  \n"
-        "которые боятся стать жертвами мошенников и потерять деньги и недвижимость,  \n"
-        "**наш продукт** — это комплексный онлайн-сервис юридической и технической проверки квартиры,  \n"
-        "**который** выявляет все скрытые риски и юридические проблемы до сделки,  \n"
-        "**в отличие** от разрозненных проверок через Росреестр, нотариусов и риелторов,  \n"
-        "**наш продукт** проводит автоматизированную проверку по 50+ параметрам за 24 часа с юридической гарантией результата."
+        "###Idea:\n"
+        "***For buyers of apartments on the secondary (resale) market***,  \n"
+        "who are afraid of becoming victims of fraud and losing money and property,  \n"
+        "**our product** is a comprehensive online service for legal and technical due diligence of an apartment,  \n"
+        "**which** identifies all hidden risks and legal issues before the transaction,  \n"
+        "**unlike** fragmented checks through Rosreestr, notaries, and real estate agents,  \n"
+        "**our product** performs an automated check across 50+ parameters within 24 hours with a legal guarantee of the result."
     )
 
     next_input: Any = {
@@ -103,7 +103,7 @@ async def run_simulation():
     attempts = 0
 
     SIMULATE = True
-    with open("docs/simulate_theodor_full_flow.md", "w", encoding="utf-8") as f:
+    with open("docs/simulate_theodor_full_flow_en.md", "w", encoding="utf-8") as f:
         while True:
             events = agent_graph.invoke(
                 next_input,
@@ -141,7 +141,7 @@ async def run_simulation():
                     if not msg_text or node_name == "init" or node_name.startswith(("choice_agent_", "cleanup_")):
                         continue
 
-                    message = f"\n**Ответ продуктолога**:\n{msg_text}\n\n"
+                    message = f"\n**Theodorus answer**:\n{msg_text}\n\n"
                     print(message)
                     f.write(message)
                 elif mode == "updates" and isinstance(payload, dict) and "__interrupt__" in payload:
@@ -163,17 +163,17 @@ async def run_simulation():
 
                 #print(f"Interrupt payload: {payload}")
                 if SIMULATE:
-                    message = f"\n**Ответ продуктолога**:\n{last_ai}\n" 
+                    message = f"\n**Theodorus answer**:\n{last_ai}\n" 
                     print(message)
                     f.write(message)
-                    prompt = f"{message}\nТвой ответ (это {attempts} итерация):"
+                    prompt = f"{message}\nYour answer (this is the {attempts} iteration):"
                     
                     sys_prompt = USER_SIMULATOR_PROMPT
                     if attempts >= _MAX_ATTTEMPTS:
                         if current_state in (ArtifactState.INIT, ArtifactState.OPTIONS_GENERATED):
-                            sys_prompt += "\n**ВАЖНО**: Сейчас ты ДОЛЖЕН выбрать один из предложенных тебе вариантов. Дальнейшие изменения НЕВОЗМОЖНЫ! Не давай замечаний - просто выбери вариант."
+                            sys_prompt += "\n**IMPORTANT**: You must now choose one of the options provided to you. Further changes are NOT POSSIBLE! Do not give any remarks - just choose an option."
                         else:
-                            sys_prompt += "\n**ВАЖНО**: Сейчас ты ДОЛЖЕН подтвердить арефакт словом 'подтверждаю'.\nДальнейшие изменения НЕВОЗМОЖНЫ! Не давай замечаний - просто скажи 'подтверждаю'."
+                            sys_prompt += "\n**IMPORTANT**: You must now confirm the artifact with the word 'confirm'.\nFurther changes are NOT POSSIBLE! Do not give any remarks - just say 'confirm'."
 
                     sim_messages = [
                         SystemMessage(content=sys_prompt),
@@ -183,26 +183,26 @@ async def run_simulation():
                     user_reply: str = user_llm.invoke(sim_messages).content
                     print("-----------------------------------------------------------------\n")
                     f.write("-----------------------------------------------------------------\n")
-                    message = f"\n**Ответ эксперта**:\n {user_reply}"
+                    message = f"\n**Expert answer**:\n {user_reply}"
                     print(message)
                     f.write(message)
                 else:
-                    message = f"\n**Ответ продуктолога**:\n{last_ai}\n\n"
+                    message = f"\n**Theodorus answer**:\n{last_ai}\n\n"
                     print(message)
                     f.write(message)
-                    user_reply = input("\n**Ответ эксперта**:")
+                    user_reply = input("\n**Expert answer**:")
                 next_input = Command(resume=user_reply)
                 await asyncio.sleep(1)
                 continue
 
             if last_ai_message and last_ai_node.startswith("choice_agent_"):
-                message = f"\n**Ответ продуктолога**:\n{last_ai_message}\n\n"
+                message = f"\n**Theodorus answer**:\n{last_ai_message}\n\n"
                 print(message)
                 f.write(message)
 
             if len(state_snapshot.next) == 0:
                 artifacts = state_snapshot.values.get("artifacts") or {}
-                out_path = Path("docs") / "simulate_theodor_artifacts.md"
+                out_path = Path("docs") / "simulate_theodor_artifacts_en.md"
                 out_path.parent.mkdir(exist_ok=True)
 
                 if isinstance(artifacts, dict):
@@ -227,7 +227,7 @@ async def run_simulation():
             #break
 
     
-    print("ФСЁ")
+    print("THE ENT")
 
 
 

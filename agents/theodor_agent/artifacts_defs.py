@@ -1,3 +1,5 @@
+import copy
+
 from typing import Annotated, Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union, Callable
 from langchain.agents import AgentState
 
@@ -35,6 +37,29 @@ class AftifactFinalText(TypedDict):
     """
     artifact_estimation: Annotated[str, ..., "Estimation for an artifact. Here you can criticize. Оценка применимости и полноты артифакта. Здесь можно критиковать."]
     artifact_final_text: Annotated[str, ..., "Final text for an artifact - no discussion with user, just artifact text. Финальный текст для артефакта - без рассуждений и ответа пользователю - только текст артефакта! Format as MarkdownV2."]
+
+
+class CriteriaEstimationEn(TypedDict):
+    """Estimation of artifact criteria."""
+    criteria_estimation: Annotated[str, ..., "Estimation of artifact criteria. High-level assessment. Format as MarkdownV2."]
+
+
+class ArtifactOptionEn(TypedDict):
+    """Option for an artifact."""
+    artifact_option: Annotated[str, ..., "Option for an artifact. Format as MarkdownV2."]
+    criteris_estimations: Annotated[List[CriteriaEstimationEn], ..., "List of estimations for criteria applicable to the artifact."]
+
+
+class ArtifactOptionsEn(TypedDict):
+    """List of options for an artifact."""
+    general_considerations: Annotated[str, ..., "Critics for an artifact and for user's comments. Format as MarkdownV2."]
+    artifact_options: Annotated[List[ArtifactOptionEn], ..., "Unnumbered list of options for an artifact."]
+
+
+class AftifactFinalTextEn(TypedDict):
+    """Final text for an artifact."""
+    artifact_estimation: Annotated[str, ..., "Estimation for an artifact. Here you can criticize."]
+    artifact_final_text: Annotated[str, ..., "Final text for an artifact - no discussion with user, just artifact text. Format as MarkdownV2."]
 
 class ArtifactDetails(TypedDict):
     artifact_definition: ArtifactDefinition
@@ -87,7 +112,7 @@ def get_artifacts_list()-> str:
     return artifact_list
 
 
-ARTIFACTS: List[ArtifactDefinition] = [
+ARTIFACTS_RU: List[ArtifactDefinition] = [
     {
         "id": 0,
         "stage": "Генерация идей",
@@ -408,6 +433,345 @@ ARTIFACTS: List[ArtifactDefinition] = [
         "criteria": ["Сводка по 1-12", "Роли/ответственность", "Критерии готовности", "Go/No-Go"]
     }
 ]
+
+
+ARTIFACTS_EN: List[ArtifactDefinition] = [
+    {
+        "id": 0,
+        "stage": "Ideation",
+        "stage_goal": "Formulate and \"package\" the initial business idea into a clear format for its initial evaluation.",
+        "name": "Product Trinity",
+        "goal": "This tool is used for strategic analysis and finding opportunities for multiplicative, exponential growth (\"in multiples\"). It helps ensure that your idea targets a growing market with a real problem.",
+        "components": [
+            "Customer segment: Search for aggressively growing segments.",
+            "Problem (Need): Analyze the market of problems competing for the segment's attention.",
+            "Value: Analyze the market of values that solve the problem.",
+            "Solution: Analyze the market of solutions that deliver the value",
+        ],
+        "methodology":
+"""Product Trinity.
+1.\tStart with any of the three elements. For example, find a fast-growing customer segment (people working remotely; young people making online transactions).
+2.\tIdentify their most acute, critical need (lack of \"live\" communication).
+3.\tFormulate the value that solves this problem.
+4.\tAnalyze which solutions can deliver this value, and look for exponentially growing drivers (data products, dashboards, Uber-ization).
+5.\tAsk yourself: \"Where are the multiples (2x-30x growth)?\" If there is no multiplicative growth in the segment, the problem, or the value - keep searching.
+""",
+        "criteria": ["Growing segment", "Real pain in the customer's language", "2x-30x potential", "Theses are testable"]
+    },
+    {
+        "id": 1,
+        "stage": "Ideation",
+        "stage_goal": "Formulate and \"package\" the initial business idea into a clear format for its initial evaluation.",
+        "name": "Initiative Card (Product Canvas)",
+        "goal": "Structure and \"package\" your business idea into a single, clear format.",
+        "components": [
+            "Customer segments: Specific user groups whose problem you solve.",
+            "Problem: The customer's pain in their language.",
+            "Alternative solutions: How do customers solve the problem now?",
+            "Revenue sources: Monetization model. How will you earn money?",
+            "Solution: How exactly will your product solve the problem?",
+            "Communication channels: How will customers learn about your solution?",
+            "Key metrics: How will you measure success?",
+            "Cost structure: What will require resources?",
+            "Business processes: Which internal company processes will be affected?",
+        ],
+        "methodology":
+"""Fill all sections: problem, solution, market, team, metrics.
+1.\tName: Make it short, clear, and meaningful. It should capture the essence.
+2.\tSegments: Be specific. "Retail clients" is a bad segment. "Current customers of our bank with debit and credit cards" is a good one. Avoid too broad or too narrow segments.
+3.\tProblem: Do not confuse cause and effect. "Lack of a methodology" is not the client's problem. "Inability to export products due to missing certification" is the pain. Speak in the customer's language.
+4.\tRevenue sources and Costs: Make a preliminary estimate, show the order of magnitude. This is your P&L hypothesis.
+5.\tMetrics: Choose relative metrics (e.g., percentage of successful authorizations), not absolute (number of authorizations). Metrics should be linked to revenue sources.
+6.\tCross-analysis: Constantly check consistency between blocks. Does your "Solution" solve the stated "Problem" for this "Segment"? Do "Metrics" align with your "Revenue sources"?
+""",
+        "criteria": ["All sections filled", "Segments are specific", "Problem in the customer's language", "Relative metrics"]
+    },
+    {
+        "id": 2,
+        "stage": "Ideation",
+        "stage_goal": "Formulate and \"package\" the initial business idea into a clear format for its initial evaluation.",
+        "name": "Stakeholder Map",
+        "goal": "Identify all people and groups affected by your initiative or who can influence it. This helps build proper communication and manage expectations",
+        "components": [
+            "Stakeholder list: Everyone related to the project (top management, team, legal, finance, users, etc.).",
+            "Power/Interest matrix: A tool for classifying stakeholders",
+            "-- High power / High interest (Key players): Manage closely.",
+            "-- High power / Low interest (Context setters): Keep satisfied.",
+            "-- Low power / High interest (Subjects): Keep informed.",
+            "-- Low power / Low interest (Crowd): Monitor with minimal effort.",
+        ],
+        "methodology":
+"""Build an influence/interest matrix.
+1.\tMake a complete list of everyone who may be interested in your project or affected by it.
+2.\tAnalyze each stakeholder by assessing their level of power (influence on the project) and level of interest (how important the project is to them).
+3.\tPlace each in the appropriate quadrant of the matrix.
+4.\tDevelop a communication strategy for each group. For example, key players should be engaged regularly and involved in decisions, while the "Crowd" can be informed periodically via general updates.
+""",
+        "criteria": ["Roles/interests defined", "Influence assessed", "Risks considered", "Interaction matrix"]
+    },
+    {
+        "id": 3,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "Hypothesis Backlog",
+        "goal": "Collect and prioritize all assumptions about problems, segments, and solutions for systematic validation.\nFormulate at least 7 hypotheses. Use the web_search_summary tool to gather data.\nFor each hypothesis, make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "components": [
+            "Hypothesis: Formulated as \"If..., then...\".",
+            "Segment: Which user group the hypothesis is for.",
+            "Priority: How important this hypothesis is.",
+            "Validation method: For example, in-depth interview, A/B test, prototype.",
+        ],
+        "methodology":
+"""HADI cycles, ICE/RICE prioritization.
+1.\tMove all assumptions from the Initiative Card to the backlog.
+2.\tFormulate them as hypotheses. For example: "If we simplify the registration process, the percentage of successful authorizations will increase from 40% to 80%".
+3.\tPrioritize hypotheses to start with the riskiest and most important.
+""",
+        "criteria": ["Hypothesis formula", "Success metric", "Priority (ICE/RICE)", "Link to pain"]
+    },
+    {
+        "id": 4,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "In-depth Interview (CustDev)",
+        "goal": "Obtain qualitative data about problems, goals, and current user experience to validate hypotheses.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "components": [
+            "Hypotheses: Which assumptions you are testing.",
+            "Interview goals: What exactly you want to learn.",
+            "Structure and questions: Detailed script with open-ended questions.",
+            "Timing: How much time is allocated to each block.",
+        ],
+        "methodology":
+"""CustDev, open-ended questions.
+1.\tPreparation is 90% of success! Write the plan carefully.
+2.\tAsk open questions about past experience. Do not ask "Would you...?" (foresight question). Ask "Tell me how you last solved the problem..." (retrospective question).
+3.\tUse the "5 whys" rule to get to the root cause.
+4.\tListen carefully, do not interrupt. Most of the time the respondent should speak.
+5.\tRecord results in a table of insights for each respondent.
+""",
+        "criteria": ["Target sample", "Script", "Insights with quotes", "Links to raw data"]
+    },
+    {
+        "id": 5,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "Value Proposition",
+        "goal": "Systematically match customer needs and product characteristics to ensure fit and clearly articulate the main benefit. This artifact helps \"sell\" the product concept to customers and stakeholders.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "components": [
+            "Customer Profile (Circle):",
+            "-- Customer jobs: What the customer is trying to do (functional, social, emotional).",
+            "-- Customer pains: What bothers them and gets in the way.",
+            "-- Customer gains: What outcomes and benefits they want.",
+            "Value Map (Square):",
+            "-- Products and services: What you offer.",
+            "-- Pain relievers: How your product solves customer pains.",
+            "-- Gain creators: How your product creates gains for the customer.",
+        ],
+        "methodology":
+"""Value Proposition Canvas.
+1.\tStart with the Customer Profile. Based on data from in-depth interviews, fill in customer jobs, pains, and gains.
+2.\tThen fill in the Value Map. Describe how your product and its features help the customer by relieving pains and creating gains.
+3.\tFind fit. Ensure your pain relievers and gain creators target the most important pains and gains.
+4.\tFormulate the value proposition. Use a simple formula: "Our [product] helps [customer segment] who want to [do a job] by [relieving pain] and [creating gain]".
+""",
+        "criteria": ["Pain-to-benefit link", "Top-3 values", "Testable promises"]
+    },
+    {
+        "id": 6,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "Customer Journey Map (CJM)",
+        "goal": "Visualize the full customer experience when interacting with the company or product to identify barriers, pain points, and negative emotions.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "components": [
+            "Stages: Key phases of interaction (search, purchase, usage).",
+            "Actions: What the customer does at each stage.",
+            "Touchpoints: Where interaction happens (site, app, call center).",
+            "Problems and barriers: What gets in the customer's way.",
+            "Emotions: What the customer feels at each step (shown on a graph).",
+            "Solutions: Ideas to remove barriers.",
+        ],
+        "methodology":
+"""Path from need to decision.
+1.\tCollect information: Use data from in-depth interviews.
+2.\tDescribe the persona: Create a composite image of your customer.
+3.\tMap all stages, actions, and touchpoints.
+4.\tIdentify barriers and note where the customer experiences negative emotions.
+5.\tGenerate hypotheses for solutions to remove these barriers.
+""",
+        "criteria": ["Stages", "Pains/emotions", "Touchpoints", "Improvement opportunities"]
+    },
+    {
+        "id": 7,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "Business Process Map",
+        "goal": "Capture the current situation and systematize internal processes affected by your initiative. Unlike a CJM, this artifact shows interaction of internal roles, not just the customer.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "components": [
+            "Roles: All participants in the process (not just the customer).",
+            "Actions: Sequence of operations.",
+            "Duration: Time for each action.",
+            "Tools/Systems: Which programs or documents are used.",
+            "Hypotheses about problems and solutions: Where bottlenecks are and how to improve them.",
+        ],
+        "methodology":
+"""BPMN or a simple diagram.
+1.\tCollect information: Talk to business analysts and employees involved in the process.
+2.\tDefine the process entry and exit points to set clear boundaries.
+3.\tMap all actions, roles, and tools used.
+4.\tAnalyze the process and capture hypotheses about problems (e.g., "printing forms takes too much time") and solutions.
+""",
+        "criteria": ["AS-IS/TO-BE", "Inputs/outputs", "Owners", "Bottlenecks"]
+    },
+    {
+        "id": 8,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "Competitive Analysis",
+        "goal": "Understand how other companies solve similar problems to position your product correctly, avoid others' mistakes, and find competitive advantages.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.\n"
+                "**IMPORTANT**: Always use the web_search_summary tool to find competitors.",
+        "components": [
+            "Competitors: List of direct and indirect competitors.",
+            "Customer segments: Who competitors target.",
+            "Value proposition (USP): How they attract customers.",
+            "Monetization model: How they earn money.",
+            "Product characteristics: Key features.",
+            "Price/cost.",
+            "Customer reviews.",
+        ],
+        "methodology":
+"""Compare by features, prices, experience.
+1.\tFind competitors: Use search, marketing data, and industry reports. Analyze not only direct competitors, but also those who fight for the same customer value (e.g., for microloans, competitors include pawn shops).
+2.\tCollect information on all key points and put it into a comparison table.
+3.\tBecome a competitor's customer to study the product from the inside.
+4.\tAnalyze strengths and weaknesses and determine where you can be better. Do not compete on price as the first option.
+""",
+        "criteria": [">=5 alternatives", "Comparison table", "Differentiation"]
+    },
+    {
+        "id": 9,
+        "stage": "Discovery",
+        "stage_goal": "Validate all hypotheses from the Initiative Card using data and customer conversations. Reduce risk by killing non-viable ideas before expensive development.",
+        "name": "Unique Selling Proposition (USP)",
+        "goal": "Based on understanding of the customer and market, formulate one clear, short, and compelling statement that explains why your product is the best choice.",
+        "components": [
+            "Target audience: Who the product is for.",
+            "Problem: What pain you solve.",
+            "Solution/Product: What you offer.",
+            "Unique differentiator: What makes you better than competitors.",
+        ],
+        "methodology":
+"""Why customers will buy from us.
+1.\tSynthesize knowledge: Return to "Value Proposition" (what the customer needs) and "Competitive Analysis" (what others offer).
+2.\tFind your uniqueness: What is your key advantage that matters to the customer and is hard to copy? It could be a new technology, special service, more convenient design, etc.
+3.\tFormulate the USP: Use a simple structure. For example: "For [target segment] who face [problem], our [product] provides [key advantage], unlike [competitors]".
+4.\tValidate it: Your USP should be specific, memorable, and make people want to learn more.
+""",
+        "criteria": ["One clear formula", "Provable advantages", "Relevant to the segment"]
+    },
+    {
+        "id": 10,
+        "stage": "Design",
+        "stage_goal": "Based on validated hypotheses, design a detailed solution, calculate its economics, and create an implementation plan.",
+        "name": "Financial Model",
+        "goal": "Assess the product's economic effect in detail by calculating all revenues and costs and determining the breakeven point.",
+        "data_source": "Always ask: \"Do you want to upload real data (interviews, tables, reports) or create manually?\n"
+                "If a file is uploaded — make a brief summary (3-5 bullets), ask \"Use these insights?\", on \"Yes\" integrate and mark the source.",
+        "components": [
+            "Costs (expenses)",
+            "-- Variable: Project team, external contractors.",
+            "-- Fixed: Support, licenses.",
+            "Revenues (economic effect): Calculated based on key metrics.",
+            "Breakeven point (TCO - Total Cost of Ownership): The moment when revenues start to exceed costs.",
+        ],
+        "methodology":
+"""Unit economics, P&L.
+1.\tCollect all types of expenses: Team, contractors, equipment, marketing, support, etc.
+2.\tDistribute expenses by month according to the framework stages.
+3.\tCalculate revenues: Take key metrics and show how changes impact money. For example, "a 10% conversion increase brings X revenue".
+4.\tBuild three scenarios: negative, baseline, and positive.
+5.\tDefine the breakeven point. In the product approach, it should be within 3-6 months.
+""",
+        "criteria": ["Key assumptions", "LTV/CAC/margin", "Sensitivity", "Scenarios"]
+    },
+    {
+        "id": 11,
+        "stage": "Design",
+        "stage_goal": "Based on validated hypotheses, design a detailed solution, calculate its economics, and create an implementation plan.",
+        "name": "Roadmap",
+        "goal": "Create a comprehensive work plan visualizing key phases, tasks, and dependencies for team coordination and stakeholder communication.",
+        "data_source": "**IMPORTANT**: Always use the web_search_summary tool to obtain market prices.",
+        "components": [
+            "Tasks/Work packages: Decomposition of large goals.",
+            "Timelines: Duration of each task.",
+            "Owners: Who performs the task.",
+            "Milestones: Key events marking phase completion.",
+            "Critical path: The longest chain of tasks that defines the overall project duration.",
+        ],
+        "methodology":
+"""Work plan.
+1.\tDefine goals and development phases.
+2.\tDecompose them into tasks.
+3.\tDefine sequence, duration, and dependencies between tasks.
+4.\tAssign owners.
+5.\tSet milestones at the end of each significant phase (e.g., "Testing complete").
+6.\tManage risks by adding time buffers (time reserve).
+""",
+        "criteria": ["Releases", "Goals/metrics", "Resources/risks", "Milestones"]
+    },
+    {
+        "id": 12,
+        "stage": "Design",
+        "stage_goal": "Based on validated hypotheses, design a detailed solution, calculate its economics, and create an implementation plan.",
+        "name": "Project Card",
+        "goal": "Final document for project defense and budget approval for the Development stage. It combines and summarizes all work done in previous stages.",
+        "components": [
+            "Project summary: Brief description of the solution, validated problems, and target segments.",
+            "MVP description: Tasks, pilot area, success metrics.",
+            "Economics: Data from the financial model (revenues, costs, team costs).",
+            "Project team: Roles, competencies, involvement (FTE).",
+            "Risks: What can go wrong and how you plan to address it.",
+        ],
+        "methodology":
+"""Project summary.
+1.\tTransfer validated data: Unlike the Initiative Card, this should include only validated hypotheses about problems and solutions.
+2.\tDescribe the MVP in detail: What exactly you will build, on which segment, and how success will be measured.
+3.\tIntegrate the financial model: Provide exact revenue and cost numbers.
+4.\tPresent the team needed for implementation.
+5.\tThink through risks and propose mitigation approaches.
+""",
+        "criteria": ["Summary of 1-12", "Roles/responsibility", "Readiness criteria", "Go/No-Go"]
+    },
+]
+
+
+ARTIFACTS: List[ArtifactDefinition] = []
+
+
+def set_artifacts_locale(locale: str = "ru") -> None:
+    target = ARTIFACTS_EN if locale == "en" else ARTIFACTS_RU
+    ARTIFACTS.clear()
+    ARTIFACTS.extend(copy.deepcopy(target))
+
+
+def get_artifact_schemas(locale: str = "ru") -> Dict[str, Any]:
+    if locale == "en":
+        return {"options": ArtifactOptionsEn, "final": AftifactFinalTextEn}
+    return {"options": ArtifactOptions, "final": AftifactFinalText}
+
+
+set_artifacts_locale("ru")
 
 
 ARTIFACTS_OLD: List[ArtifactDefinition] = [

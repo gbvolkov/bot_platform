@@ -1,7 +1,7 @@
 import json
-from typing import Any, Annotated, NotRequired, get_args, get_origin, get_type_hints
+from typing import Any, Annotated, get_args, get_origin, get_type_hints
 
-from typing_extensions import is_typeddict
+from typing_extensions import NotRequired, is_typeddict
 from langchain.agents.middleware import ModelRequest, wrap_model_call
 from langchain.agents.structured_output import (
     AutoStrategy,
@@ -122,4 +122,4 @@ def provider_then_tool(request: ModelRequest, handler):
         return handler(request.override(response_format=ToolStrategy(schema=schema)))
 
 
-__all__ = ["build_json_prompt"]
+__all__ = ["build_json_prompt", "provider_then_tool"]

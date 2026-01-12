@@ -34,6 +34,7 @@ from .artifacts_defs import (
     #AftifactFinalText,
 )
 from .choice_agent import initialize_agent as build_choice_agent
+from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_locale
 from .context_reduction import (
     ARTIFACT_SUMMARY_TAG,
     build_pruned_history,
@@ -52,21 +53,30 @@ def _format_confirmed_banner(
     artifact_name: str,
     next_artifact_number: Optional[int],
     next_artifact_name: Optional[str],
+    locale: str = DEFAULT_LOCALE,
 ) -> str:
-    if next_artifact_number is not None and next_artifact_name:
-        next_line = f"Перейти дальше: к Артефакту {next_artifact_number} — {next_artifact_name}"
+    locale_key = resolve_locale(locale)
+    if locale_key == "en":
+        if next_artifact_number is not None and next_artifact_name:
+            next_line = f"Next: Artifact {next_artifact_number} - {next_artifact_name}"
+        else:
+            next_line = "Next: finish"
+        confirmed_line = f"✅ ARTIFACT CONFIRMED: Artifact {artifact_number} - {artifact_name}"
     else:
-        next_line = "Перейти дальше: завершение"
+        if next_artifact_number is not None and next_artifact_name:
+            next_line = f"Перейти дальше: к Артефакту {next_artifact_number} — {next_artifact_name}"
+        else:
+            next_line = "Перейти дальше: завершение"
+        confirmed_line = f"✅ АРТЕФАКТ ПОДТВЕРЖДЁН: Артефакт {artifact_number} — {artifact_name}"
 
     return "\n".join(
         [
             _CONFIRMED_BANNER_BORDER,
-            f"✅ АРТЕФАКТ ПОДТВЕРЖДЁН: Артефакт {artifact_number} — {artifact_name}",
+            confirmed_line,
             next_line,
             _CONFIRMED_BANNER_BORDER,
         ]
     )
-
 
 def _format_progress_banner(
     *,
@@ -76,26 +86,37 @@ def _format_progress_banner(
     current_artifact_name: str,
     next_artifact_number: Optional[int],
     next_artifact_name: Optional[str],
+    locale: str = DEFAULT_LOCALE,
 ) -> str:
     completed_count = max(0, min(int(completed_count), int(total_count)))
     total_count = max(0, int(total_count))
     bar = ("■" * completed_count) + ("□" * max(total_count - completed_count, 0))
 
-    if next_artifact_number is not None and next_artifact_name:
-        next_line = f"СЛЕДУЮЩИЙ: Артефакт {next_artifact_number} — {next_artifact_name}"
+    locale_key = resolve_locale(locale)
+    if locale_key == "en":
+        if next_artifact_number is not None and next_artifact_name:
+            next_line = f"NEXT: Artifact {next_artifact_number} - {next_artifact_name}"
+        else:
+            next_line = "NEXT: finish"
+        progress_line = f"PROGRESS: {bar} ({completed_count}/{total_count})"
+        current_line = f"CURRENT: Artifact {current_artifact_number} - {current_artifact_name}"
     else:
-        next_line = "СЛЕДУЮЩИЙ: завершение"
+        if next_artifact_number is not None and next_artifact_name:
+            next_line = f"СЛЕДУЮЩИЙ: Артефакт {next_artifact_number} — {next_artifact_name}"
+        else:
+            next_line = "СЛЕДУЮЩИЙ: завершение"
+        progress_line = f"ПРОГРЕСС: {bar} ({completed_count}/{total_count})"
+        current_line = f"ТЕКУЩИЙ: Артефакт {current_artifact_number} — {current_artifact_name}"
 
     return "\n".join(
         [
             _PROGRESS_BANNER_BORDER,
-            f"ПРОГРЕСС: {bar} ({completed_count}/{total_count})",
-            f"ТЕКУЩИЙ: Артефакт {current_artifact_number} — {current_artifact_name}",
+            progress_line,
+            current_line,
             next_line,
             _PROGRESS_BANNER_BORDER,
         ]
     )
-
 
 def create_append_banner_node(*, content: str):
     def _node(state: ArtifactAgentState, config: RunnableConfig) -> ArtifactAgentState:
@@ -216,7 +237,9 @@ def initialize_agent(
     role: str = "default",
     use_platform_store: bool = False,
     notify_on_reload: bool = True,
+    locale: str = DEFAULT_LOCALE,
 ):
+    locale_key = set_global_locale(locale)
     log_name = f"theo_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]
@@ -257,6 +280,7 @@ def initialize_agent(
             notify_on_reload=notify_on_reload,
             artifact_id=artifact["id"],
             uset_parental_memory=True,
+            locale=locale_key,
         )
         choice_node = f"choice_agent_{artifact['id']}"
         cleanup_node = f"cleanup_{artifact['id']}"
@@ -272,6 +296,7 @@ def initialize_agent(
                     current_artifact_name=artifact_name,
                     next_artifact_number=next_number,
                     next_artifact_name=next_name,
+                    locale=locale_key,
                 )
             ),
         )
@@ -295,6 +320,7 @@ def initialize_agent(
                     artifact_name=artifact_name,
                     next_artifact_number=next_number,
                     next_artifact_name=next_name,
+                    locale=locale_key,
                 )
             ),
         )

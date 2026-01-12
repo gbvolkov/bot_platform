@@ -30,10 +30,11 @@ from langfuse.langchain import CallbackHandler
 import config
 
 from .prompts.prompts import (
-    SYSTEM_PROMPT,
-    TOOL_POLICY_PROMPT,
-    FORMAT_OPTIONS_PROMPT,
+    get_format_options_prompt,
+    get_system_prompt,
+    get_tool_policy_prompt,
 )
+from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_locale
 
 from ..tools.yandex_search import YandexSearchTool as SearchTool
 from ..tools.think import ThinkTool
@@ -53,6 +54,7 @@ from .artifacts_defs import (
     ArtifactAgentState,
     ArtifactAgentContext,
     AftifactFinalText,
+    get_artifact_schemas,
 )
 from agents.structured_prompt_utils import provider_then_tool
 
@@ -72,6 +74,179 @@ def debug_log(func):
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+CHOICE_LOCALES = {
+    "ru": {
+        "artifact_placeholder": "В работе",
+        "data_source_default": "Ответы пользователя",
+        "select_option_question": "Выберите один из предложенных вариантов или скажите, что нужно поправить.",
+        "confirm_question": "Подтвердите артефакт \"{artifact_name}\" или скажите, что нужно изменить.",
+        "options_prompt": (
+            "Мы прорабатываем: {user_prompt}\n\n"
+            "====================================================================================\n#Артефакты:\n"
+            "{context_str}\n"
+            "====================================================================================\n#Конец артефактов.\n\n"
+            "Мы находимся на этапе {stage}.\n"
+            "Цель этапа: {stage_goal}.\n"
+            "Мы переходим к артефакту {artifact_number}: {artifact_name}.\n"
+            "Цель: {goal}\n"
+            "Компоненты: {components}\n"
+            "Методология: {methodology}\n"
+            "Критерии: {criteria}\n\n"
+            "Реальные данные: {data_source}\n\n"
+            "Предложи несколько вариантов для этого артефакта, основываясь на предыдущем контексте.\n\n"
+            "Каждый вариант должен удовлетворять всем критериям.\n\n"
+            "Для каждого варианта дай высокоуровневую оценку по каждому критерию.\n"
+            "##ОГРАНИЧЕНИЯ:\n"
+            "**ВАЖНО**: Ты работаешь ТОЛЬКО с артефактом {artifact_number}: {artifact_name}.\n\n"
+            "**ВАЖНО**: Тебе **ЗАПРЕЩЕНО** формировать версии, готовить варианты или даже просто обсуждать любые другие артефакты, кроме {artifact_number}: {artifact_name}.\n"
+        ),
+        "final_prompt": (
+            "Мы работаем над этапом {artifact_number}: {artifact_name}.\n"
+            "Цель: {goal}\n"
+            "Методология: {methodology}\n"
+            "Реальные данные: {data_source}\n\n"
+            "====================================================================================\n#Артефакты:\n"
+            "{context_str}\n"
+            "====================================================================================\n\n"
+            "Пользователь прислал ответ.\n"
+            "Вариант {artifact_number}: {selected_option}\n"
+            "ВСЕГДА формируй **полную** финальную версию артефакта.\n"
+            "Обязательно включай оценку по каждому из критериев.\n"
+            "Список критериев: {criteria}\n"
+            "ВАЖНО: В поле artifact_final_text указывай только финальный текст артефакта - без рассуждений и ответа пользователю!\n"
+            "##ОГРАНИЧЕНИЯ:\n"
+            "**ВАЖНО**: Ты работаешь ТОЛЬКО с артефактом {artifact_number}: {artifact_name}.\n\n"
+            "**ВАЖНО**: Тебе **ЗАПРЕЩЕНО** формировать версии, готовить варианты или даже просто обсуждать любые другие артефакты, кроме {artifact_number}: {artifact_name}.\n"
+        ),
+        "keywords": {
+            "confirm": [
+                "подтверждаю",
+                "подтвердить",
+                "да",
+                "ок",
+                "окей",
+                "согласен",
+                "approve",
+                "дальше",
+                "верно",
+                "хорошо",
+                "норм",
+            ],
+            "edit": [
+                "исправ",
+                "поправ",
+                "поменя",
+                "измен",
+                "не так",
+                "не то",
+                "добав",
+                "передел",
+            ],
+        },
+    },
+    "en": {
+        "artifact_placeholder": "In progress",
+        "data_source_default": "User responses",
+        "select_option_question": "Choose one of the proposed options or say what needs to be revised.",
+        "confirm_question": "Confirm the artifact \"{artifact_name}\" or say what needs to change.",
+        "options_prompt": (
+            "We are working on: {user_prompt}\n\n"
+            "====================================================================================\n#Artifacts:\n"
+            "{context_str}\n"
+            "====================================================================================\n#End of artifacts.\n\n"
+            "We are at stage {stage}.\n"
+            "Stage goal: {stage_goal}.\n"
+            "We move to artifact {artifact_number}: {artifact_name}.\n"
+            "Goal: {goal}\n"
+            "Components: {components}\n"
+            "Methodology: {methodology}\n"
+            "Criteria: {criteria}\n\n"
+            "Real data: {data_source}\n\n"
+            "Propose several options for this artifact based on the previous context.\n\n"
+            "Each option must satisfy all criteria.\n\n"
+            "For each option, provide a high-level assessment for each criterion.\n"
+            "##CONSTRAINTS:\n"
+            "**IMPORTANT**: You work ONLY on artifact {artifact_number}: {artifact_name}.\n\n"
+            "**IMPORTANT**: You are **FORBIDDEN** to form versions, prepare options, or even discuss any other artifacts besides {artifact_number}: {artifact_name}.\n"
+        ),
+        "final_prompt": (
+            "We are working on stage {artifact_number}: {artifact_name}.\n"
+            "Goal: {goal}\n"
+            "Methodology: {methodology}\n"
+            "Real data: {data_source}\n\n"
+            "====================================================================================\n#Artifacts:\n"
+            "{context_str}\n"
+            "====================================================================================\n\n"
+            "The user provided a response.\n"
+            "Option {artifact_number}: {selected_option}\n"
+            "ALWAYS produce a **full** final version of the artifact.\n"
+            "Include an assessment for each criterion.\n"
+            "Criteria list: {criteria}\n"
+            "IMPORTANT: In artifact_final_text include only the final artifact text — no reasoning and no user reply.\n"
+            "##CONSTRAINTS:\n"
+            "**IMPORTANT**: You work ONLY on artifact {artifact_number}: {artifact_name}.\n\n"
+            "**IMPORTANT**: You are **FORBIDDEN** to form versions, prepare options, or even discuss any other artifacts besides {artifact_number}: {artifact_name}.\n"
+        ),
+        "keywords": {
+            "confirm": [
+                "confirm",
+                "confirmed",
+                "yes",
+                "ok",
+                "okay",
+                "agree",
+                "approve",
+                "next",
+                "go on",
+                "continue",
+                "looks good",
+                "all good",
+                "fine",
+            ],
+            "edit": [
+                "fix",
+                "edit",
+                "change",
+                "update",
+                "revise",
+                "adjust",
+                "modify",
+                "not right",
+                "not correct",
+                "add",
+                "redo",
+                "rework",
+            ],
+        },
+    },
+}
+
+_CURRENT_LOCALE = DEFAULT_LOCALE
+_CHOICE_TEXT: Dict[str, Any] = {}
+_KEYWORDS: Dict[str, List[str]] = {}
+
+
+def set_locale(locale: str = DEFAULT_LOCALE) -> None:
+    global _CURRENT_LOCALE, _CHOICE_TEXT, _KEYWORDS
+    locale_key = resolve_locale(locale)
+    set_global_locale(locale_key)
+    _CURRENT_LOCALE = locale_key
+    _CHOICE_TEXT = CHOICE_LOCALES[locale_key]
+    _KEYWORDS = _CHOICE_TEXT.get("keywords", {})
+
+
+def _get_choice_text() -> Dict[str, Any]:
+    return _CHOICE_TEXT or CHOICE_LOCALES[DEFAULT_LOCALE]
+
+
+def _get_keywords(name: str) -> List[str]:
+    if not _KEYWORDS:
+        return CHOICE_LOCALES[DEFAULT_LOCALE]["keywords"].get(name, [])
+    return _KEYWORDS.get(name, [])
+
+
+set_locale()
 
 _PRIMARY_RETRY_ATTEMPTS = 3
 
@@ -250,9 +425,7 @@ def _heuristic_user_selected_option(text: str) -> UserSelectedOption:
     """Heuristic fallback for option selection."""
     normalized = (text or "").lower()
 
-    change_markers = [
-        "исправ", "поправ", "поменя", "измен", "не так", "не то", "добав", "передел",
-    ]
+    change_markers = _get_keywords("edit")
     if any(marker in normalized for marker in change_markers):
         return {
             "change_request": {
@@ -314,16 +487,11 @@ def _heuristic_user_change_request(text: str) -> UserChangeRequest:
     """Heuristic fallback for confirmation/change detection."""
     normalized = (text or "").lower()
 
-    change_markers = [
-        "исправ", "поправ", "поменя", "измен", "не так", "не то", "добав", "передел",
-    ]
+    change_markers = _get_keywords("edit")
     if any(marker in normalized for marker in change_markers):
         return {"is_change_requested": True, "change_request": text}
 
-    confirm_markers = [
-        "подтверждаю", "подтвердить", "да", "ок", "окей", "согласен", "approve", "дальше",
-        "верно", "хорошо", "норм",
-    ]
+    confirm_markers = _get_keywords("confirm")
     if any(marker in normalized for marker in confirm_markers):
         return {"is_change_requested": False}
 
@@ -436,6 +604,7 @@ def select_option_node(state: ArtifactAgentState,
     artifacts = state.get("artifacts") or {}
     current_artifact = artifacts.get(artifact_id) or {}
     artifact_name = current_artifact.get("artifact_definition", {}).get("name", "")
+    choice_text = _get_choice_text()
 
     interrupt_payload = {
         "type": "choice",
@@ -443,7 +612,7 @@ def select_option_node(state: ArtifactAgentState,
         "artifact_name": artifact_name,
         "current_artifact_state": ArtifactState.OPTIONS_GENERATED,
         "content": prettify(state["current_artifact_text"]),
-        "question": "Выберите один из предложенных вариантов или скажите, что нужно поправить.",
+        "question": choice_text["select_option_question"],
     }
     #print("DEBUG: before options_interrupt")
     user_response = interrupt(interrupt_payload)
@@ -508,6 +677,7 @@ def confirmation_node(state: ArtifactAgentState,
     artifacts = state.get("artifacts", {})
     current_artifact = artifacts.get(state["current_artifact_id"], {})
     artifact_name = current_artifact.get("artifact_definition", {}).get("name", "")
+    choice_text = _get_choice_text()
 
     #result = _is_user_confirmed("Ерунда какая-то", current_artifact["artifact_final_text"])
     #result = _is_user_confirmed("Подтверждаю", current_artifact["artifact_final_text"])
@@ -521,7 +691,7 @@ def confirmation_node(state: ArtifactAgentState,
         "current_artifact_state": ArtifactState.ARTIFACT_GENERATED,
         #"content": prettify(current_artifact["artifact_estimation"] + "\n" + current_artifact["artifact_final_text"]),
         "content": prettify(current_artifact["artifact_final_text"]),
-        "question": f"Подтвердите артефакт \"{artifact_name}\" или скажите, что нужно изменить.",
+        "question": choice_text["confirm_question"].format(artifact_name=artifact_name),
     }
 
     #print("DEBUG: before gererator_interrupt")
@@ -558,41 +728,53 @@ _yandex_tool = SearchTool(
 _think_tool = ThinkTool()
 
 
-def create_options_generator_node(model: BaseChatModel, artifact_id: int):
+def create_options_generator_node(
+    model: BaseChatModel,
+    artifact_id: int,
+    locale: str | None = None,
+):
     """Creates options generation agent."""
     _artifact_id = artifact_id
     _artifact_def = ARTIFACTS[_artifact_id]
+    locale_key = resolve_locale(locale)
+    schemas = get_artifact_schemas(locale_key)
+
     @dynamic_prompt
     def build_agent_prompt(request: ModelRequest) -> str:
         agent_state = request.state
         artifacts_in_state = agent_state.get("artifacts") or {}
+        choice_text = _get_choice_text()
         context_str = "\n------------------------------------------------------------------------\n\n".join(
             f"##{a['artifact_definition']['id'] + 1} {a['artifact_definition']['name']}:\n"
-            f"{a['artifact_final_text'] or 'В работе'}"
+            f"{a['artifact_final_text'] or choice_text['artifact_placeholder']}"
             for a in artifacts_in_state.values()
         )
-        #format_requirements = build_json_prompt(ArtifactOptions)
-        prompt = (
-            f"Мы прорабатываем: {agent_state.get("user_prompt", "")}\n\n"
-            "====================================================================================\n#Артефакты:\n"
-            f"{context_str}\n"
-            "====================================================================================\n#Конец артефактов.\n\n"
-            f"Мы находимся на этапе {_artifact_def['stage']}.\n"
-            f"Цель этапа: {_artifact_def['stage_goal']}.\n"
-            f"Мы переходим к артефакту {_artifact_id + 1}: {_artifact_def['name']}.\n"
-            f"Цель: {_artifact_def['goal']}\n"
-            f"Компоненты: {',\n-'.join(_artifact_def['components'])}\n"
-            f"Методология: {_artifact_def['methodology']}\n"
-            f"Критерии: {',\n-'.join(_artifact_def['criteria'])}\n\n"
-            f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
-            "Предложи несколько вариантов для этого артефакта, основываясь на предыдущем контексте.\n\n"
-            "Каждый вариант должен удовлетворять всем критериям.\n\n"
-            "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
-            f"##ОГРАНИЧЕНИЯ:\n**ВАЖНО**: Ты работаешь ТОЛЬКО с артефактом {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
-            f"**ВАЖНО**: Тебе **ЗАПРЕЩЕНО** формировать версии, готовить варианты или даже просто обсуждать любые другие артефакты, кроме {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
+        components = ",\n-".join(_artifact_def["components"])
+        criteria = ",\n-".join(_artifact_def["criteria"])
+        data_source = _artifact_def.get("data_source") or choice_text["data_source_default"]
+        prompt = choice_text["options_prompt"].format(
+            user_prompt=agent_state.get("user_prompt", ""),
+            context_str=context_str,
+            stage=_artifact_def["stage"],
+            stage_goal=_artifact_def["stage_goal"],
+            artifact_number=_artifact_id + 1,
+            artifact_name=_artifact_def["name"],
+            goal=_artifact_def["goal"],
+            components=components,
+            methodology=_artifact_def["methodology"],
+            criteria=criteria,
+            data_source=data_source,
         )
         #print(f"DEBUG: {prompt}")
-        return SYSTEM_PROMPT + "\n\n" + prompt + "\n\n" + FORMAT_OPTIONS_PROMPT + "\n\n" + TOOL_POLICY_PROMPT
+        return (
+            get_system_prompt(locale_key)
+            + "\n\n"
+            + prompt
+            + "\n\n"
+            + get_format_options_prompt(locale_key)
+            + "\n\n"
+            + get_tool_policy_prompt(locale_key)
+        )
 
     _agent = create_agent(
         model=model,
@@ -604,7 +786,7 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
             provider_then_tool,
             _llm_fallback_middleware,
         ],
-        response_format=ArtifactOptions,
+        response_format=schemas["options"],
         state_schema=ArtifactAgentState,
         context_schema=ArtifactAgentContext,
     )
@@ -624,19 +806,19 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
         # ensure artifacts list exists
         artifacts: List[ArtifactDetails] = state.get("artifacts") or {}
 
-        # 3) если артефакта с таким id нет — создаём, иначе обновляем
+        # 3) ???????? ?????????????????? ?? ?????????? id ?????? ??? ??????????????, ?????????? ??????????????????
         details = artifacts.get(_artifact_id)
         if details is None:
             details = {
-                "artifact_definition": _artifact_def,  # копируем по ID
-                "artifact_final_text": "",             # пусто на входе
-                "artifact_options": [],                # можно заполнить на выходе
-                "selected_option": -1,                 # пустой выбор
+                "artifact_definition": _artifact_def,  # ???????????????? ???? ID
+                "artifact_final_text": "",             # ?????????? ???? ??????????
+                "artifact_options": [],                # ?????????? ?????????????????? ???? ????????????
+                "selected_option": -1,                 # ???????????? ??????????
             }
             artifacts[artifact_id] = details
         else:
             details["artifact_definition"] = _artifact_def
-            details["artifact_final_text"] = ""       # сбрасываем на входе
+            details["artifact_final_text"] = ""       # ???????????????????? ???? ??????????
 
 
         #state.pop("structured_response", {})
@@ -646,7 +828,12 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
             context=runtime.context,
         )
         structured_response = result.pop("structured_response", {}) or {}
-        formatted_options_text = _format_artifact_options_text(structured_response) + "\n\nВыберите один из вариантов или скажите, что поправить."
+        choice_text = _get_choice_text()
+        formatted_options_text = (
+            _format_artifact_options_text(structured_response)
+            + "\n\n"
+            + choice_text["select_option_question"]
+        )
         # on exit: enforce spec
         result_artifacts = result.get("artifacts") or {}
         result["artifacts"] = result_artifacts
@@ -664,52 +851,50 @@ def create_options_generator_node(model: BaseChatModel, artifact_id: int):
 
     return generate_options_node
 
-def create_generation_agent(model: BaseChatModel, artifact_id: int):
+def create_generation_agent(
+    model: BaseChatModel,
+    artifact_id: int,
+    locale: str | None = None,
+):
     """Creates the artifact generation agent."""
     _artifact_id = artifact_id
     _artifact_def = ARTIFACTS[_artifact_id]
+    locale_key = resolve_locale(locale)
+    schemas = get_artifact_schemas(locale_key)
     @dynamic_prompt
     def build_agent_prompt(request: ModelRequest) -> str:
         agent_state: ArtifactAgentState = request.state
         artifacts_in_state = agent_state.get("artifacts") or {}
+        choice_text = _get_choice_text()
         context_str = "\n========================================\n\n".join(
             f"##{a['artifact_definition']['id']+1} {a['artifact_definition']['name']}:\n"
-            f"{a['artifact_final_text'] or 'В работе'}"
+            f"{a['artifact_final_text'] or choice_text['artifact_placeholder']}"
             for a in artifacts_in_state.values()
         )
 
         current_artifact = artifacts_in_state.get(_artifact_id)
         options = current_artifact.get("artifact_options")
         selected_option = options[current_artifact["selected_option"]]
-        #prompt = (
-        #    f"Мы прорабатываем {agent_state.get("user_prompt", "")}\n\n"
-        #    f"{context_str}\n"
-        #    f"Мы переходим к этапу {_artifact_id + 1}: {_artifact_def['name']}.\n"
-        #    f"Цель: {_artifact_def['goal']}\n"
-        #    f"Методология: {_artifact_def['methodology']}\n"
-        #    f"Критерии: {', '.join(_artifact_def['criteria'])}\n\n"
-        #    "Предложи 2-3 варианта для этого артефакта, основываясь на предыдущем контексте.\n\n"
-        #    "Для каждого варианта дай высокоуровневую оценку по каждому критерию."
-        #)
-        prompt = (
-            f"Мы работаем над этапом {_artifact_id + 1}: {_artifact_def['name']}.\n"
-            f"Цель: {_artifact_def['goal']}\n"
-            f"Методология: {_artifact_def['methodology']}\n"
-            f"Реальные данные: {_artifact_def['data_source'] if 'data_source' in _artifact_def else 'Ответы пользователя'}\n\n"
-            "====================================================================================\n#Артефакты:\n"
-            f"{context_str}\n"
-            "====================================================================================\n\n"
-            "Пользователь прислал ответ. \n"
-            f"Вариант {_artifact_id + 1}: {selected_option["artifact_option"]}\n"
-            "ВСЕГДА формируй **полную** финальную версию артефакта.\n"
-            "Обязательно включай оценку по каждому из критериев.\n"
-            f"Список критериев: {', '.join(_artifact_def['criteria'])}\n"
-            "ВАЖНО: В поле artifact_final_text указывай только финальный текст артефакта - без рассуждений и ответа пользователю!\n"
-            f"##ОГРАНИЧЕНИЯ:\n**ВАЖНО**: Ты работаешь ТОЛЬКО с артефактом {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
-            f"**ВАЖНО**: Тебе **ЗАПРЕЩЕНО** формировать версии, готовить варианты или даже просто обсуждать любые другие артефакты, кроме {_artifact_id + 1}: {_artifact_def['name']}.\n\n"
+        data_source = _artifact_def.get("data_source") or choice_text["data_source_default"]
+        criteria = ", ".join(_artifact_def["criteria"])
+        prompt = choice_text["final_prompt"].format(
+            artifact_number=_artifact_id + 1,
+            artifact_name=_artifact_def["name"],
+            goal=_artifact_def["goal"],
+            methodology=_artifact_def["methodology"],
+            data_source=data_source,
+            context_str=context_str,
+            selected_option=selected_option.get("artifact_option", ""),
+            criteria=criteria,
         )
         #print(f"DEBUG: {prompt}")
-        return SYSTEM_PROMPT + "\n\n" + prompt + "\n\n" + TOOL_POLICY_PROMPT
+        return (
+            get_system_prompt(locale_key)
+            + "\n\n"
+            + prompt
+            + "\n\n"
+            + get_tool_policy_prompt(locale_key)
+        )
 
     
     _agent = create_agent(
@@ -721,7 +906,7 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
             provider_then_tool,
             _llm_fallback_middleware,
         ],
-        response_format=AftifactFinalText,
+        response_format=schemas["final"],
         state_schema=ArtifactAgentState,
         context_schema=ArtifactAgentContext,
     )
@@ -748,15 +933,25 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
         )
 
         structured_response = result.get("structured_response", {}) or {}
-        formatted_final_text = _format_artifact_final_text(structured_response) + "\n\nПодтвердите артефакт или скажите, что поправить."
+        choice_text = _get_choice_text()
+        artifact_name = str(_artifact_def.get("name") or "")
+        formatted_final_text = (
+            _format_artifact_final_text(structured_response)
+            + "\n\n"
+            + choice_text["confirm_question"].format(artifact_name=artifact_name)
+        )
 
         # on exit: enforce spec
         result_artifacts = result.get("artifacts") or {}
         result["artifacts"] = result_artifacts
 
         result["current_artifact_text"] = result.get("structured_response", {}).get("artifact_final_text", "")   
-        result_details = result_artifacts.get(_artifact_id)# or details
-        result_details["artifact_final_text"] = result.get("structured_response", {}).get("artifact_final_text", "")  +  "\n" + result.get("structured_response", {}).get("artifact_estimation", "") 
+        result_details = result_artifacts.get(_artifact_id) or {"artifact_definition": _artifact_def}
+        result_details["artifact_final_text"] = (
+            result.get("structured_response", {}).get("artifact_final_text", "")
+            + "\n"
+            + result.get("structured_response", {}).get("artifact_estimation", "")
+        )
         result_artifacts[_artifact_id] = result_details
         result["messages"] = _update_last_ai_message_content(
             result.get("messages") or [], formatted_final_text
@@ -767,15 +962,17 @@ def create_generation_agent(model: BaseChatModel, artifact_id: int):
 
     return generate_artifact_node
 
-
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
     role: str = "default",
     use_platform_store: bool = False,
     notify_on_reload: bool = True,
     uset_parental_memory: bool = False,
-    artifact_id: int = 0
+    artifact_id: int = 0,
+    locale: str = DEFAULT_LOCALE,
 ):
+
+    set_locale(locale)
     log_name = f"choice_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]
@@ -797,9 +994,15 @@ def initialize_agent(
     
 
     builder.add_node("init", create_init_node(artifact_id=artifact_id))
-    builder.add_node("generate_options", create_options_generator_node(model=_llm, artifact_id=artifact_id))
+    builder.add_node(
+        "generate_options",
+        create_options_generator_node(model=_llm, artifact_id=artifact_id, locale=locale),
+    )
     builder.add_node("select_option", select_option_node)
-    builder.add_node("generate_aftifact", create_generation_agent(model=_llm, artifact_id=artifact_id))
+    builder.add_node(
+        "generate_aftifact",
+        create_generation_agent(model=_llm, artifact_id=artifact_id, locale=locale),
+    )
     builder.add_node("confirm", confirmation_node)
 
     builder.add_edge(START, "init")
