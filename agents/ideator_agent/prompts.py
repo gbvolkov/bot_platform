@@ -308,13 +308,13 @@ Before taking any action or responding to the user, **ALWAYS** use the `think_to
 - Check if all refferences properly provided.
 """
 
-SEARCH_TOOL_POLICY_PROMPT = """
+SEARCH_TOOL_POLICY_PROMPT_RU = """
 ### Yandex Web Search
 1. **Context check.**  
    Immediately inspect the preceding conversation for knowledge-base snippets.  
-2. **Call of `web_search_summary`.**  
-   If you need information from internet on the best practices oк or competitor analysis, you **MAY** call `web_search_summary`. 
-   If user asked you use information from internet or from external sources, you **MUST** call `web_search_summary`. 
+2. **Call of `yandex_web_search`.**  
+   If you need information from internet on the best practices oк or competitor analysis, you **MAY** call `yandex_web_search`. 
+   If user asked you use information from internet or from external sources, you **MUST** call `yandex_web_search`. 
 3. **Language.**  
    Always try to query first in Russsian and only then in English.  
 4. **Persistent search.**  
@@ -323,7 +323,23 @@ SEARCH_TOOL_POLICY_PROMPT = """
 5. **No hallucinations & no external citations.**  
    Present information as your own. If data is still lacking, inform the user that additional investigation is required.  
 6. **Answer timing.**  
-   Do **not** send any free-text response to the user until you have processed the results of `web_search_summary` (if invoked).
+   Do **not** send any free-text response to the user until you have processed the results of `yandex_web_search` (if invoked).
+"""
+
+SEARCH_TOOL_POLICY_PROMPT_EN = """
+### Yandex Web Search
+1. **Context check.**  
+   Immediately inspect the preceding conversation for knowledge-base snippets.  
+2. **Call of `yandex_web_search`.**  
+   If you need information from internet on the best practices oк or competitor analysis, you **MAY** call `yandex_web_search`. 
+   If user asked you use information from internet or from external sources, you **MUST** call `yandex_web_search`. 
+3. **Persistent search.**  
+   Should the first query return no or insufficient results, broaden it (synonyms, alternative terms) and repeat until you obtain adequate data or exhaust reasonable options.
+   *IMPORTANT*: You may repeat search MAX 3 times in turn.
+4. **No hallucinations & no external citations.**  
+   Present information as your own. If data is still lacking, inform the user that additional investigation is required.  
+5. **Answer timing.**  
+   Do **not** send any free-text response to the user until you have processed the results of `yandex_web_search` (if invoked).
 """
 
 
@@ -519,8 +535,6 @@ Each line must include:
 
 Always return the sense_lines array, even if you are continuing the discussion rather than making a final choice.
 Dialogue and decision rules:
-- Свой ответ, видимый пользователю, помещай в поле assistant_message. Всегда включай сюда информацию, которую фиксируешь в структурированном виде в поле ideas and decision, а также кратко перескажи варианты, уточни потребности, предложи доработки, формат — MarkdownV2. **ВАЖНО** Если генерируешь новые смысловые линии - ВСЕГДА предоставляй ссылки на статьи в формате fact_ref формат: ["<title>"] (<url>)!
-
 - Put your user-facing reply in assistant_message. Always include here all information you put in sense_lines, and also include short summaries of options, clarify user demand, propose changes and so on. Format MarkdownV2. **IMPORTANT** If you generate new sense lines, ALWAYS provide article links in fact_ref format: ["<title>"] (<url>)!
 - Always reply in English.
 - Keep ids and line order stable between turns unless the user explicitly asks to rebuild everything.
@@ -550,7 +564,7 @@ LOCALES = {
             "ideas_instruction": IDEAS_INSTRUCTION,
             "fact_ref_hint": FACT_REF_HINT,
             "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
-            "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT,
+            "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT_RU,
         },
         "prompt_fragments": {
             "search_goal_line": "search_goal: {search_goal}\n",
@@ -611,7 +625,7 @@ LOCALES = {
             "ideas_instruction": IDEAS_INSTRUCTION_EN,
             "fact_ref_hint": FACT_REF_HINT_EN,
             "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
-            "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT,
+            "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT_EN,
         },
         "prompt_fragments": {
             "search_goal_line": "search_goal: {search_goal}\n",
