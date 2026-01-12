@@ -34,7 +34,7 @@ class AftifactFinalText(TypedDict):
     Финальный текст для артефакта.
     """
     artifact_estimation: Annotated[str, ..., "Estimation for an artifact. Here you can criticize. Оценка применимости и полноты артифакта. Здесь можно критиковать."]
-    artifact_final_text: Annotated[str, ..., "Final text for an artifact. Финальный текст для артефакта. Format as MarkdownV2."]
+    artifact_final_text: Annotated[str, ..., "Final text for an artifact - no discussion with user, just artifact text. Финальный текст для артефакта - без рассуждений и ответа пользователю - только текст артефакта! Format as MarkdownV2."]
 
 class ArtifactDetails(TypedDict):
     artifact_definition: ArtifactDefinition

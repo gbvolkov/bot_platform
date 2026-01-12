@@ -31,7 +31,7 @@ _PRIMARY_RETRY_ATTEMPTS = 3
 
 import time
 
-_MAX_ATTTEMPTS = 3
+_MAX_ATTTEMPTS = 1
 
 USER_SIMULATOR_PROMPT = """
 Ты - ответственный секретарь Управляюшего комитета по новым продуктам страховой компани Ингосстрах.
@@ -228,6 +228,7 @@ async def run_simulation():
 
     
     print("ФСЁ")
+    
 
 
 if __name__ == "__main__":
