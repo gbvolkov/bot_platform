@@ -45,17 +45,11 @@ from .prompts import (
     get_locale,
 )
 from .report_loader import load_report, process_report
-from .sense_lines_pipeline import build_sense_lines_from_report
 from .state import IdeatorAgentContext, IdeatorAgentState
 
 LOG = logging.getLogger(__name__)
 
 MIN_REPORT_LENGTH = 2000
-PRECOMPUTED_SENSE_LINES_NOTE = (
-    "\nNOTE: The sense lines above are precomputed by clustering. "
-    "Return them unchanged unless the user explicitly asks to regenerate or edit them. "
-    "If the user requests regeneration, set decision.regen_lines = true and keep the current sense_lines.\n"
-)
 
 class ArticleRef(TypedDict):
     id: Annotated[int, "Id from the provided list"]
@@ -117,17 +111,15 @@ _AGENT_TEXT: Dict[str, str] = {}
 _PROMPT_FRAGMENTS: Dict[str, str] = {}
 _REGION_TEXT: Dict[str, str] = {}
 _PROMPTS: Dict[str, str] = {}
-_CURRENT_LOCALE = "ru"
 
 
 def set_locale(locale: str = "ru") -> None:
-    global _LOCALE, _AGENT_TEXT, _PROMPT_FRAGMENTS, _REGION_TEXT, _PROMPTS, _CURRENT_LOCALE
+    global _LOCALE, _AGENT_TEXT, _PROMPT_FRAGMENTS, _REGION_TEXT, _PROMPTS
     _LOCALE = get_locale(locale)
     _AGENT_TEXT = _LOCALE["agent"]
     _PROMPT_FRAGMENTS = _LOCALE["prompt_fragments"]
     _REGION_TEXT = _LOCALE["regions"]
     _PROMPTS = _LOCALE["prompts"]
-    _CURRENT_LOCALE = locale
 
 
 set_locale()
@@ -301,7 +293,6 @@ def _build_sense_agent(model: BaseChatModel):
             prompt += _PROMPT_FRAGMENTS["existing_sense_lines_block"].format(
                 lines=_format_sense_lines(existing_lines)
             )
-            prompt += PRECOMPUTED_SENSE_LINES_NOTE
         prompt += f"{build_json_prompt(SenseLineResponse)}"
         return prompt + _PROMPTS["think_tool_policy_prompt"]
 
@@ -434,22 +425,9 @@ def create_sense_lines_node(model: BaseChatModel):
     ) -> IdeatorAgentState:
         LOG.info("sense_lines_node: start, messages=%d", len(state.get("messages", [])))
 
-        #report_obj: IdeatorReport | str = state.get("report")  # type: ignore
-
-        report: IdeatorReport | str= state.get("report")  # type: ignore
-        use_report = isinstance(report, IdeatorReport)
-
-        precomputed_lines: Optional[List[Dict[str, Any]]] = None
-        result: IdeatorAgentState = IdeatorAgentState()
-        if use_report and (state.get("force_regen_lines") or not state.get("sense_lines")):
-            precomputed_lines = build_sense_lines_from_report(report, locale=_CURRENT_LOCALE)
-            if precomputed_lines:
-                state["sense_lines"] = precomputed_lines
-        else:
-            result = agent.invoke(state, config=config, context=runtime.context)
-
+        result: IdeatorAgentState = agent.invoke(state, config=config, context=runtime.context)
         structured = result.get("structured_response") or {}
-        sense_lines: List[Dict[str, Any]] = precomputed_lines or structured.get("sense_lines") or state.get("sense_lines") or []
+        sense_lines: List[Dict[str, Any]] = structured.get("sense_lines") or state.get("sense_lines") or []
         assistant_message: str = structured.get("assistant_message") or ""
         decision: Decision = structured.get("decision") or {}
         result["sense_lines"] = sense_lines
@@ -458,12 +436,14 @@ def create_sense_lines_node(model: BaseChatModel):
         result.pop("structured_response", None)
         LOG.info("sense_lines_node: generated %d lines", len(sense_lines))
 
+        report: IdeatorReport | str= state.get("report")  # type: ignore
+        use_report = isinstance(report, IdeatorReport)
 
         content = ""
         if assistant_message:
             #content = prettify(assistant_message)
             content = assistant_message
-        if sense_lines and (not assistant_message or precomputed_lines is not None):
+        elif sense_lines:
             formatted_lines = []
             for idx, line in enumerate(sense_lines, start=1):
                 articles = _extract_articles(line, report) if use_report else []
@@ -479,10 +459,7 @@ def create_sense_lines_node(model: BaseChatModel):
                 )
             fallback = f"{_AGENT_TEXT['sense_lines_label']}\n" + "\n\n".join(formatted_lines)
             #content = prettify(fallback)
-            if content:
-                content += "\n" + fallback
-            else:
-                content = fallback
+            content += "\n" + fallback
 
         result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
 

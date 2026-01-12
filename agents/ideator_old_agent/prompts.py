@@ -549,44 +549,6 @@ When the user confirms a choice, set consent_generate = true so the flow can mov
 If the user is still clarifying or comparing options, leave decision fields empty/null/false and continue the dialogue without forcing a choice.
 """
 
-SENSE_LINE_LLM_SYSTEM_PROMPT = """
-Ты формируешь лаконичную смысловую линию для кластера новостных статей, готовую для генерации идей.
-Правила:
-- Используй ТОЛЬКО факты из предоставленных фрагментов.
-- НЕ добавляй внешние факты, числа, имена или утверждения, которых нет в источнике.
-- Верни СТРОГО JSON с ключами: short_title, description, region_note.
-- short_title: 3–8 слов, без кавычек.
-- description: 1–{max_description_sentences} предложения, описывающие тему кластера для генерации идей (не переписывай заголовок). Описание должно обобщать кластер.
-- region_note: пустая строка, если региональная специфика неочевидна.
-- всегда генерируй ответ на русском языке.
-"""
-
-SENSE_LINE_LLM_USER_PROMPT = """Теги кластера: {cluster_tags}
-Подсказка по региону (может быть неверной): {region_hint}
-
-Представительные статьи:
-{items_text}
-Верни только JSON."""
-
-SENSE_LINE_LLM_SYSTEM_PROMPT_EN = """
-You generate a concise, idea-generation-ready sense line for a cluster of news articles.
-Rules:
-- Use ONLY facts in the provided snippets.
-- Do NOT add external facts, numbers, names, or claims not present.
-- Output STRICT JSON with keys: short_title, description, region_note.
-- short_title: 3 to 8 words, no quotes.
-- description: 1 to {max_description_sentences} sentences describing the cluster theme for ideation (not a title rewrite). It should generalize across the cluster.
-- region_note: empty string if not clearly region-specific.
-- always generate response in English.
-"""
-
-SENSE_LINE_LLM_USER_PROMPT_EN = """Cluster tags: {cluster_tags}
-Region heuristic hint (may be wrong): {region_hint}
-
-Representative articles:
-{items_text}
-Return JSON only."""
-
 FACT_REF_HINT_EN = """
 fact_ref format: (<country>; <importance>; <date>) | ["<title>"] (<url>)
 If there is no date, use processed_at[:10]; if there is no title, take the first words of summary.
@@ -599,8 +561,6 @@ LOCALES = {
         "prompts": {
             "ideator_system_prompt": IDEATOR_SYSTEM_PROMPT,
             "sense_line_instruction": SENSE_LINE_INSTRUCTION,
-            "sense_line_llm_system": SENSE_LINE_LLM_SYSTEM_PROMPT,
-            "sense_line_llm_user": SENSE_LINE_LLM_USER_PROMPT,
             "ideas_instruction": IDEAS_INSTRUCTION,
             "fact_ref_hint": FACT_REF_HINT,
             "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
@@ -662,8 +622,6 @@ LOCALES = {
         "prompts": {
             "ideator_system_prompt": IDEATOR_SYSTEM_PROMPT_EN,
             "sense_line_instruction": SENSE_LINE_INSTRUCTION_EN,
-            "sense_line_llm_system": SENSE_LINE_LLM_SYSTEM_PROMPT_EN,
-            "sense_line_llm_user": SENSE_LINE_LLM_USER_PROMPT_EN,
             "ideas_instruction": IDEAS_INSTRUCTION_EN,
             "fact_ref_hint": FACT_REF_HINT_EN,
             "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,

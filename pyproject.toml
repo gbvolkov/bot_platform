@@ -58,6 +58,7 @@ dependencies = [
     "openai-whisper",
     "flowmark>=0.5.7",
     "jq>=1.10.0",
+    "scikit-learn>=1.7.2",
 ]
 
 [tool.uv.sources]

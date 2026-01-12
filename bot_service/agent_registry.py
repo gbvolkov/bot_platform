@@ -11,6 +11,7 @@ from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
 from agents.ingos_product_agent import initialize_agent as init_product_agent
 from agents.bi_agent import initialize_agent as init_aibi_agent
 from agents.ideator_agent import initialize_agent as init_ideator_agent
+from agents.ideator_old_agent import initialize_agent as init_ideator_old_agent
 from agents.ismart_tutor_agent import initialize_agent as init_ismart_tutor_agent
 from agents.theodor_agent.agent import initialize_agent as init_theodor_agent
 from agents.utils import ModelType
@@ -99,6 +100,15 @@ class AgentRegistry:
                 name="Ideator (Новости → идеи)",
                 description="Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
                 factory=lambda provider: init_ideator_agent(provider=provider),
+                default_provider=default_provider,
+                supported_content_types=default_content_types + (ContentType.JSONS,),
+                allow_raw_attachments=True,
+            ),
+            "ideator_old": AgentDefinition(
+                id="ideator_old",
+                name="Ideator (Новости → идеи). Old version",
+                description="Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+                factory=lambda provider: init_ideator_old_agent(provider=provider),
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.JSONS,),
                 allow_raw_attachments=True,

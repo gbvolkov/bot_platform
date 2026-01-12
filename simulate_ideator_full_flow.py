@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agents.ideator_agent import initialize_agent
 from agents.utils import get_llm
 
-REPORT_PATH = Path("docs/ideator/batch_report_2025_11_28_10_00_51_490647.json")
+REPORT_PATH = Path("docs/ideator/report.json")
 
 # Configure logging (console + UTF-8 file)
 #LOG_DIR = Path("logs")
@@ -32,7 +32,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 async def run_simulation():
     print("Initializing Ideator Agent...")
-    agent_graph = initialize_agent()
+    agent_graph = initialize_agent(locale="ru")
     user_llm = get_llm(model="mini", provider="openai")
     logging.info("Simulation started")
 
