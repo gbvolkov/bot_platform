@@ -133,8 +133,9 @@ def init_node(state: ArtifactAgentState,
     # We only augment on real user turns
     if last_user_msg.type != "human":
         return state
-
-    state["user_prompt"] = last_user_msg.content
+    content = last_user_msg.content
+    #content = last_user_msg.content if isinstance(last_user_msg.content, str) else (last_user_msg.content.get("text", str(last_user_msg.content))) last_user_msg.content.get("text", str(last_user_msg.content))
+    state["user_prompt"] = content if isinstance(content, str) else (content[0].get("text", str(content[0])) if isinstance(content, list) else str(content))
     state["current_artifact_state"] = ArtifactState.INIT
     state["current_artifact_id"] = 0
     #state["user_info"] = config.
@@ -158,7 +159,10 @@ def create_post_choice_cleanup_node(
         artifacts = state.get("artifacts") or {}
         details = artifacts.get(artifact_id) or {}
 
-        user_prompt = (state.get("user_prompt") or "").strip()
+        user_prompt = (state.get("user_prompt") or "")
+        if not isinstance(user_prompt, str):
+            user_prompt = str(user_prompt)
+        user_prompt = user_prompt.strip()
         if not user_prompt and runtime is not None and runtime.context is not None:
             user_prompt = str(runtime.context.get("user_prompt") or "").strip()
 

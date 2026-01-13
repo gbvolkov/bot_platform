@@ -5,6 +5,7 @@ import re
 import logging
 import time
 from typing import Annotated, Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import ModelRequest, SummarizationMiddleware, dynamic_prompt
@@ -294,7 +295,9 @@ def create_init_node(artifact_id: int):
                     break
             if last_user_msg is None:
                 return state  # no human message to seed prompt
-            user_prompt = last_user_msg.content
+            #user_prompt = last_user_msg.content
+            content = last_user_msg.content
+            user_prompt = content if isinstance(content, str) else (content[0].get("text", str(content[0])) if isinstance(content, list) else str(content))
         else:
             user_prompt = runtime.context["user_prompt"]
 
@@ -337,19 +340,61 @@ class ArtifactAgentState(AgentState[ArtifactOptions]):
 
 """
 
-class UserChangeRequest(TypedDict):
+
+class UserChangeRequest(BaseModel):
     """User change request.
     Запрос пользователя на изменение.
     """
-    is_change_requested: Annotated[bool, ..., "Did user request changed. True or False."]
-    change_request: Annotated[NotRequired[str], ..., "Request to change."]
+    model_config = ConfigDict(extra="forbid")
 
-class UserSelectedOption(TypedDict):
+    is_change_requested: Annotated[
+        bool,
+        Field(description="Did user request changed. True or False."),
+    ]
+
+    # NotRequired[str] -> optional field in Pydantic: give it a default
+    change_request: Annotated[
+        str | None,
+        Field(default=None, description="Request to change."),
+    ] = None
+
+    @model_validator(mode="after")
+    def validate_change_request(self) -> "UserChangeRequest":
+        # Cross-field validation (v2 replacement for most root_validator use cases)
+        if self.is_change_requested and not (self.change_request and self.change_request.strip()):
+            raise ValueError("change_request must be provided when is_change_requested=True")
+        return self
+
+
+class UserSelectedOption(BaseModel):
     """User selected option or change request.
     Один из вариантов, который выбрал пользователь или запрос на изменение.
     """
-    selected_option_number: Annotated[NotRequired[int], ..., "Number of selected option started 1."]
-    change_request: Annotated[UserChangeRequest, ..., "Request to change asnwer."]
+    model_config = ConfigDict(extra="forbid")
+
+    selected_option_number: Annotated[
+        int | None,
+        Field(default=None, ge=1, description="Number of selected option started 1."),
+    ] = None
+
+    change_request: Annotated[
+        UserChangeRequest,
+        Field(description="Request to change answer."),
+    ]
+
+#class UserChangeRequest(TypedDict):
+#    """User change request.
+#    Запрос пользователя на изменение.
+#    """
+#    is_change_requested: Annotated[bool, ..., "Did user request changed. True or False."]
+#    change_request: Annotated[NotRequired[str], ..., "Request to change."]
+
+#class UserSelectedOption(TypedDict):
+#    """User selected option or change request.
+#    Один из вариантов, который выбрал пользователь или запрос на изменение.
+#    """
+#    selected_option_number: Annotated[NotRequired[int], ..., "Number of selected option started 1."]
+#    change_request: Annotated[UserChangeRequest, ..., "Request to change asnwer."]
 
 
 def _user_select_option(text: str, options_text: str):
