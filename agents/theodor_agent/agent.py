@@ -280,11 +280,7 @@ def initialize_agent(
     builder.add_edge(START, "init")
     total_artifacts = len(ARTIFACTS)
 
-    cnt = 0
     for artifact in ARTIFACTS:
-        cnt = cnt + 1
-        if cnt >= 3:
-            break
         artifact_id = int(artifact["id"])
         artifact_number = artifact_id + 1
         artifact_name = str(artifact.get("name") or f"artifact_{artifact_id}")
