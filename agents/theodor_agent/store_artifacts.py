@@ -286,6 +286,9 @@ def _render_pdf(html_document: str, output_path: Path) -> None:
 def _resolve_output_path() -> Path:
     configured = os.getenv("THEODOR_ARTIFACTS_PDF_PATH")
     store_path = Path(configured) if configured else Path.cwd()
+    store_path.mkdir(parents=True, exist_ok=True)
+    if not os.access(store_path, os.W_OK):
+        raise PermissionError(f"Artifacts store path is not writable: {store_path}")
     unique_name = f"artifacts_{uuid.uuid4().hex}.pdf"
     return store_path / unique_name
 

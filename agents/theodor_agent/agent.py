@@ -233,7 +233,7 @@ def create_post_choice_cleanup_node(
             }
         )
 
-    return _node
+    return _node        
 
 
 
