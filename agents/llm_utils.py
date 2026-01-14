@@ -86,11 +86,13 @@ def get_llm(
         provider = config.LLM_PROVIDER
     llm_model = get_model(provider, model)
     if provider == "openai":
+        #TODO: model=="base" is a temporary fix for verbosity issue and sgall be removed in future
+        verbosity = "low" if model == "base" else "medium"
         return ChatOpenAI(model=llm_model, 
-                          temperature=temperature, 
-                          frequency_penalty=frequency_penalty,
-                          verbosity="low"
-                          )
+                        temperature=temperature, 
+                        frequency_penalty=frequency_penalty,
+                        verbosity=verbosity
+                        )
     elif provider == "openai_4":
         return ChatOpenAI(model=llm_model, 
                           temperature=temperature, 
