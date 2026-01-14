@@ -89,7 +89,7 @@ def get_llm(
         return ChatOpenAI(model=llm_model, 
                           temperature=temperature, 
                           frequency_penalty=frequency_penalty,
-                          model_kwargs={"verbosity": "low"}
+                          verbosity="low"
                           )
     elif provider == "openai_4":
         return ChatOpenAI(model=llm_model, 

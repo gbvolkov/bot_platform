@@ -144,3 +144,9 @@ INGOS_RETRIEVER=os.environ.get('INGOS_RETRIEVER', "faiss")
 
 DEEPL_API_KEY=os.environ.get('DEEPL_API_KEY')
 JOB_FIND_TRANSLATE=os.environ.get('JOB_FIND_TRANSLATE', "False").lower() == 'true'
+
+
+MINIO_URL=os.environ.get('MINIO_URL', 'http://127.0.0.1:9000')
+MINIO_BUCKET=os.environ.get('MINIO_BUCKET', 'ai-platform-core-stage')
+MINIO_ACCESS_KEY=os.environ.get('MINIO_ACCESS_KEY', 'minioadmin')
+MINIO_SECRET_KEY=os.environ.get('MINIO_SECRET_KEY', 'minioadmin')

@@ -42,6 +42,8 @@ from .context_reduction import (
     last_summary_index,
     summarize_artifact_discussion,
 )
+from .store_artifacts import store_artifacts
+
 
 _CONFIRMED_BANNER_BORDER = "────────────────────────────────"
 _PROGRESS_BANNER_BORDER = "════════════════════════════════"
@@ -88,8 +90,8 @@ def _format_progress_banner(
     next_artifact_name: Optional[str],
     locale: str = DEFAULT_LOCALE,
 ) -> str:
-    completed_count = max(0, min(int(completed_count), int(total_count)))
-    total_count = max(0, int(total_count))
+    completed_count = max(0, min(completed_count, total_count))
+    total_count = max(0, total_count)
     bar = ("■" * completed_count) + ("□" * max(total_count - completed_count, 0))
 
     locale_key = resolve_locale(locale)
@@ -151,10 +153,10 @@ def create_post_choice_cleanup_node(
     keep_last_messages: int = 5,
 ):
     def _node(
-        state: ArtifactAgentState,
-        config: RunnableConfig,
-        runtime: Runtime[ArtifactAgentContext],
-    ) -> ArtifactAgentState:
+            state: ArtifactAgentState,
+            config: RunnableConfig,
+            runtime: Runtime[ArtifactAgentContext],
+        ) -> ArtifactAgentState:
         messages = state.get("messages") or []
         artifacts = state.get("artifacts") or {}
         details = artifacts.get(artifact_id) or {}
@@ -192,20 +194,18 @@ def create_post_choice_cleanup_node(
             if user_prompt and note.strip() == user_prompt:
                 continue
             if len(note) > 4000:
-                note = note[:3999].rstrip() + "…"
+                note = f"{note[:3999].rstrip()}…"
             user_notes.append(note)
 
         summary_text = summarize_artifact_discussion(
-            model=summary_model,
-            artifact_id=artifact_id,
-            artifact_name=artifact_name,
-            user_prompt=user_prompt,
-            selected_option_label=selected_label,
-            selected_option_text=selected_text,
-            user_notes=user_notes,
-        ).strip()
-        if not summary_text:
-            summary_text = "- Artifact completed; no additional notes captured."
+                    model=summary_model,
+                    artifact_id=artifact_id,
+                    artifact_name=artifact_name,
+                    user_prompt=user_prompt,
+                    selected_option_label=selected_label,
+                    selected_option_text=selected_text,
+                    user_notes=user_notes,
+                ).strip() or "- Artifact completed; no additional notes captured."
 
         summary_message = SystemMessage(
             content=f"Artifact {artifact_id} — {artifact_name}\n{summary_text}",
@@ -234,6 +234,18 @@ def create_post_choice_cleanup_node(
         )
 
     return _node
+
+
+
+def generate_final_output_node(
+    state: ArtifactAgentState,
+    config: RunnableConfig,
+    runtime: Runtime[ArtifactAgentContext],
+) -> ArtifactAgentState:
+    out_path = store_artifacts(state["artifacts"] or {})
+    locale_key = resolve_locale()
+    link_text = "Final report available here" if locale_key == "en" else "Финальный отчет доступен здесь"
+    return {"messages": [AIMessage(content=f"[{link_text}]({out_path})")]}
 
 
 def initialize_agent(
@@ -267,7 +279,12 @@ def initialize_agent(
 
     builder.add_edge(START, "init")
     total_artifacts = len(ARTIFACTS)
+
+    cnt = 0
     for artifact in ARTIFACTS:
+        cnt = cnt + 1
+        if cnt >= 3:
+            break
         artifact_id = int(artifact["id"])
         artifact_number = artifact_id + 1
         artifact_name = str(artifact.get("name") or f"artifact_{artifact_id}")
@@ -334,7 +351,11 @@ def initialize_agent(
         builder.add_edge(choice_node, cleanup_node)
         builder.add_edge(cleanup_node, confirmed_node)
         prev_node = confirmed_node
-    builder.add_edge(prev_node, END)
+
+    builder.add_node("final_output", generate_final_output_node)
+
+    builder.add_edge(prev_node, "final_output")
+    builder.add_edge("final_output", END)
 
     graph = builder.compile(
         checkpointer=memory,
@@ -369,15 +390,14 @@ if __name__ == "__main__":
     ctx = ArtifactAgentContext(user_prompt = "Привет! У меня есть идея стартапа: Uber для выгула собак. Помоги мне проработать её.",
                                generated_artifacts = [])
 
-    
+
     while True:
         result = agent_graph.invoke(next_input, config=config, context=ctx)
         #res = agent_graph.get_state(config, subgraphs=True)
         state_snapshot = agent_graph.get_state(config)
         current_idx = state_snapshot.values.get("current_step_index", 0)
         logging.info("Current step index: %s", current_idx)
-        interrupts = result.get("__interrupt__")
-        if interrupts:
+        if interrupts := result.get("__interrupt__"):
             payload = getattr(interrupts[-1], "value", interrupts[-1])
             last_ai = payload.get("content", "")
             #print(f"Interrupt payload: {payload}")
@@ -397,6 +417,6 @@ if __name__ == "__main__":
             if last_ai:
                 #print(f"Bot: {last_ai}")
                 logging.info("Bot: %s", last_ai)
-        #break
+            #break
 
     print("ФСЁ")

@@ -522,6 +522,8 @@ def _is_user_confirmed(text: str, artifact_text: str):
         result = clf.invoke([system, user])
         if isinstance(result, dict):
             return result
+        elif isinstance(result, UserChangeRequest):
+            return result.model_dump()
     except Exception as e:
         logging.warning("User confirmation classifier failed, falling back. Error: %s", e)
 
@@ -706,28 +708,11 @@ def select_option_node(state: ArtifactAgentState,
 def confirmation_node(state: ArtifactAgentState, 
               config: RunnableConfig,
               runtime: Runtime[ArtifactAgentContext],) -> ArtifactAgentState:
-    #if not state["messages"]:
-    #    return state          
-    #last_user_msg = state["messages"][-1]
-    # We only augment on real user turns
-    #if last_user_msg.type != "human":
-    #    return state
-
-    #state["user_prompt"] = last_user_msg.content
-    #state["current_artifact_state"] = ArtifactState.INIT
-    #state["current_artifact_id"] = 0
-    #state["user_info"] = config.
-    #print(state.get("structured_response", {}).get("response", ""))
     
     artifacts = state.get("artifacts", {})
     current_artifact = artifacts.get(state["current_artifact_id"], {})
     artifact_name = current_artifact.get("artifact_definition", {}).get("name", "")
     choice_text = _get_choice_text()
-
-    #result = _is_user_confirmed("Ерунда какая-то", current_artifact["artifact_final_text"])
-    #result = _is_user_confirmed("Подтверждаю", current_artifact["artifact_final_text"])
-    #result = _is_user_confirmed("Норм. Едем дальше", current_artifact["artifact_final_text"])
-    #result = _is_user_confirmed("Исправляй всё.", current_artifact["artifact_final_text"])
 
     interrupt_payload = {
         "type": "choice",
@@ -735,7 +720,7 @@ def confirmation_node(state: ArtifactAgentState,
         "artifact_name": artifact_name,
         "current_artifact_state": ArtifactState.ARTIFACT_GENERATED,
         #"content": prettify(current_artifact["artifact_estimation"] + "\n" + current_artifact["artifact_final_text"]),
-        "content": prettify(current_artifact["artifact_final_text"]),
+        "content": current_artifact["artifact_final_text"],
         "question": choice_text["confirm_question"].format(artifact_name=artifact_name),
     }
 
@@ -746,6 +731,7 @@ def confirmation_node(state: ArtifactAgentState,
 
     user_response_estimated: UserChangeRequest = _is_user_confirmed(str(user_response), current_artifact["artifact_final_text"])
     if not user_response_estimated.get("is_change_requested", False):
+        state["artifacts"][state["current_artifact_id"]]["artifact_final_text"] = prettify(current_artifact["artifact_final_text"])
         state["current_artifact_state"] = ArtifactState.ARTIFACT_CONFIRMED
         return Command(
             goto=END,

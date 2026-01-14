@@ -59,6 +59,7 @@ dependencies = [
     "flowmark>=0.5.7",
     "jq>=1.10.0",
     "scikit-learn>=1.7.2",
+    "boto3>=1.42.26",
 ]
 
 [tool.uv.sources]
