@@ -57,6 +57,7 @@ from .artifacts_defs import (
     AftifactFinalText,
     get_artifact_schemas,
 )
+from .prompts.prompts import FORMAT_INSTRUCTION_EN, FORMAT_INSTRUCTION_RU
 from agents.structured_prompt_utils import provider_then_tool
 
 DEBUG = False
@@ -76,7 +77,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-from prompts.prompts import FORMAT_INSTRUCTION_EN, FORMAT_INSTRUCTION_RU
 
 CHOICE_LOCALES = {
     "ru": {
