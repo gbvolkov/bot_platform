@@ -31,9 +31,11 @@ Run:
   python sense_lines.py --input report.json --output out.json --no-llm --max_description_sentences 4
 """
 
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -238,7 +240,7 @@ def choose_k_by_silhouette(
     min_k: int,
     max_k: int,
     random_state: int,
-) -> int:
+) -> int:  # sourcery skip: use-assigned-variable
     n = emb.shape[0]
     min_k = max(2, min_k)
     max_k = max(min_k, max_k)
@@ -324,9 +326,7 @@ def make_short_title_from_tags(tags: List[str], max_len: int = 56) -> str:
     if not tags:
         return "Miscellaneous"
     title = " · ".join(tags[:3]).strip()
-    if len(title) <= max_len:
-        return title
-    return tags[0][:max_len].rstrip()
+    return title if len(title) <= max_len else tags[0][:max_len].rstrip()
 
 
 # -----------------------------
@@ -547,10 +547,8 @@ def safe_json_extract(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
     if not s:
         return {}
-    try:
+    with contextlib.suppress(Exception):
         return json.loads(s)
-    except Exception:
-        pass
     m = re.search(r"\{.*\}", s, flags=re.DOTALL)
     if not m:
         return {}
@@ -846,7 +844,7 @@ def build_sense_lines_from_report(
     doc_emb = embed_texts(embedder, docs, batch_size=batch_size)
 
     if k and k >= 2:
-        chosen_k = int(k)
+        chosen_k = k
     else:
         max_k = min(max_k, max_lines)
         min_k = min(min_k, max_k)
@@ -861,7 +859,7 @@ def build_sense_lines_from_report(
         labels=labels,
         centers=centers,
         max_lines=max_lines,
-        llm_rep_docs=max(1, int(llm_rep_docs)),
+        llm_rep_docs=max(1, llm_rep_docs),
         top_tags=top_tags,
         ngram_max=ngram_max,
         min_df=min_df,
@@ -874,12 +872,12 @@ def build_sense_lines_from_report(
         centers=centers,
         cluster_manifests=manifests,
         batch_size=batch_size,
-        use_llm=bool(llm),
+        use_llm=llm,
         llm_model_name=llm_model,
         llm_temperature=llm_temperature,
         llm_max_tokens=llm_max_tokens,
         llm_timeout=llm_timeout,
-        max_description_sentences=max(1, int(max_description_sentences)),
+        max_description_sentences=max(1, max_description_sentences),
         locale=locale,
     )
     return _build_sense_line_items(

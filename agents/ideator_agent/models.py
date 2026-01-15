@@ -40,9 +40,7 @@ class ArticleRecord:
         country = (self.search_country or "").lower()
         if country in ("ru", "rus", "russia", "россия"):
             return _REGION_TEXT["ru_relevant"]
-        if country:
-            return _REGION_TEXT["foreign_adapt"]
-        return _REGION_TEXT["unknown"]
+        return _REGION_TEXT["foreign_adapt"] if country else _REGION_TEXT["unknown"]
 
     def norm_importance(self) -> str:
         val = (self.importance or "").lower()
@@ -60,9 +58,7 @@ class ArticleRecord:
     def display_date(self) -> str:
         if self.date:
             return self.date[:10]
-        if self.processed_at:
-            return self.processed_at[:10]
-        return _MODEL_TEXT["na"]
+        return self.processed_at[:10] if self.processed_at else _MODEL_TEXT["na"]
 
     def fact_ref(self) -> str:
         return (
