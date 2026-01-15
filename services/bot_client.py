@@ -72,8 +72,7 @@ class BotServiceClient:
             raise KeyError(f"Unknown agent '{agent_id}'")
 
     async def list_agents(self) -> list[Dict[str, Any]]:
-        if not self._agents:
-            await self.refresh_agents()
+        await self.refresh_agents()
         return list(self._agents.values())
 
     async def get_agent(self, agent_id: str) -> Dict[str, Any]:

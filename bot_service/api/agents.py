@@ -10,5 +10,4 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 @router.get("/", response_model=list[AgentInfo])
 async def list_agents() -> list[AgentInfo]:
-    return agent_registry.list_agents()
-
+    return agent_registry.list_ready_agents()

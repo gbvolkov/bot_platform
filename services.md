@@ -64,7 +64,8 @@
 
 #### GET /agents/
 - **Назначение:** вернуть список доступных агентов и их возможности.
-- **Внутри:** читает `agent_registry._definitions`, сериализует в `AgentInfo`.
+- **Внутри:** использует список готовых агентов (инициализированные экземпляры) и сериализует в `AgentInfo`.
+- **Поведение:** только готовые агенты; инициализирующиеся/ожидающие не показываются; на старте список может быть пустым.
 - **Формат запроса:** без тела, без аутентификации (используется внутренними сервисами).
 - **Ответ 200:** `[{ id, name, description, provider, supported_content_types[] }]`.
 - **Ошибки:** нет специфичных.
@@ -158,7 +159,7 @@
 - `OPENAI_PROXY_DEFAULT_ATTACHMENT_PROMPT` — текст по умолчанию, если в последнем user-сообщении нет явного текста, но есть вложения.
 
 ### 2.3 Клиент к bot_service (services/bot_client.py)
-- Кэширует агентов (`refresh_agents`), валидирует `ensure_agent`.
+- Кэширует агентов (`refresh_agents`), но `list_agents` обновляет список на каждый вызов; `ensure_agent` использует обновленный кэш (ready-only).
 - Методы: `list_agents`, `get_agent`, `create_conversation`, `send_message`, `get_conversation`.
 - Заголовки: `X-User-Id`, `X-User-Role`.
 - Логирование редактирует base64 (`<base64 N chars>`).
@@ -168,6 +169,7 @@
 #### GET /v1/models
 - **Назначение:** отдать список моделей/агентов, доступных через прокси.
 - **Внутри:** вызывает `client.list_agents()` (GET /api/agents/ на bot_service), маппит в `ModelCard`.
+- **Поведение:** только готовые (ready-only); на старте список может быть пустым.
 - **Ответ 200 (ModelList):**
   ```json
   { "object": "list", "data": [ { "id": "...", "object": "model", "owned_by": "bot-service", "name": "...", "description": "...", "provider": "...", "metadata": { ... } } ] }
@@ -178,7 +180,7 @@
 - **Назначение:** вернуть информацию по конкретной модели/агенту.
 - **Внутри:** `client.get_agent(id)` (валидация через bot_service).
 - **Ответ 200:** `ModelCard` как выше.
-- **Ошибки:** `404` если агент неизвестен.
+- **Ошибки:** `404` если агент неизвестен или еще не готов (ready-only).
 
 #### POST /v1/chat/completions
 - **Назначение:** запустить диалог или продолжить существующий, с возможностью стрима.
@@ -198,9 +200,9 @@
   ```
   - Валидаторы собирают текст из массива частей, переносят вложения с `type=input_*` в `attachments`.
 - **Последовательность внутри:**
-  1) `ensure_agent(model)` через bot_service `/agents/`.
-  2) Определение `user_id` (`request.user` или `default_user_id`), `user_role` (`default_user_role`).
-  3) Создание разговора, если `conversation_id` не передан: `POST /api/conversations/` с заголовками пользователя. При `202 pending` — опрос до 30 секунд `/api/conversations/{id}` до `status=active`, иначе 503.
+  1) Определение `user_id` (`request.user` или `default_user_id`), `user_role` (`default_user_role`).
+  2) Если `conversation_id` не передан: `POST /api/conversations/` с заголовками пользователя. При `202 pending` — опрос до 30 секунд `/api/conversations/{id}` до `status=active`, иначе 503 (detail + Retry-After: 1).
+  3) Если `conversation_id` передан: `GET /api/conversations/{id}`. При `pending` — тот же опрос; `404` если не найден, 503 при таймауте.
   4) Построение промпта `build_prompt(messages, default_attachment_prompt)`: склейка system + история + последний user; если у последнего нет текста, но есть вложения — подставляется `default_attachment_prompt`, фиксируется `default_prompt_used`.
   5) Извлекаются `raw_user_text` (последний user.content или default prompt) и `attachments` из последнего user.
   6) Формируется `EnqueuePayload` с `job_id=job-<uuid>`, `model`, `conversation_id`, `user_id`, `user_role`, `text` (промпт), `raw_user_text`, `attachments`.
@@ -222,7 +224,7 @@
   - `completed` → `ChatCompletionResponse { id: job_id, model, choices:[{index:0, message:{role:"assistant", content, metadata?}, finish_reason:"stop"}], usage, conversation_id }`. Если `attachments` были, кладутся в `message.metadata.attachments`.
   - `interrupt` → аналогично, но контент — вопрос, `finish_reason=stop`, `metadata` из события.
   - `failed` → HTTP 502 с текстом ошибки.
-- **Ошибки:** `404` (неизвестный model), `400` (нет user-сообщения/ошибка промпта), `503` (агент долго инициализируется), `502` (сбой воркера/бот-сервиса), `422` (валидация).
+- **Ошибки:** `404` (неизвестный model или не готов), `400` (нет user-сообщения/ошибка промпта), `503` (agent initializing; `{ "detail": "Agent is initializing. Retry the request shortly." }`, `Retry-After: 1`), `502` (сбой воркера/бот-сервиса), `422` (валидация).
 
 ---
 
@@ -357,8 +359,7 @@
 Акторы: Клиент ↔ openai_proxy ↔ Redis ↔ task_worker ↔ bot_service.
 1) Клиент шлёт `POST /v1/chat/completions` в `openai_proxy` (может указать `stream=true/false`, `conversation_id` опционально, `user` опционально).
 2) `openai_proxy`:
-   - проверяет `model` через `/api/agents/` в bot_service;
-   - создаёт разговор, если `conversation_id` отсутствует (POST `/api/conversations/`, при `pending` опрашивает до 30 c);
+   - создает или получает разговор (POST /api/conversations/ или GET /api/conversations/{id}); при `pending` опрашивает до 30 с; при таймауте возвращает 503 (detail + Retry-After: 1).
    - из `messages` собирает промпт (`build_prompt`), сохраняет `raw_user_text` и вытаскивает вложения последнего user;
    - формирует `EnqueuePayload` (`job_id`, `model`, `conversation_id`, `user_id`, `user_role`, `text`, `raw_user_text`, `attachments`);
    - кладёт payload в Redis list `agent:jobs` и публикует `status=queued`.

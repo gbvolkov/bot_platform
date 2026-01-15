@@ -122,7 +122,7 @@ uvicorn bot_service.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 This exposes REST endpoints under `/api`, e.g.:
-- `GET /api/agents/`
+- `GET /api/agents/` (ready-only)
 - `POST /api/conversations/`
 - `POST /api/conversations/{conversation_id}/messages`
 
@@ -144,8 +144,12 @@ uvicorn openai_proxy.main:app --reload --host 0.0.0.0 --port 8080
 
 The proxy connects to `bot_service` and the task queue. It supports both streamed and non-streamed chat completions. Default endpoints:
 
-- `GET /v1/models`
+- `GET /v1/models` (ready-only)
 - `POST /v1/chat/completions`
+
+If a model is still initializing, `/v1/chat/completions` polls for up to 30 seconds and then returns:
+- `503` with body `{"detail":"Agent is initializing. Retry the request shortly."}`
+- Header `Retry-After: 1`
 
 Example request:
 

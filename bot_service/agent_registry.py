@@ -165,6 +165,20 @@ class AgentRegistry:
             for definition in self._definitions.values()
         ]
 
+    def list_ready_agents(self) -> List[AgentInfo]:
+        ready_ids = set(self._instances)
+        return [
+            AgentInfo(
+                id=definition.id,
+                name=definition.name,
+                description=definition.description,
+                provider=definition.default_provider.value,
+                supported_content_types=list(definition.supported_content_types),
+            )
+            for definition in self._definitions.values()
+            if definition.id in ready_ids
+        ]
+
     def _start_initialization(self, agent_id: str) -> None:
         definition = self._definitions[agent_id]
         provider = definition.default_provider

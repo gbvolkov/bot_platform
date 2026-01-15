@@ -432,11 +432,6 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     client: Annotated[BotServiceClient, Depends(get_client)],
 ) -> ChatCompletionResponse:
-    try:
-        await client.ensure_agent(request.model)
-    except KeyError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
     user_id = request.user or settings.default_user_id
     user_role = settings.default_user_role
 
@@ -451,11 +446,29 @@ async def create_chat_completion(
 
     conversation_id = request.conversation_id
     if conversation_id is None:
-        conv, ready = await client.create_conversation(
-            agent_id=request.model,
-            user_id=user_id,
-            user_role=user_role,
-        )
+        try:
+            conv, ready = await client.create_conversation(
+                agent_id=request.model,
+                user_id=user_id,
+                user_role=user_role,
+            )
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            if response is not None and response.status_code == status.HTTP_404_NOT_FOUND:
+                detail = None
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        detail = payload.get("detail")
+                except ValueError:
+                    detail = None
+                if not detail:
+                    detail = response.text if response is not None else str(exc)
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to create conversation.",
+            ) from exc
         conversation_id = conv["id"]
         if not ready:
             for _ in range(30):
@@ -468,6 +481,41 @@ async def create_chat_completion(
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Agent is initializing. Retry the request shortly.",
+                    headers={"Retry-After": "1"},
+                )
+    else:
+        try:
+            detail = await client.get_conversation(conversation_id, user_id)
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            if response is not None and response.status_code == status.HTTP_404_NOT_FOUND:
+                error_detail = None
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        error_detail = payload.get("detail")
+                except ValueError:
+                    error_detail = None
+                if not error_detail:
+                    error_detail = response.text if response is not None else str(exc)
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error_detail) from exc
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to fetch conversation.",
+            ) from exc
+        if detail.get("status") == "pending":
+            ready = False
+            for _ in range(30):
+                await asyncio.sleep(1.0)
+                detail = await client.get_conversation(conversation_id, user_id)
+                if detail.get("status") == "active":
+                    ready = True
+                    break
+            if not ready:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Agent is initializing. Retry the request shortly.",
+                    headers={"Retry-After": "1"},
                 )
 
     try:
