@@ -200,6 +200,33 @@ C) Переформулирование
 • давать финальную идею длинным текстом
 """
 
+FORMAT_INSTRUCTION_RU = """
+Отформатируй свой ответ в MarkdownV2:
+- Добавляй заголовки там, где это уместно.  
+- Используй маркированные или нумерованные списки, когда это подходит.  
+- Используй блоки кода для кода или команд.  
+- **ВАЖНО** Правильно оформляй ссылки! Обращай внимание на заголовки!  
+- **ВАЖНО** Не изменяй формулировку!  
+- **ВАЖНО** Не удаляй и не сокращай информацию!  
+- Исправляй очевидные грамматические и пробельные ошибки.  
+- Используй эффектные значки, чтобы выделить важную информацию.  
+- Выводи ТОЛЬКО Markdown, без объяснений.  
+- **ВАЖНО**: Не добавляй и не изменяй текст, только форматируй!
+"""
+
+FORMAT_INSTRUCTION_EN = """
+Format your response as MarkdownV2:
+- Add headings where it makes sense.
+- Use bullet or numbered lists when appropriate.
+- Use code fences for code or commands.
+- **IMPORTANT** Format links properly! Pay attention to titles!
+- **IMPORTANT** Do not change wording!
+- **IMPORTANT** Do not remove or cut any information!
+- Fix obvious grammar and spacing.
+- Use fency icons to highlight important information.
+- Output ONLY Markdown, no explanation.
+- **IMPORTANT**: Do not add or modify text, only format!.
+"""
 
 SENSE_LINE_INSTRUCTION_OLD = """
 Generate 3-4 concise sense lines grounded only in the provided articles.
@@ -602,6 +629,7 @@ LOCALES = {
             "sense_line_llm_system": SENSE_LINE_LLM_SYSTEM_PROMPT,
             "sense_line_llm_user": SENSE_LINE_LLM_USER_PROMPT,
             "ideas_instruction": IDEAS_INSTRUCTION,
+            "format_instruction": FORMAT_INSTRUCTION_RU,
             "fact_ref_hint": FACT_REF_HINT,
             "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
             "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT_RU,
@@ -665,6 +693,7 @@ LOCALES = {
             "sense_line_llm_system": SENSE_LINE_LLM_SYSTEM_PROMPT_EN,
             "sense_line_llm_user": SENSE_LINE_LLM_USER_PROMPT_EN,
             "ideas_instruction": IDEAS_INSTRUCTION_EN,
+            "format_instruction": FORMAT_INSTRUCTION_EN,
             "fact_ref_hint": FACT_REF_HINT_EN,
             "think_tool_policy_prompt": THINK_TOOL_POLICY_PROMPT,
             "search_tool_policy_prompt": SEARCH_TOOL_POLICY_PROMPT_EN,

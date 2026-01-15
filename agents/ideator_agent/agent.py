@@ -303,7 +303,7 @@ def _build_sense_agent(model: BaseChatModel):
             )
             prompt += PRECOMPUTED_SENSE_LINES_NOTE
         prompt += f"{build_json_prompt(SenseLineResponse)}"
-        return prompt + _PROMPTS["think_tool_policy_prompt"]
+        return prompt + _PROMPTS["format_instruction"] + _PROMPTS["think_tool_policy_prompt"]
 
     return create_agent(
         model=model,
@@ -346,7 +346,7 @@ def _build_ideas_agent(model: BaseChatModel):
                 ideas=_format_ideas(existing_ideas)
             )
         prompt += f"{build_json_prompt(IdeaListResponse)}"
-        return prompt + _PROMPTS["think_tool_policy_prompt"] + "\n\n" + _PROMPTS["search_tool_policy_prompt"]
+        return prompt + _PROMPTS["format_instruction"] + _PROMPTS["think_tool_policy_prompt"] + "\n\n" + _PROMPTS["search_tool_policy_prompt"]
 
     return create_agent(
         model=model,

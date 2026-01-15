@@ -45,7 +45,7 @@ prettify_llm = with_llm_fallbacks(
 prettify_prompt = PromptTemplate.from_template(
     """You are experienced and accurate text editor.
 
-Your are receiving an artifact text thet shall be cleaned up and formatted in Markdown.
+Your are receiving an artifact text thet shall be cleaned up and formatted in MarkdownV2.
 Please remove from text all dirty texts, discussions fwith user, questions and so on and leave the rest of the text intact.
 
 -----------------------------------------------------------------------------------------
@@ -58,7 +58,7 @@ AS-IS/TO-BE: ВЫСОКО — обе части описаны и сопоста
 Узкие места: ВЫСОКО — перечислены + привязаны гипотезы улучшений."
 -----------------------------------------------------------------------------------------
 
-Additionally format resulting text as Markdown:
+Additionally format resulting text as MarkdownV2:
 - Add headings where it makes sense.
 - Use bullet or numbered lists when appropriate.
 - Use code fences for code or commands.
