@@ -562,11 +562,11 @@ def _format_artifact_options_text(structured_response: Dict[str, Any]) -> str:
 
     for idx, option in enumerate(artifact_options):
         option_text = option.get("artifact_option", "")
-        option_letter = chr(ord("A") + idx)
-        lines.append(f"- {option_letter}. {option_text}")
+        #option_letter = chr(ord("A") + idx)
+        #lines.append(f"- {option_letter}. {option_text}")
+        lines.append(f"{option_text}")
         for estimation in option.get("criteris_estimations") or []:
-            criteria_text = estimation.get("criteria_estimation", "")
-            if criteria_text:
+            if criteria_text := estimation.get("criteria_estimation", ""):
                 lines.append(f"        {criteria_text}")
 
     return "\n".join(lines)
