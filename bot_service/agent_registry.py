@@ -50,12 +50,12 @@ class AgentRegistry:
     def __init__(self) -> None:
         default_provider = _resolve_provider(settings.default_model_provider)
         default_content_types: Tuple[ContentType, ...] = (
-            ContentType.TEXT_FILES,
-            ContentType.MARKDOWN,
-            ContentType.DOCX_DOCUMENTS,
-            ContentType.PDFS,
-            ContentType.CSVS,
-            ContentType.EXCELS,
+            #ContentType.TEXT_FILES,
+            #ContentType.MARKDOWN,
+            #ContentType.DOCX_DOCUMENTS,
+            #ContentType.PDFS,
+            #ContentType.CSVS,
+            #ContentType.EXCELS,
         )
         self._definitions: Dict[str, AgentDefinition] = {
             "find_job": AgentDefinition(
