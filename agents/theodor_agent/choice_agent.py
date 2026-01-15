@@ -76,12 +76,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+from prompts.prompts import FORMAT_INSTRUCTION_EN, FORMAT_INSTRUCTION_RU
+
 CHOICE_LOCALES = {
     "ru": {
         "artifact_placeholder": "В работе",
         "data_source_default": "Ответы пользователя",
         "select_option_question": "Выберите один из предложенных вариантов или скажите, что нужно поправить.",
         "confirm_question": "Подтвердите артефакт \"{artifact_name}\" или скажите, что нужно изменить.",
+        "format_instruction": FORMAT_INSTRUCTION_RU,
         "options_prompt": (
             "Мы прорабатываем: {user_prompt}\n\n"
             "====================================================================================\n#Артефакты:\n"
@@ -151,6 +154,7 @@ CHOICE_LOCALES = {
         "data_source_default": "User responses",
         "select_option_question": "Choose one of the proposed options or say what needs to be revised.",
         "confirm_question": "Confirm the artifact \"{artifact_name}\" or say what needs to change.",
+        "format_instruction": FORMAT_INSTRUCTION_EN,
         "options_prompt": (
             "We are working on: {user_prompt}\n\n"
             "====================================================================================\n#Artifacts:\n"
@@ -802,6 +806,8 @@ def create_options_generator_node(
             + "\n\n"
             + prompt
             + "\n\n"
+            + choice_text["format_instruction"]
+            + "\n\n"
             + get_format_options_prompt(locale_key)
             + "\n\n"
             + get_tool_policy_prompt(locale_key)
@@ -923,6 +929,8 @@ def create_generation_agent(
             get_system_prompt(locale_key)
             + "\n\n"
             + prompt
+            + "\n\n"
+            + choice_text["format_instruction"]
             + "\n\n"
             + get_tool_policy_prompt(locale_key)
         )

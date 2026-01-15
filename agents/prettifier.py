@@ -79,10 +79,10 @@ Text:
 prettify_chain = prettify_prompt | prettify_llm
 
 def prettify(text: str)-> str:
-    #return text
-    try:
-        result = prettify_chain.invoke({"text": text})
-    except Exception as e:
-        logging.error(f"Error occured during prettify tool calling.\nException: {e}")
-        return text
-    return result.content
+    return text
+    #try:
+    #    result = prettify_chain.invoke({"text": text})
+    #except Exception as e:
+    #    logging.error(f"Error occured during prettify tool calling.\nException: {e}")
+    #    return text
+    #return result.content

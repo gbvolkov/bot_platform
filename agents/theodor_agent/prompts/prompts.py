@@ -99,6 +99,34 @@ REOPEN возможен: APPROVED → ACTIVE (по запросу пользов
 • Включай поиск только по запросу пользователя или на этапе 9 (Конкурентный анализ) и 12 (Дорожная карта для рынка), если явно сказано «посмотри рынок/цены/игроков». Всегда спрашивай разрешение перед веб-поиском.
 """
 
+FORMAT_INSTRUCTION_RU = """
+Отформатируй свой ответ в MarkdownV2:
+- Добавляй заголовки там, где это уместно.  
+- Используй маркированные или нумерованные списки, когда это подходит.  
+- Используй блоки кода для кода или команд.  
+- **ВАЖНО** Правильно оформляй ссылки! Обращай внимание на заголовки!  
+- **ВАЖНО** Не изменяй формулировку!  
+- **ВАЖНО** Не удаляй и не сокращай информацию!  
+- Исправляй очевидные грамматические и пробельные ошибки.  
+- Используй эффектные значки, чтобы выделить важную информацию.  
+- Выводи ТОЛЬКО Markdown, без объяснений.  
+- **ВАЖНО**: Не добавляй и не изменяй текст, только форматируй!
+"""
+
+FORMAT_INSTRUCTION_EN = """
+Format your response as MarkdownV2:
+- Add headings where it makes sense.
+- Use bullet or numbered lists when appropriate.
+- Use code fences for code or commands.
+- **IMPORTANT** Format links properly! Pay attention to titles!
+- **IMPORTANT** Do not change wording!
+- **IMPORTANT** Do not remove or cut any information!
+- Fix obvious grammar and spacing.
+- Use fency icons to highlight important information.
+- Output ONLY Markdown, no explanation.
+- **IMPORTANT**: Do not add or modify text, only format!.
+"""
+
 
 TOOL_POLICY_PROMPT = """
 ### Yandex Web Search
