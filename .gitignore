@@ -15,3 +15,4 @@ nohup.out
 *.db
 *.log
 docs
+uv.lock
