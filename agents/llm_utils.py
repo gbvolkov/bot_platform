@@ -88,11 +88,22 @@ def get_llm(
     if provider == "openai":
         #TODO: model=="base" is a temporary fix for verbosity issue and sgall be removed in future
         verbosity = "low" if model == "base" else "medium"
-        return ChatOpenAI(model=llm_model, 
-                        temperature=temperature, 
-                        frequency_penalty=frequency_penalty,
-                        verbosity=verbosity
-                        )
+
+        return ChatOpenAI(
+            model=llm_model,
+            use_responses_api=True,              # важно для GPT-5.x параметров
+            reasoning={"effort": "none"},        # минимум латентности
+            verbosity=verbosity,                     # короче ответы -> быстрее
+            #max_tokens=600,                      # ограничение генерации
+            service_tier="default",              # или "auto"/"flex" по политике
+            #streaming=True,                      # быстрее time-to-first-token
+            use_previous_response_id=True,       # меньше контекста в каждом запросе
+        )
+        #return ChatOpenAI(model=llm_model, 
+        #                temperature=temperature, 
+        #                frequency_penalty=frequency_penalty,
+        #                verbosity=verbosity
+        #                )
     elif provider == "openai_4":
         return ChatOpenAI(model=llm_model, 
                           temperature=temperature, 
