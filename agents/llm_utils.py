@@ -95,8 +95,8 @@ def get_llm(
             use_responses_api=True,              # важно для GPT-5.x параметров
             reasoning={"effort": reasoning},        # минимум латентности
             verbosity=verbosity,                     # короче ответы -> быстрее
-            max_tokens=2000,                      # ограничение генерации
-            service_tier="default",              # или "auto"/"flex" по политике
+            #max_tokens=2000,                      # ограничение генерации
+            #service_tier="default",              # или "auto"/"flex" по политике
             #streaming=True,                      # быстрее time-to-first-token
             use_previous_response_id=True,       # меньше контекста в каждом запросе
             model_kwargs={"max_tool_calls": 3},  # max number of tool calls per response

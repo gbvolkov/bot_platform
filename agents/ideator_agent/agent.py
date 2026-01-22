@@ -628,6 +628,7 @@ def initialize_agent(
 
     memory = None if use_platform_store else MemorySaver()
     llm = get_llm(model="base", provider=provider.value, temperature=0.4)
+    #llm = get_llm(model="base", provider="openai_4", temperature=0.4)
 
     builder = StateGraph(IdeatorAgentState)
     builder.add_node("init", create_init_node())

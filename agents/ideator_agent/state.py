@@ -46,4 +46,3 @@ class IdeatorAgentState(AgentState[Dict[str, Any]]):
     force_regen: NotRequired[bool]
     force_regen_lines: NotRequired[bool]
     greeted: NotRequired[bool]
-    greeted: NotRequired[bool]

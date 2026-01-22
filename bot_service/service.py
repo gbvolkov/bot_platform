@@ -29,6 +29,8 @@ def _normalise_content(message: BaseMessage) -> Dict[str, Any]:
             else:
                 parts.append({"type": "text", "text": str(item)})
         return {"type": "segments", "parts": parts}
+    elif isinstance(content, dict) and "text" in content:
+        return content
     return {"type": "text", "text": str(content)}
 
 

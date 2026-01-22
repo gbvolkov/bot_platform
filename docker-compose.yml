@@ -1,0 +1,122 @@
+version: "3.9"
+
+x-app: &app
+  image: python:3.13-slim
+  working_dir: /app
+  volumes:
+    - .:/app
+  environment:
+    PYTHONUNBUFFERED: "1"
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  code_pull:
+    image: alpine/git:2.47.1
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      GIT_TERMINAL_PROMPT: "0"
+    command:
+      [
+        "sh",
+        "-c",
+        "if [ -d /app/.git ]; then git config --global --add safe.directory /app && git pull --rebase --autostash; else echo 'No .git directory found; skipping git pull.'; fi",
+      ]
+    restart: "no"
+
+  bot_service:
+    <<: *app
+    command:
+      [
+        "sh",
+        "-c",
+        "pip install --no-cache-dir uv && uv pip install -r pyproject.toml && uvicorn bot_service.main:app --host 0.0.0.0 --port 8000",
+      ]
+    ports:
+      - "8000:8000"
+    depends_on:
+      code_pull:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz').read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  queue_worker:
+    <<: *app
+    command:
+      [
+        "sh",
+        "-c",
+        "pip install --no-cache-dir uv && uv pip install -r pyproject.toml && python -m services.task_queue.worker",
+      ]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TASK_QUEUE_REDIS_URL: redis://redis:6379/0
+      TASK_QUEUE_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
+    depends_on:
+      code_pull:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      bot_service:
+        condition: service_healthy
+
+  openai_proxy:
+    <<: *app
+    command:
+      [
+        "sh",
+        "-c",
+        "pip install --no-cache-dir uv && uv pip install -r pyproject.toml && uvicorn openai_proxy.main:app --host 0.0.0.0 --port 8084 --http openai_proxy.http_logging:LoggingH11Protocol",
+      ]
+    ports:
+      - "8084:8084"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TASK_QUEUE_REDIS_URL: redis://redis:6379/0
+      TASK_QUEUE_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
+      OPENAI_PROXY_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
+    depends_on:
+      code_pull:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      bot_service:
+        condition: service_healthy
+      queue_worker:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8084/healthz').read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 60s

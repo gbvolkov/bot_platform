@@ -35,10 +35,10 @@ def build_prompt(
         raise ValueError("Chat request must include at least one user message.")
 
     prompt_sections: List[str] = []
-    if system_chunks:
-        prompt_sections.append("\n".join(system_chunks))
-    if len(conversation_chunks) > 1:
-        prompt_sections.append("Conversation history:\n" + "\n".join(conversation_chunks[:-1]))
+    #if system_chunks:
+    #    prompt_sections.append("\n".join(system_chunks))
+    #if len(conversation_chunks) > 1:
+    #    prompt_sections.append("Conversation history:\n" + "\n".join(conversation_chunks[:-1]))
     prompt_sections.append(latest_user_text)
 
     prompt = "\n\n".join(section for section in prompt_sections if section).strip()

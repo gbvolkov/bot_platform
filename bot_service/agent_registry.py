@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,11 +14,15 @@ from agents.bi_agent import initialize_agent as init_aibi_agent
 from agents.ideator_agent import initialize_agent as init_ideator_agent
 from agents.ideator_old_agent import initialize_agent as init_ideator_old_agent
 from agents.ismart_tutor_agent import initialize_agent as init_ismart_tutor_agent
+from agents.simple_agent.agent import initialize_agent as init_simple_agent
 from agents.theodor_agent.agent import initialize_agent as init_theodor_agent
 from agents.utils import ModelType
 
 from .config import settings
 from .schemas import AgentInfo, ContentType
+
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,7 @@ class AgentDefinition:
     default_provider: ModelType
     supported_content_types: Tuple[ContentType, ...]
     allow_raw_attachments: bool = False
+    is_active: bool = True
 
 
 PROVIDER_MAPPING: Dict[str, ModelType] = {
@@ -70,6 +76,7 @@ class AgentRegistry:
                     ContentType.DOCX_DOCUMENTS,
                     ContentType.PDFS,
                 ),
+                is_active = False,
             ),
             "service_desk": AgentDefinition(
                 id="service_desk",
@@ -78,6 +85,7 @@ class AgentRegistry:
                 factory=lambda provider: init_sd_agent(provider=provider),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
+                is_active = False,
             ),
             "ai_bi": AgentDefinition(
                 id="ai_bi",
@@ -86,6 +94,7 @@ class AgentRegistry:
                 factory=lambda provider: init_aibi_agent(provider=provider),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
+                is_active = False,
             ),
             "theodor_agent": AgentDefinition(
                 id="theodor_agent",
@@ -94,6 +103,7 @@ class AgentRegistry:
                 factory=lambda provider: init_theodor_agent(provider=provider),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
+                is_active = False,
             ),
             "ideator": AgentDefinition(
                 id="ideator",
@@ -103,6 +113,7 @@ class AgentRegistry:
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.JSONS,),
                 allow_raw_attachments=True,
+                is_active = True,
             ),
             "ideator_old": AgentDefinition(
                 id="ideator_old",
@@ -112,6 +123,7 @@ class AgentRegistry:
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.JSONS,),
                 allow_raw_attachments=True,
+                is_active = False,
             ),
             "ismart_tutor_agent": AgentDefinition(
                 id="ismart_tutor_agent",
@@ -121,6 +133,14 @@ class AgentRegistry:
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.IMAGES,),
                 allow_raw_attachments=True,
+            ),
+            "simple_agent": AgentDefinition(
+                id="simple_agent",
+                name="Simple Agent",
+                description="General-purpose assistant with optional system prompt setup.",
+                factory=lambda provider: init_simple_agent(provider=provider),
+                default_provider=default_provider,
+                supported_content_types=default_content_types,
             ),
         }
         self._definitions.update(self._build_product_definitions(default_provider, default_content_types))
@@ -150,6 +170,7 @@ class AgentRegistry:
                 factory=lambda provider, product=product_name: init_product_agent(provider=provider, product=product),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
+                is_active = False
             )
         return product_definitions
 
@@ -163,6 +184,7 @@ class AgentRegistry:
                 supported_content_types=list(definition.supported_content_types),
             )
             for definition in self._definitions.values()
+            if definition.is_active
         ]
 
     def list_ready_agents(self) -> List[AgentInfo]:
@@ -176,7 +198,7 @@ class AgentRegistry:
                 supported_content_types=list(definition.supported_content_types),
             )
             for definition in self._definitions.values()
-            if definition.id in ready_ids
+            if definition.id in ready_ids and definition.is_active
         ]
 
     def _start_initialization(self, agent_id: str) -> None:
@@ -193,10 +215,12 @@ class AgentRegistry:
             try:
                 instance = fut.result()
             except BaseException as exc:  # noqa: BLE001
+                LOG.exception("Agent '%s' initialization failed", agent_id)
                 self._init_errors[agent_id] = exc
             else:
                 self._instances[agent_id] = instance
                 self._init_errors.pop(agent_id, None)
+                LOG.info("Agent '%s' initialization complete.", agent_id)
             finally:
                 self._init_tasks.pop(agent_id, None)
 

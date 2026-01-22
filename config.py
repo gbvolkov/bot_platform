@@ -33,7 +33,8 @@ GIGA_CHAT_SCOPE = "GIGACHAT_API_PERS"
 
 LANGCHAIN_API_KEY = os.environ.get('LANGCHAIN_API_KEY', "")
 #LANGCHAIN_API_KEY_DEV = os.environ.get('LANGCHAIN_API_KEY_DEV')
-LANGCHAIN_ENDPOINT = "" #"https://api.smith.langchain.com"
+LANGCHAIN_ENDPOINT = "https://api.smith.langchain.com"
+LANGCHAIN_TRACING_V2 = os.environ.get('LANGCHAIN_TRACING_V2', "")
 USE_ANONIMIZER=(os.environ.get('USE_ANONIMIZER', "False").lower() == 'true')
 if USE_ANONIMIZER:
     LANGSMITH_HIDE_INPUTS=True
