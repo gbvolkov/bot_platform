@@ -280,9 +280,11 @@ def _build_sense_agent(model: BaseChatModel):
         articles = report.sorted_articles()[:80] if use_report else []
         existing_lines = state.get("sense_lines") or []
         prompt = (
-            _PROMPTS["ideator_system_prompt"]
+            _PROMPTS["ideator_core_prompt"]
             + "\n"
-            + _PROMPTS["sense_line_instruction"]
+            + _PROMPTS["sense_line_stage_prompt"]
+            + "\n"
+            + _PROMPTS["sense_line_output_contract"]
             + "\n"
             + _PROMPTS["fact_ref_hint"]
             + "\n\n"
@@ -303,7 +305,7 @@ def _build_sense_agent(model: BaseChatModel):
             )
             prompt += PRECOMPUTED_SENSE_LINES_NOTE
         prompt += f"{build_json_prompt(SenseLineResponse)}"
-        return prompt + _PROMPTS["format_instruction"] + _PROMPTS["think_tool_policy_prompt"]
+        return prompt + "\n\n" + _PROMPTS["format_instruction"] + "\n\n" + _PROMPTS["think_tool_policy_prompt"]
 
     return create_agent(
         model=model,
@@ -327,9 +329,11 @@ def _build_ideas_agent(model: BaseChatModel):
             articles = report.filter_by_ids(filtered_ids)
         existing_ideas = state.get("ideas") or []
         prompt = (
-            _PROMPTS["ideator_system_prompt"]
+            _PROMPTS["ideator_core_prompt"]
             + "\n"
-            + _PROMPTS["ideas_instruction"]
+            + _PROMPTS["ideas_stage_prompt"]
+            + "\n"
+            + _PROMPTS["ideas_output_contract"]
             + "\n"
             + _PROMPTS["fact_ref_hint"]
             + "\n\n"
