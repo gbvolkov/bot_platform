@@ -598,6 +598,7 @@ def initialize_agent(
     provider: ModelType = ModelType.GPT,
     role: str = "default",
     use_platform_store: bool = False,
+    checkpoint_saver=None,
 ):
     log_name = f"job_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
@@ -619,7 +620,7 @@ def initialize_agent(
 
     provider_name = provider.value if isinstance(provider, ModelType) else str(provider)
     extractor_llm = get_llm(model="nano", provider=provider_name, temperature=0)
-    memory = None if use_platform_store else MemorySaver()
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
 
     builder = StateGraph(JobAgentState, config_schema=ConfigSchema)
     builder.add_node("fetch_user_info", user_info)

@@ -254,6 +254,7 @@ def initialize_agent(
     use_platform_store: bool = False,
     notify_on_reload: bool = True,
     locale: str = DEFAULT_LOCALE,
+    checkpoint_saver=None,
 ):
     locale_key = set_global_locale(locale)
     log_name = f"theo_agent_{time.strftime('%Y%m%d%H%M')}"
@@ -268,7 +269,7 @@ def initialize_agent(
         lf_handler = CallbackHandler()
         callback_handlers += [lf_handler]
 
-    memory = MemorySaver() # Always use memory for this agent
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
 
     summary_llm = get_llm(model="mini", provider=provider.value, temperature=0)
 

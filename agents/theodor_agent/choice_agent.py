@@ -1009,6 +1009,7 @@ def initialize_agent(
     uset_parental_memory: bool = False,
     artifact_id: int = 0,
     locale: str = DEFAULT_LOCALE,
+    checkpoint_saver=None,
 ):
 
     set_locale(locale)
@@ -1024,10 +1025,7 @@ def initialize_agent(
         lf_handler = CallbackHandler()
         callback_handlers += [lf_handler]
 
-    if uset_parental_memory:
-        memory = None #memory_saver
-    else:
-        memory = MemorySaver() # Always use memory for this agent
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
 
     builder = StateGraph(ArtifactAgentState)
     

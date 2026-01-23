@@ -16,3 +16,5 @@ nohup.out
 *.log
 docs
 uv.lock
+*.db-shm
+*.db-wal

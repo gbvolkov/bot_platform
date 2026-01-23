@@ -281,6 +281,7 @@ def initialize_agent(
     role: str = "default",
     use_platform_store: bool = False,
     notify_on_reload: bool = True,
+    checkpoint_saver=None,
 ):
     log_name = f"bi_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
@@ -300,7 +301,7 @@ def initialize_agent(
         except Exception as exc:  # noqa: BLE001
             logging.warning("Langfuse initialisation failed: %s", exc)
 
-    memory = None if use_platform_store else MemorySaver()
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
 
     builder = StateGraph(BiAgentState, config_schema=ConfigSchema)
     builder.add_node("fetch_user_info", user_info)

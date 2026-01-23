@@ -100,6 +100,7 @@ def initialize_agent(
     provider: ModelType = ModelType.GPT,
     product: str = "default",
     use_platform_store: bool = False,
+    checkpoint_saver=None,
     *,
     prefetch_top_k: int = 3,
 ):
@@ -134,7 +135,7 @@ def initialize_agent(
             ,"TICKET_NUMBER"
         ]
         anonymizer = Palimpsest(verbose=False, run_entities=anon_entities)
-    memory = None if use_platform_store else MemorySaver()
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     team_llm = get_llm(model = cfg.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     
     search_kb = get_search_tool(product)

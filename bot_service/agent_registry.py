@@ -6,6 +6,11 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import AsyncIterator
+from urllib.parse import unquote, urlparse
+
+#from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from agents.find_job_agent import initialize_agent as init_job_agent
 from agents.sd_ass_agent.agent import initialize_agent as init_sd_agent
@@ -52,6 +57,8 @@ def _resolve_provider(provider_name: str) -> ModelType:
 PRODUCT_DOCS_DIR = Path(__file__).resolve().parent.parent / "data" / "docs"
 
 
+
+
 class AgentRegistry:
     def __init__(self) -> None:
         default_provider = _resolve_provider(settings.default_model_provider)
@@ -63,12 +70,18 @@ class AgentRegistry:
             #ContentType.CSVS,
             #ContentType.EXCELS,
         )
+        
+        #persistent checkpointers
+        self._checkpointer_cm: AsyncIterator[AsyncSqliteSaver] | None = None
+        self._checkpointer: AsyncSqliteSaver | None = None
+        self._checkpointer_lock = asyncio.Lock()
+
         self._definitions: Dict[str, AgentDefinition] = {
             "find_job": AgentDefinition(
                 id="find_job",
                 name="Job Finder",
                 description="Подыскивает вакансии на основе резюме пользователя.",
-                factory=lambda provider: init_job_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_job_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=(
                     ContentType.TEXT_FILES,
@@ -82,7 +95,7 @@ class AgentRegistry:
                 id="service_desk",
                 name="Service Desk Assistant",
                 description="Отвечает на вопросы сотрудников и консультирует по внутренним процессам.",
-                factory=lambda provider: init_sd_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_sd_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
                 is_active = False,
@@ -91,7 +104,7 @@ class AgentRegistry:
                 id="ai_bi",
                 name="BI analyst",
                 description="Отвечает на вопросы по датасету и строит графики.",
-                factory=lambda provider: init_aibi_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_aibi_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
                 is_active = False,
@@ -100,7 +113,7 @@ class AgentRegistry:
                 id="theodor_agent",
                 name="Theodor AI (Product Mentor)",
                 description="Продуктовый наставник. Ведет по методологии Фёдора (13 артефактов).",
-                factory=lambda provider: init_theodor_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_theodor_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
                 is_active = False,
@@ -109,7 +122,7 @@ class AgentRegistry:
                 id="ideator",
                 name="Ideator (Новости → идеи)",
                 description="Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
-                factory=lambda provider: init_ideator_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_ideator_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.JSONS,),
                 allow_raw_attachments=True,
@@ -119,7 +132,7 @@ class AgentRegistry:
                 id="ideator_old",
                 name="Ideator (Новости → идеи). Old version",
                 description="Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
-                factory=lambda provider: init_ideator_old_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_ideator_old_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.JSONS,),
                 allow_raw_attachments=True,
@@ -129,7 +142,7 @@ class AgentRegistry:
                 id="ismart_tutor_agent",
                 name="iSmart Tutor",
                 description="Educational tutor that provides concise hints and clarifying questions (without giving full solutions).",
-                factory=lambda provider: init_ismart_tutor_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_ismart_tutor_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types + (ContentType.IMAGES,),
                 allow_raw_attachments=True,
@@ -138,7 +151,7 @@ class AgentRegistry:
                 id="simple_agent",
                 name="Simple Agent",
                 description="General-purpose assistant with optional system prompt setup.",
-                factory=lambda provider: init_simple_agent(provider=provider),
+                factory=lambda provider, checkpoint_saver: init_simple_agent(provider=provider, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
             ),
@@ -167,7 +180,7 @@ class AgentRegistry:
                 id=agent_id,
                 name=product_name,
                 description=f"Assistant of Ingosstrakh Product '{product_name}'.",
-                factory=lambda provider, product=product_name: init_product_agent(provider=provider, product=product),
+                factory=lambda provider, checkpoint_saver, product=product_name: init_product_agent(provider=provider, product=product, checkpoint_saver=checkpoint_saver),
                 default_provider=default_provider,
                 supported_content_types=default_content_types,
                 is_active = False
@@ -201,15 +214,50 @@ class AgentRegistry:
             if definition.id in ready_ids and definition.is_active
         ]
 
+    async def _ensure_checkpointer(self) -> AsyncSqliteSaver:
+        """Create a single shared SQLite checkpointer (lazy, once per process)."""
+        if self._checkpointer is not None:
+            return self._checkpointer
+
+        async with self._checkpointer_lock:
+            if self._checkpointer is not None:
+                return self._checkpointer
+
+            # settings.checkpoint_sqlite_path example: "data/checkpoints.sqlite"
+            conn_string = settings.checkpointer_db_url
+            cm = AsyncSqliteSaver.from_conn_string(conn_string)
+
+            # Enter once and keep it open for the whole app lifetime
+            saver = await cm.__aenter__()
+            await saver.setup()  # idempotent
+
+            self._checkpointer_cm = cm
+            self._checkpointer = saver
+            return saver
+
+    async def aclose(self) -> None:
+        """Call on app shutdown to close the shared checkpointer."""
+        if self._checkpointer_cm is not None:
+            await self._checkpointer_cm.__aexit__(None, None, None)
+        self._checkpointer_cm = None
+        self._checkpointer = None
+
     def _start_initialization(self, agent_id: str) -> None:
         definition = self._definitions[agent_id]
         provider = definition.default_provider
 
-        def build() -> Any:
-            return definition.factory(provider)
+        async def build_async() -> Any:
+            checkpoint_saver = await self._ensure_checkpointer()
+            loop = asyncio.get_running_loop()
+
+            # Keep your current pattern: build agent in executor thread
+            return await loop.run_in_executor(
+                None,
+                lambda: definition.factory(provider, checkpoint_saver=checkpoint_saver),
+            )
 
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, build)
+        task = loop.create_task(build_async())
 
         def on_done(fut: Future) -> None:
             try:
@@ -224,8 +272,8 @@ class AgentRegistry:
             finally:
                 self._init_tasks.pop(agent_id, None)
 
-        future.add_done_callback(on_done)
-        self._init_tasks[agent_id] = future
+        task.add_done_callback(on_done)
+        self._init_tasks[agent_id] = task
 
     async def ensure_agent_ready(self, agent_id: str) -> bool:
         if agent_id not in self._definitions:

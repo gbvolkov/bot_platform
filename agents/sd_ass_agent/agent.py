@@ -154,7 +154,7 @@ def anonymize_message_content(content: Any, anonymizer: Palimpsest) -> Any:
         return out
     return content
 
-def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default", use_platform_store: bool = False):
+def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default", use_platform_store: bool = False, checkpoint_saver=None):
     # The checkpointer lets the graph persist its state
     # this is a complete memory for the entire graph.
     print("SDAgent initialization started...")
@@ -186,7 +186,7 @@ def initialize_agent(provider: ModelType = ModelType.GPT, role: str = "default",
             ,"TICKET_NUMBER"
         ]
         anonymizer = Palimpsest(verbose=False, run_entities=anon_entities)
-    memory = None if use_platform_store else MemorySaver()
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     #team_llm = get_llm(cfg.TEAM_GPT_MODEL, temperature=1)
     team_llm = get_llm(model = cfg.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     

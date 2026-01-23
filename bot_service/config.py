@@ -24,6 +24,11 @@ class Settings(BaseSettings):
         default="mysql+aiomysql://user:password@localhost:3306/bot_platform",
         description="SQLAlchemy compatible database URL.",
     )
+    checkpointer_db_url: str = Field(
+        default="data/checkpoints.sqlite",
+        description="SQLite path or sqlite:// URL for LangGraph checkpointer.",
+    )
+
     sql_echo: bool = Field(default=False, description="Enable SQL echo for debugging.")
     default_model_provider: Literal["openai", "yandex", "mistral", "gigachat"] = Field(
         default="openai", description="Default provider for agents when not specified explicitly."

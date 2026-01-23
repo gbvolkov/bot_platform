@@ -520,6 +520,7 @@ def _route_after_check_person_info_after_extraction(state: IsmartTutorAgentState
 def initialize_agent(
     provider: ModelType = ModelType.GPT_PERS,
     use_platform_store: bool = False,
+    checkpoint_saver=None,
 ):
     log_name = f"ismart_tutor_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
@@ -536,7 +537,7 @@ def initialize_agent(
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Langfuse initialisation failed: %s", exc)
 
-    memory = None if use_platform_store else MemorySaver()
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     hint_llm = get_llm(model="base", provider=provider.value, temperature=0.3)
     extract_llm = get_llm(model="mini", provider=provider.value, temperature=0.0)
 

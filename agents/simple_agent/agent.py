@@ -170,6 +170,7 @@ def initialize_agent(
     provider: ModelType = ModelType.GPT,
     use_platform_store: bool = False,
     locale: str = "en",
+    checkpoint_saver=None,
 ):
     #set_locale(locale)
     #set_models_locale(locale)
@@ -185,7 +186,7 @@ def initialize_agent(
         lf_handler = CallbackHandler()
         callback_handlers += [lf_handler]
 
-    memory = None if use_platform_store else MemorySaver()
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     llm = get_llm(model="base", provider=provider.value, temperature=0.4)
     
     builder = StateGraph(SimpleAgentState)
