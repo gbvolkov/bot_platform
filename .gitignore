@@ -18,4 +18,3 @@ docs
 uv.lock
 *.db-shm
 *.db-wal
-load.json
