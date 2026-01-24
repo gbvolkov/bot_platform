@@ -1,0 +1,330 @@
+{
+  "agents": [
+    {
+      "id": "find_job",
+      "name": "Job Finder",
+      "description": "Подыскивает вакансии на основе резюме пользователя.",
+      "module": "agents.find_job_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [
+        "text_files",
+        "mds",
+        "docx_documents",
+        "pdfs"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "service_desk",
+      "name": "Service Desk Assistant",
+      "description": "Отвечает на вопросы сотрудников и консультирует по внутренним процессам.",
+      "module": "agents.sd_ass_agent.agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "ai_bi",
+      "name": "BI analyst",
+      "description": "Отвечает на вопросы по датасету и строит графики.",
+      "module": "agents.bi_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "theodor_agent",
+      "name": "Theodor AI (Product Mentor)",
+      "description": "Продуктовый наставник. Ведет по методологии Фёдора (13 артефактов).",
+      "module": "agents.theodor_agent.agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "ideator",
+      "name": "Ideator (Новости → идеи)",
+      "description": "Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+      "module": "agents.ideator_agent",
+      "is_active": true,
+      "allow_raw_attachments": true,
+      "supported_content_types": [
+        "jsons"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "ideator_old",
+      "name": "Ideator (Новости → идеи). Old version",
+      "description": "Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+      "module": "agents.ideator_old_agent",
+      "is_active": false,
+      "allow_raw_attachments": true,
+      "supported_content_types": [
+        "jsons"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "ismart_tutor_agent",
+      "name": "iSmart Tutor",
+      "description": "Educational tutor that provides concise hints and clarifying questions (without giving full solutions).",
+      "module": "agents.ismart_tutor_agent",
+      "is_active": true,
+      "allow_raw_attachments": true,
+      "supported_content_types": [
+        "images"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "simple_agent",
+      "name": "Simple Agent",
+      "description": "General-purpose assistant with optional system prompt setup.",
+      "module": "agents.simple_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "simple_agent_en",
+      "name": "Simple Agent (english version",
+      "description": "General-purpose assistant with optional system prompt setup.",
+      "module": "agents.simple_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "en",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      }
+    },
+    {
+      "id": "product_Car",
+      "name": "Car",
+      "description": "Assistant of Ingosstrakh Product 'Car'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Car"
+      }
+    },
+    {
+      "id": "product_Household",
+      "name": "Household",
+      "description": "Assistant of Ingosstrakh Product 'Household'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Household"
+      }
+    },
+    {
+      "id": "product_Personal",
+      "name": "Personal",
+      "description": "Assistant of Ingosstrakh Product 'Personal'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Personal"
+      }
+    },
+    {
+      "id": "product_Tick Bite",
+      "name": "Tick Bite",
+      "description": "Assistant of Ingosstrakh Product 'Tick Bite'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Tick Bite"
+      }
+    },
+    {
+      "id": "product_Инголаб",
+      "name": "Инголаб",
+      "description": "Assistant of Ingosstrakh Product 'Инголаб'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Инголаб"
+      }
+    },
+    {
+      "id": "product_Инголаб ПДФ",
+      "name": "Инголаб ПДФ",
+      "description": "Assistant of Ingosstrakh Product 'Инголаб ПДФ'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Инголаб ПДФ"
+      }
+    },
+    {
+      "id": "product_Инголаб ППТХ",
+      "name": "Инголаб ППТХ",
+      "description": "Assistant of Ingosstrakh Product 'Инголаб ППТХ'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Инголаб ППТХ"
+      }
+    },
+    {
+      "id": "product_Овертайм",
+      "name": "Овертайм",
+      "description": "Assistant of Ingosstrakh Product 'Овертайм'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Овертайм"
+      }
+    },
+    {
+      "id": "product_Юридическая помощь",
+      "name": "Юридическая помощь",
+      "description": "Assistant of Ingosstrakh Product 'Юридическая помощь'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default",
+        "product": "Юридическая помощь"
+      }
+    }
+  ]
+}

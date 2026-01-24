@@ -50,6 +50,10 @@ class Settings(BaseSettings):
         description="Directory for persisting raw attachments when pass-through to agents is enabled.",
     )
     api_base_path: str = Field(default="/api")
+    agent_config_path: str = Field(
+        default="bot_service/load.json",
+        description="Path to JSON/YAML agent registry configuration.",
+    )
 
 
 @lru_cache
