@@ -581,6 +581,7 @@ async def create_chat_completion(
         text=prompt,
         raw_user_text=raw_user_text or None,
         attachments=latest_attachments or None,
+        stream=bool(request.stream),
     )
     await task_queue.enqueue(payload)
     logger.debug(

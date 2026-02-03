@@ -16,10 +16,12 @@ from langchain.agents.structured_output import (
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks import BaseCallbackHandler
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.config import get_stream_writer
 
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
@@ -56,6 +58,40 @@ PRECOMPUTED_SENSE_LINES_NOTE = (
     "Return them unchanged unless the user explicitly asks to regenerate or edit them. "
     "If the user requests regeneration, set decision.regen_lines = true and keep the current sense_lines.\n"
 )
+
+
+def _safe_stream_writer():
+    """Return a writer suitable for `stream_mode="custom"`; otherwise no-op."""
+    try:
+        return get_stream_writer()
+    except Exception:
+        return lambda *_args, **_kwargs: None
+
+
+class StreamWriterCallbackHandler(BaseCallbackHandler):
+    """Forward LangChain callbacks (tool/chain lifecycle) into LangGraph custom stream."""
+
+    def on_tool_start(self, serialized, input_str=None, **kwargs):
+        writer = _safe_stream_writer()
+        name = (serialized or {}).get("name") or (serialized or {}).get("id") or "tool"
+        writer({"type": "tool_start", "name": name})
+
+    def on_tool_end(self, output=None, **kwargs):
+        writer = _safe_stream_writer()
+        writer({"type": "tool_end"})
+
+    def on_tool_error(self, error, **kwargs):
+        writer = _safe_stream_writer()
+        writer({"type": "tool_error", "error": str(error)})
+
+    def on_chain_start(self, serialized, inputs, **kwargs):
+        writer = _safe_stream_writer()
+        name = (serialized or {}).get("name") or "chain"
+        writer({"type": "chain_start", "name": name})
+
+    def on_chain_end(self, outputs, **kwargs):
+        writer = _safe_stream_writer()
+        writer({"type": "chain_end"})
 
 class ArticleRef(TypedDict):
     id: Annotated[int, "Id from the provided list"]
@@ -428,46 +464,64 @@ def create_init_node():
     return init_node
 
 
-def create_sense_lines_node(model: BaseChatModel):
-    agent = _build_sense_agent(model)
-
-    def sense_lines_node(
+def create_sense_lines_prepare_node():
+    def sense_lines_prepare_node(
         state: IdeatorAgentState,
         config: RunnableConfig,
         runtime: Runtime[IdeatorAgentContext],
     ) -> IdeatorAgentState:
-        LOG.info("sense_lines_node: start, messages=%d", len(state.get("messages", [])))
-
-        #report_obj: IdeatorReport | str = state.get("report")  # type: ignore
-
-        report: IdeatorReport | str= state.get("report")  # type: ignore
+        report: IdeatorReport | str = state.get("report")  # type: ignore
         use_report = isinstance(report, IdeatorReport)
-
-        precomputed_lines: Optional[List[Dict[str, Any]]] = None
-        result: IdeatorAgentState = IdeatorAgentState()
         if use_report and (state.get("force_regen_lines") or not state.get("sense_lines")):
             precomputed_lines = build_sense_lines_from_report(report, locale=_CURRENT_LOCALE)
             if precomputed_lines:
-                state["sense_lines"] = precomputed_lines
-        else:
-            result = agent.invoke(state, config=config, context=runtime.context)
+                return {
+                    "sense_lines": precomputed_lines,
+                    "sense_lines_precomputed": True,
+                    "skip_sense_llm": True,
+                }
+        return {"sense_lines_precomputed": False, "skip_sense_llm": False}
 
-        structured = result.get("structured_response") or {}
-        sense_lines: List[Dict[str, Any]] = precomputed_lines or structured.get("sense_lines") or state.get("sense_lines") or []
+    return sense_lines_prepare_node
+
+
+def route_sense_lines(state: IdeatorAgentState) -> str:
+    return "sense_lines_post" if state.get("skip_sense_llm") else "sense_lines_llm"
+
+
+def create_sense_lines_llm_node(model: BaseChatModel):
+    return _build_sense_agent(model)
+
+
+def create_sense_lines_post_node():
+    def sense_lines_post_node(
+        state: IdeatorAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[IdeatorAgentContext],
+    ) -> IdeatorAgentState:
+        LOG.info("sense_lines_post_node: start, messages=%d", len(state.get("messages", [])))
+
+        report: IdeatorReport | str = state.get("report")  # type: ignore
+        use_report = isinstance(report, IdeatorReport)
+        structured = state.get("structured_response") or {}
+        sense_lines: List[Dict[str, Any]] = structured.get("sense_lines") or state.get("sense_lines") or []
         assistant_message: str = structured.get("assistant_message") or ""
         decision: Decision = structured.get("decision") or {}
+        precomputed = bool(state.get("sense_lines_precomputed"))
+
+        result: IdeatorAgentState = IdeatorAgentState()
         result["sense_lines"] = sense_lines
         result["force_regen_lines"] = False
-        result["phase"] = result.get("phase") or "lines"
-        result.pop("structured_response", None)
-        LOG.info("sense_lines_node: generated %d lines", len(sense_lines))
-
+        result["phase"] = state.get("phase") or "lines"
+        result["skip_sense_llm"] = False
+        result["sense_lines_precomputed"] = False
+        result["structured_response"] = None
+        LOG.info("sense_lines_post_node: generated %d lines", len(sense_lines))
 
         content = ""
         if assistant_message:
-            #content = prettify(assistant_message)
             content = assistant_message
-        if sense_lines and (not assistant_message or precomputed_lines is not None):
+        if sense_lines and (not assistant_message or precomputed):
             formatted_lines = []
             for idx, line in enumerate(sense_lines, start=1):
                 articles = _extract_articles(line, report) if use_report else []
@@ -482,13 +536,12 @@ def create_sense_lines_node(model: BaseChatModel):
                     + "\n".join(extras)
                 )
             fallback = f"{_AGENT_TEXT['sense_lines_label']}\n" + "\n\n".join(formatted_lines)
-            #content = prettify(fallback)
             if content:
                 content += "\n" + fallback
             else:
                 content = fallback
 
-        result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
+        result["messages"] = state.get("messages", []) + [AIMessage(content=content)]
 
         if decision.get("regen_lines"):
             result["force_regen_lines"] = True
@@ -519,36 +572,38 @@ def create_sense_lines_node(model: BaseChatModel):
             result["phase"] = "finish"
         return result
 
-    return sense_lines_node
+    return sense_lines_post_node
 
 
-def create_ideas_node(model: BaseChatModel):
-    agent = _build_ideas_agent(model)
+def create_ideas_llm_node(model: BaseChatModel):
+    return _build_ideas_agent(model)
 
-    def ideas_node(
+
+def create_ideas_post_node():
+    def ideas_post_node(
         state: IdeatorAgentState,
         config: RunnableConfig,
         runtime: Runtime[IdeatorAgentContext],
     ) -> IdeatorAgentState:
         LOG.info(
-            "ideas_node: start, selected_line=%s, filtered_ids=%s",
+            "ideas_post_node: start, selected_line=%s, filtered_ids=%s",
             state.get("selected_line_id"),
             state.get("filtered_article_ids"),
         )
-        result: IdeatorAgentState = agent.invoke(state, config=config, context=runtime.context)
-        structured = result.get("structured_response") or {}
+        structured = state.get("structured_response") or {}
         ideas = structured.get("ideas") or state.get("ideas") or []
         assistant_message: str = structured.get("assistant_message") or ""
         decision: Decision = structured.get("decision") or {}
+
+        result: IdeatorAgentState = IdeatorAgentState()
         result["ideas"] = ideas
         result["force_regen"] = False
         result["phase"] = "ideas"
-        result.pop("structured_response", None)
-        LOG.info("ideas_node: generated %d ideas", len(ideas))
+        result["structured_response"] = None
+        LOG.info("ideas_post_node: generated %d ideas", len(ideas))
 
         content = ""
         if assistant_message:
-            #content = prettify(assistant_message)
             content = assistant_message
         elif ideas:
             report: IdeatorReport | str = state.get("report")  # type: ignore
@@ -568,10 +623,9 @@ def create_ideas_node(model: BaseChatModel):
                 fallback = f"{_AGENT_TEXT['ideas_label']}\n" + "\n\n".join(formatted)
             else:
                 fallback = _AGENT_TEXT["ideas_generation_failed"]
-            #content = prettify(fallback)
             content += "\n" + fallback
 
-        result["messages"] = result.get("messages", []) + [AIMessage(content=content)]
+        result["messages"] = state.get("messages", []) + [AIMessage(content=content)]
 
         if decision.get("more_ideas"):
             result["force_regen"] = True
@@ -584,7 +638,7 @@ def create_ideas_node(model: BaseChatModel):
             result["phase"] = "finish"
         return result
 
-    return ideas_node
+    return ideas_post_node
 
 
 
@@ -621,7 +675,7 @@ def initialize_agent(
     set_models_locale(locale)
     log_name = f"ideator_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
-    callback_handlers = [json_handler]
+    callback_handlers = [StreamWriterCallbackHandler(), json_handler]
     if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
         langfuse = Langfuse(
             public_key=config.LANGFUSE_PUBLIC,
@@ -632,27 +686,40 @@ def initialize_agent(
         callback_handlers += [lf_handler]
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model="base", provider=provider.value, temperature=0.4)
+    llm = get_llm(model="base", provider=provider.value, temperature=0.4, streaming=True)
     #llm = get_llm(model="base", provider="openai_4", temperature=0.4)
 
     builder = StateGraph(IdeatorAgentState)
     builder.add_node("init", create_init_node())
-    builder.add_node("sense_lines", create_sense_lines_node(llm))
-    builder.add_node("ideas", create_ideas_node(llm))
+    builder.add_node("sense_lines_prepare", create_sense_lines_prepare_node())
+    builder.add_node("sense_lines_llm", create_sense_lines_llm_node(llm))
+    builder.add_node("sense_lines_post", create_sense_lines_post_node())
+    builder.add_node("ideas_llm", create_ideas_llm_node(llm))
+    builder.add_node("ideas_post", create_ideas_post_node())
 
     builder.add_conditional_edges(
         START,
         route,
         {
             "init": "init",
-            "sense_lines": "sense_lines",
-            "ideas": "ideas",
+            "sense_lines": "sense_lines_prepare",
+            "ideas": "ideas_llm",
             "await": END,
         },
     )
     builder.add_edge("init", END)
-    builder.add_edge("sense_lines", END)
-    builder.add_edge("ideas", END)
+    builder.add_conditional_edges(
+        "sense_lines_prepare",
+        route_sense_lines,
+        {
+            "sense_lines_llm": "sense_lines_llm",
+            "sense_lines_post": "sense_lines_post",
+        },
+    )
+    builder.add_edge("sense_lines_llm", "sense_lines_post")
+    builder.add_edge("sense_lines_post", END)
+    builder.add_edge("ideas_llm", "ideas_post")
+    builder.add_edge("ideas_post", END)
 
     graph = builder.compile(checkpointer=memory, debug=False).with_config({"callbacks": callback_handlers})
     return graph

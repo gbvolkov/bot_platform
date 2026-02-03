@@ -11,10 +11,12 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks import BaseCallbackHandler
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from langgraph.runtime import Runtime
+from langgraph.config import get_stream_writer
 
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
@@ -47,6 +49,40 @@ from .store_artifacts import store_artifacts
 
 _CONFIRMED_BANNER_BORDER = "────────────────────────────────"
 _PROGRESS_BANNER_BORDER = "════════════════════════════════"
+
+
+def _safe_stream_writer():
+    """Return a writer suitable for `stream_mode="custom"`; otherwise no-op."""
+    try:
+        return get_stream_writer()
+    except Exception:
+        return lambda *_args, **_kwargs: None
+
+
+class StreamWriterCallbackHandler(BaseCallbackHandler):
+    """Forward LangChain callbacks (tool/chain lifecycle) into LangGraph custom stream."""
+
+    def on_tool_start(self, serialized, input_str=None, **kwargs):
+        writer = _safe_stream_writer()
+        name = (serialized or {}).get("name") or (serialized or {}).get("id") or "tool"
+        writer({"type": "tool_start", "name": name})
+
+    def on_tool_end(self, output=None, **kwargs):
+        writer = _safe_stream_writer()
+        writer({"type": "tool_end"})
+
+    def on_tool_error(self, error, **kwargs):
+        writer = _safe_stream_writer()
+        writer({"type": "tool_error", "error": str(error)})
+
+    def on_chain_start(self, serialized, inputs, **kwargs):
+        writer = _safe_stream_writer()
+        name = (serialized or {}).get("name") or "chain"
+        writer({"type": "chain_start", "name": name})
+
+    def on_chain_end(self, outputs, **kwargs):
+        writer = _safe_stream_writer()
+        writer({"type": "chain_end"})
 
 
 def _format_confirmed_banner(
@@ -259,7 +295,7 @@ def initialize_agent(
     locale_key = set_global_locale(locale)
     log_name = f"theo_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
-    callback_handlers = [json_handler]
+    callback_handlers = [StreamWriterCallbackHandler(), json_handler]
     if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
         langfuse = Langfuse(
             public_key=config.LANGFUSE_PUBLIC,

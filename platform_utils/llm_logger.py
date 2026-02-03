@@ -5,6 +5,7 @@ import json, time
 class JSONFileTracer(BaseCallbackHandler):
     def __init__(self, path="traces.jsonl"):
         self.f = open(path, "a", encoding="utf-8")
+        self._token_count = 0
     def on_llm_start(self, serialized, prompts, **kwargs):
         self.f.write(json.dumps({"ts": time.time(), "type":"llm_start",
                                  "model": serialized, "prompt": prompts}, ensure_ascii=False) + "\n")
@@ -12,6 +13,12 @@ class JSONFileTracer(BaseCallbackHandler):
         # response.generations contains the LLM outputs
         self.f.write(json.dumps({"ts": time.time(), "type":"llm_end",
                                  "response": [g.text for g in response.generations[0]]}, ensure_ascii=False) + "\n")
+        self.f.flush()
+    def on_llm_new_token(self, token: str, **kwargs):
+        self._token_count += 1
+        self.f.write(json.dumps({"ts": time.time(), "type":"llm_token",
+                                 "idx": self._token_count,
+                                 "token": token}, ensure_ascii=False) + "\n")
         self.f.flush()
     def on_tool_start(self, serialized, input_str, **kwargs):
         self.f.write(json.dumps({"ts": time.time(), "type":"tool_start",

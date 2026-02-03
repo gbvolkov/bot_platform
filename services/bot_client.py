@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+import json
+import logging
+from typing import Any, Dict, Optional, Sequence, AsyncIterator
 
 import httpx
-import logging
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,35 @@ def _redact_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             ]
         redacted["payload"] = msg_copy
     return redacted
+
+
+def _build_headers(user_id: str, user_role: Optional[str]) -> Dict[str, str]:
+    headers = {"X-User-Id": user_id}
+    if user_role:
+        headers["X-User-Role"] = user_role
+    return headers
+
+
+def _build_message_payload(
+    *,
+    text: str,
+    raw_user_text: Optional[str],
+    metadata: Optional[Dict[str, Any]],
+    attachments: Optional[Sequence[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    payload_metadata: Dict[str, Any] = metadata.copy() if isinstance(metadata, dict) else {}
+    if raw_user_text and "raw_user_text" not in payload_metadata:
+        payload_metadata["raw_user_text"] = raw_user_text
+    payload = {
+        "payload": {
+            "type": "text",
+            "text": text,
+            "metadata": payload_metadata,
+        }
+    }
+    if attachments:
+        payload["payload"]["attachments"] = list(attachments)
+    return payload
 
 
 class BotServiceClient:
@@ -110,21 +140,13 @@ class BotServiceClient:
         metadata: Optional[Dict[str, Any]] = None,
         attachments: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        payload_metadata: Dict[str, Any] = metadata.copy() if isinstance(metadata, dict) else {}
-        if raw_user_text and "raw_user_text" not in payload_metadata:
-            payload_metadata["raw_user_text"] = raw_user_text
-        payload = {
-            "payload": {
-                "type": "text",
-                "text": text,
-                "metadata": payload_metadata,
-            }
-        }
-        if attachments:
-            payload["payload"]["attachments"] = list(attachments)
-        headers = {"X-User-Id": user_id}
-        if user_role:
-            headers["X-User-Role"] = user_role
+        payload = _build_message_payload(
+            text=text,
+            raw_user_text=raw_user_text,
+            metadata=metadata,
+            attachments=attachments,
+        )
+        headers = _build_headers(user_id, user_role)
         logger.info(
             "POST /conversations/%s/messages payload=%s headers=%s",
             conversation_id,
@@ -148,6 +170,68 @@ class BotServiceClient:
             )
             raise
         return response.json()
+
+    async def send_message_stream(
+        self,
+        conversation_id: str,
+        user_id: str,
+        text: str,
+        raw_user_text: Optional[str] = None,
+        user_role: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        attachments: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        payload = _build_message_payload(
+            text=text,
+            raw_user_text=raw_user_text,
+            metadata=metadata,
+            attachments=attachments,
+        )
+        headers = _build_headers(user_id, user_role)
+        logger.info(
+            "POST /conversations/%s/messages stream payload=%s headers=%s",
+            conversation_id,
+            _redact_payload(payload),
+            {"X-User-Id": headers["X-User-Id"], "X-User-Role": headers.get("X-User-Role")},
+        )
+
+        async with self._client.stream(
+            "POST",
+            f"/conversations/{conversation_id}/messages",
+            json=payload,
+            headers=headers,
+            params={"stream": "true"},
+        ) as response:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "POST /conversations/%s/messages stream failed status=%s body=%s",
+                    conversation_id,
+                    exc.response.status_code if exc.response else None,
+                    exc.response.text if exc.response else None,
+                )
+                raise
+
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data:
+                    continue
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    logger.warning("Invalid SSE payload: %s", data)
+                    continue
+                if isinstance(event, dict):
+                    yield event
 
     async def get_conversation(
         self,

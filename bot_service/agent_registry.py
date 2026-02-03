@@ -33,6 +33,8 @@ class AgentDefinition:
     default_provider: ModelType
     supported_content_types: Tuple[ContentType, ...]
     allow_raw_attachments: bool = False
+    stream_modes: Tuple[str, ...] = ("messages", "values")
+    stream_subgraphs: bool = False
     is_active: bool = True
     init_params: Dict[str, Any] = field(default_factory=dict)
     checkpoint_saver: Any = None
@@ -128,6 +130,25 @@ def _parse_supported_content_types(
     raise ValueError("Agent config field 'supported_content_types' must be a list.")
 
 
+def _parse_streaming_config(
+    value: Any,
+    default_modes: Tuple[str, ...],
+    default_subgraphs: bool,
+) -> tuple[Tuple[str, ...], bool]:
+    if value is None:
+        return default_modes, default_subgraphs
+    if not isinstance(value, dict):
+        raise ValueError("Agent config field 'streaming' must be a mapping.")
+    modes_value = value.get("modes")
+    modes = default_modes
+    if modes_value is not None:
+        if not isinstance(modes_value, (list, tuple)) or not modes_value:
+            raise ValueError("Agent config field 'streaming.modes' must be a non-empty list.")
+        modes = tuple(_require_str(item, "streaming.modes[]") for item in modes_value)
+    subgraphs = _coerce_bool(value.get("subgraphs"), "streaming.subgraphs", default_subgraphs)
+    return modes, subgraphs
+
+
 def _import_initialize_agent(module_path: str) -> Callable[..., Any]:
     module = importlib.import_module(module_path)
     init_fn = getattr(module, "initialize_agent", None)
@@ -174,6 +195,11 @@ def _build_definitions_from_config(
             "allow_raw_attachments",
             False,
         )
+        stream_modes, stream_subgraphs = _parse_streaming_config(
+            entry.get("streaming"),
+            ("messages", "values"),
+            False,
+        )
         is_active = _coerce_bool(entry.get("is_active"), "is_active", True)
         params = entry.get("params") or {}
         if not isinstance(params, dict):
@@ -191,6 +217,8 @@ def _build_definitions_from_config(
             default_provider=provider,
             supported_content_types=supported_content_types,
             allow_raw_attachments=allow_raw_attachments,
+            stream_modes=stream_modes,
+            stream_subgraphs=stream_subgraphs,
             is_active=is_active,
             init_params=params,
             checkpoint_saver=checkpoint_saver,
@@ -393,6 +421,14 @@ class AgentRegistry:
         if agent_id not in self._definitions:
             raise KeyError(f"Unknown agent '{agent_id}'")
         return self._definitions[agent_id].allow_raw_attachments
+
+    def stream_config(self, agent_id: str | None) -> tuple[List[str], bool]:
+        if not agent_id:
+            return ["messages", "values"], False
+        definition = self._definitions.get(agent_id)
+        if definition is None:
+            return ["messages", "values"], False
+        return list(definition.stream_modes), definition.stream_subgraphs
 
     def preload_all(self) -> None:
         for agent_id in self._definitions:

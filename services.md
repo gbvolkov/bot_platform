@@ -185,20 +185,38 @@
 #### POST /v1/chat/completions
 - **Назначение:** запустить диалог или продолжить существующий, с возможностью стрима.
 - **Headers:** обычные HTTP, авторизаций нет (предполагается фронт доверенной зоны).
-- **Тело запроса (ChatCompletionRequest):**
+- **Тело запроса (ChatCompletionRequest, точная схема):**
   ```json
   {
     "model": "theodor_agent",
     "messages": [
       { "role": "system", "content": "..." },
-      { "role": "user", "content": "Привет", "attachments": [ { "filename": "...", "content_type": "...", "data": "<base64>", "text": null } ] }
+      { "role": "user", "content": "Hello", "attachments": [ { "filename": "...", "content_type": "...", "data": "<base64>", "text": null } ] }
     ],
     "user": "external-user-123",
     "conversation_id": "optional-existing-id",
     "stream": true
   }
   ```
-  - Валидаторы собирают текст из массива частей, переносят вложения с `type=input_*` в `attachments`.
+  - Поля:
+    - `model` (string, required) — ID агента.
+    - `messages` (array, required) — список сообщений.
+    - `user` (string, optional) — внешний user id (по умолчанию `OPENAI_PROXY_DEFAULT_USER_ID`).
+    - `conversation_id` (string, optional) — если указан, продолжает существующий разговор.
+    - `stream` (bool, optional, default false) — если true, ответ в SSE.
+  - `messages[*]` (ChatMessage):
+    - `role` (enum: `"system" | "user" | "assistant"`) — роль.
+    - `content` (any) — обычно string. Допустим массив частей (например, OpenAI-style content parts); прокси соберёт текст из `type="text"` частей.
+    - `attachments` (array, optional) — если заданы, будут переданы в bot_service.
+  - `attachments[*]` (AttachmentInput):
+    - `filename` (string, required)
+    - `content_type` (string, optional)
+    - `url` (string, optional) — ссылка или data: URL
+    - `data` (string, optional) — base64 содержимое
+    - `text` (string, optional) — заранее извлечённый текст
+  - Авто-нормализация: если `content` — список частей, прокси:
+    - объединяет все `type="text"` части в итоговый `content`;
+    - извлекает вложения из `type="image_url"`, `type="input_image"` и других `type="input_*"` частей в `attachments`.
 - **Последовательность внутри:**
   1) Определение `user_id` (`request.user` или `default_user_id`), `user_role` (`default_user_role`).
   2) Если `conversation_id` не передан: `POST /api/conversations/` с заголовками пользователя. При `202 pending` — опрос до 30 секунд `/api/conversations/{id}` до `status=active`, иначе 503 (detail + Retry-After: 1).
@@ -210,7 +228,7 @@
   8) Ветвление по `stream`:
      - **stream=true:** создаётся `StreamingResponse`, которая читает Pub/Sub события (`iter_events`) и транслирует в SSE чанки.
      - **stream=false:** `wait_for_completion` ждёт терминальное событие (`completed|failed|interrupt`) с таймаутом `TASK_QUEUE_COMPLETION_WAIT_TIMEOUT_SECONDS`.
-- **Формат SSE (stream=true):**
+- **Формат SSE (stream=true, точная схема):**
   - Каждое событие отдаётся как `data: <json>\n\n`.
   - Отображение событий Redis (`QueueEvent`) в SSE:
     - `status` → `chat.completion.chunk` с пустым `delta`, `agent_status` = stage.
@@ -218,6 +236,63 @@
     - `completed` → `finish_reason="stop"`, `agent_status="completed"`, `usage`, `message_metadata.attachments` если есть.
     - `interrupt` → `finish_reason="stop"`, `agent_status="interrupted"`, `message_metadata` (question/content/interrupt_id/artifact_*), `delta.content` содержит вопрос.
     - `failed` → `data: {"error":{...},"conversation_id":...,"job_id":...}`.
+  - Формат `chat.completion.chunk`:
+    ```json
+    {
+      "id": "job-<uuid>",
+      "object": "chat.completion.chunk",
+      "created": 1730000000,
+      "model": "agent_id",
+      "choices": [
+        {
+          "index": 0,
+          "delta": { "role": "assistant", "content": "partial text" },
+          "finish_reason": null
+        }
+      ],
+      "conversation_id": "conversation-id",
+      "agent_status": "streaming",
+      "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
+      "message_metadata": { "attachments": [] }
+    }
+    ```
+  - Стрим заканчивается строкой `data: [DONE]`.
+
+- **Ответ (stream=false, точная схема):**
+  ```json
+  {
+    "id": "chatcmpl-<uuid>",
+    "object": "chat.completion",
+    "created": 1730000000,
+    "model": "agent_id",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "final text",
+          "metadata": { "attachments": [] }
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
+    "conversation_id": "conversation-id"
+  }
+  ```
+
+##### Пример внешнего клиента (stream)
+
+```bash
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+        "model": "theodor_agent",
+        "messages": [{"role":"user","content":"Hello"}],
+        "stream": true
+      }'
+```
     - `heartbeat` → комментарий `: heartbeat <status>`.
   - После терминального события отправляется `data: [DONE]\n\n`.
 - **Формат ответа (stream=false):**

@@ -158,66 +158,6 @@ def _build_run_agent(model: BaseChatModel):
         context_schema=ArtifactCreatorAgentContext,
     )
     
-def _build_confirmation_agent(model: BaseChatModel):
-
-    @dynamic_prompt
-    def build_prompt(request: ModelRequest) -> str:
-        state: ConfirmationAgentState  = request.state
-        #response = state.get("last_user_answer")
-        prompt = (
-            "You have to analyze user's response.\n" 
-            "Determine if user confirmed the text or requested change."        
-            #f"User response is: {response}\n"
-        )
-        return prompt
-
-    return create_agent(
-        model=model,
-        middleware=[provider_then_tool],
-        system_prompt = "You have to analyze user's response.\nDetermine if user confirmed the text or requested change.",
-        response_format=UserChangeRequest,
-        state_schema=ConfirmationAgentState,
-    )
-
-def create_confirmation_node(model: BaseChatModel):
-    _confirmation_agent = _build_confirmation_agent(model)
-    def confirmation_node(
-        state: ArtifactCreatorAgentState, 
-        config: RunnableConfig, 
-        runtime: Runtime[ArtifactCreatorAgentContext],
-    ) -> ArtifactCreatorAgentState:
-        interrupt_payload = {
-            "type": "confirm",
-            "content": state["artifact"],
-            "question": "Подтвердите контекст или предложите изменения.",
-        }
-        user_response = interrupt(interrupt_payload)
-        message_update = [HumanMessage(content=str(user_response))]    
-        state["last_user_answer"] = user_response
-
-        confirmation_state = {
-            "messages": message_update,  # ensure no chat history is provided
-        }
-
-        result = _confirmation_agent.invoke(confirmation_state, config=config, context=runtime.context)
-        structured = result.get("structured_response") or {}
-        if structured.is_change_requested:
-            return Command(
-                goto="run",
-                update={
-                    "messages": message_update,
-                },
-            )
-        return Command(
-            update={
-                "messages": message_update,
-            },
-        )
-
-    return confirmation_node    
-
-
-    
 def create_run_node(model: BaseChatModel):
     _run_agent = _build_run_agent(model)
     def run_node(
@@ -230,11 +170,93 @@ def create_run_node(model: BaseChatModel):
         last_message = result_state["messages"][-1]
         if isinstance(last_message, AIMessage):
             result_state["artifact"] = _extract_text(last_message)
+            result_state["phase"] = "confirm"
 
         return result_state
 
     return run_node
 
+
+def _build_confirmation_agent(model: BaseChatModel):
+
+    @dynamic_prompt
+    def build_prompt(request: ModelRequest) -> str:
+        state: ConfirmationAgentState  = request.state
+        #response = state.get("last_user_answer")
+        prompt = (
+            "You have to analyze user's response to artifact.\n" 
+            "=======================================\n"
+            f"ARTIFACT TEXT:\n{state['artifact']}\n"
+            "END OF ARTIFACT TEXT\n"
+            "=======================================\n"
+            "Determine if user confirmed the text or requested change."        
+            #f"User response is: {response}\n"
+        )
+        return prompt
+
+
+    return create_agent(
+        model=model,
+        middleware=[build_prompt, provider_then_tool],
+        response_format=UserChangeRequest,
+        state_schema=ConfirmationAgentState,
+    )
+
+def create_confirmation_node(model: BaseChatModel):
+    _confirmation_agent = _build_confirmation_agent(model)
+    def confirmation_node(
+        state: ArtifactCreatorAgentState, 
+        config: RunnableConfig, 
+        runtime: Runtime[ArtifactCreatorAgentContext],
+    ) -> ArtifactCreatorAgentState:
+        #interrupt_payload = {
+        #    "type": "confirm",
+        #    "content": f"{state['artifact']}\n\nПодтвердите артефакт или предложите изменения.",
+        #    "question": "Подтвердите артефакт или предложите изменения.",
+        #}
+        #user_response = interrupt(interrupt_payload)
+        #message_update = [HumanMessage(content=str(user_response))]    
+        #state["last_user_answer"] = user_response
+
+        last_message = state["messages"][-1]
+        confirmation_state = {
+            "messages": [last_message],  # ensure no chat history is provided
+            "artifact": state["artifact"],
+        }
+
+        result = _confirmation_agent.invoke(confirmation_state, config=config, context=runtime.context)
+        structured = result.get("structured_response") or {}
+        state["is_artifact_confirmed"] = structured.is_artifact_confirmed
+        if not structured.is_artifact_confirmed:
+            state["messages"].append(AIMessage(content=f"Работа завершена.\nСогласованный текст артефакта:\n\n{state['artifact']}"))
+        return state
+
+    return confirmation_node
+
+
+def is_confirmed(
+    state: ArtifactCreatorAgentState, 
+) -> ArtifactCreatorAgentState:
+    if not state["is_artifact_confirmed"]:
+        return "run"
+    else:
+        state["messages"].append(AIMessage(content=f"Работа завершена.\nСогласованный текст артефакта:\n\n{state['artifact']}"))
+        return "ready"
+
+
+def ready_node(
+        state: ArtifactCreatorAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[ArtifactCreatorAgentContext],
+    ) -> ArtifactCreatorAgentState:
+    message_update = [AIMessage(content=f"Согласованный текст артефакта:\n\n{state['artifact']}")]    
+    return Command(
+        update={
+            "messages": message_update,
+            "phase": "ready",
+        },
+    )
+    
 
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
@@ -265,10 +287,8 @@ def initialize_agent(
     builder.add_node("set_prompt", create_set_prompt_node(llm))
     builder.add_node("cleanup", cleanup_messages_node)
     builder.add_node("run", create_run_node(llm))
-    try:
-        builder.add_node("confirm", create_confirmation_node(response_analyser_llm))
-    except Exception as e:
-        print(e)
+    builder.add_node("confirm", create_confirmation_node(response_analyser_llm))
+    builder.add_node("ready", ready_node)
 
     builder.add_conditional_edges(
         START,
@@ -277,14 +297,25 @@ def initialize_agent(
             "greetings": "greetings",
             "set_prompt": "set_prompt",
             "cleanup": "cleanup",
-            "run": "run"
+            "run": "run",
+            "confirm": "confirm",
+            "ready": "ready"
         },
     )
+
     builder.add_edge("greetings", END)
     builder.add_edge("set_prompt", END)
     builder.add_edge("cleanup", "run")
-    builder.add_edge("run", "confirm")
-    builder.add_edge("confirm", END)
+    builder.add_conditional_edges(
+        "confirm",
+        is_confirmed,
+        {
+            "run": "run",
+            "ready": "ready"
+        },
+    )
+    builder.add_edge("run", END)
+    builder.add_edge("ready", END)
 
     graph = builder.compile(checkpointer=memory, debug=False).with_config({"callbacks": callback_handlers})
     return graph

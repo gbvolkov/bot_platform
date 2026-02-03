@@ -156,6 +156,7 @@ Example request:
 ```bash
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
   -d '{
         "model": "find_job",
         "messages": [
@@ -166,6 +167,48 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 You will receive Server-Sent Events with status pulses, partial deltas, and a final `[DONE]` marker.
+
+#### Streaming From External Clients
+
+The proxy is OpenAI-compatible, so any HTTP client that can read SSE can stream tokens.
+Each SSE line is `data: <json>`, where `<json>` is a `chat.completion.chunk` payload.
+The stream ends with `data: [DONE]`.
+
+Python (httpx) example:
+
+```python
+import json
+import httpx
+
+payload = {
+    "model": "find_job",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": True,
+}
+
+with httpx.stream(
+    "POST",
+    "http://localhost:8080/v1/chat/completions",
+    json=payload,
+    headers={"Accept": "text/event-stream"},
+) as response:
+    response.raise_for_status()
+    for line in response.iter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        delta = chunk["choices"][0]["delta"].get("content", "")
+        if delta:
+            print(delta, end="", flush=True)
+```
+
+#### Request/Response Schema Reference
+
+For the exact OpenAI-proxy request and response schema (including SSE chunk shape),
+see the "openai_proxy" section in `services.md`.
 
 ### 4.4 Optional Web Chat Frontend
 

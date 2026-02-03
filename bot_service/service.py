@@ -1,17 +1,25 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, Iterable, List, Optional
+import asyncio
 import logging
+import threading
+import uuid
+from typing import Any, Dict, Iterable, List, Optional, AsyncIterator
 
 from fastapi.concurrency import run_in_threadpool
-import uuid
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langgraph.types import Command
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    message_chunk_to_message,
+)
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
 
 from agents.state.state import ConfigSchema
 
+from .agent_registry import agent_registry
 from .config import settings
 from .schemas import MessagePayload
 
@@ -239,6 +247,203 @@ async def invoke_agent(
         "agent_status": "completed",
         "interrupt_payload": None,
     }
+
+
+def _extract_stream_delta(message: BaseMessage) -> str:
+    return _extract_text(message)
+
+
+def _sanitize_chunk(message: AIMessageChunk) -> AIMessageChunk:
+    updates: Dict[str, Any] = {}
+    response_metadata = message.response_metadata
+    if response_metadata and "created_at" in response_metadata:
+        cleaned = dict(response_metadata)
+        cleaned.pop("created_at", None)
+        updates["response_metadata"] = cleaned
+    additional_kwargs = message.additional_kwargs
+    if additional_kwargs and "parsed" in additional_kwargs:
+        cleaned_kwargs = dict(additional_kwargs)
+        cleaned_kwargs.pop("parsed", None)
+        updates["additional_kwargs"] = cleaned_kwargs
+    if updates:
+        return message.model_copy(update=updates)
+    return message
+
+
+def _build_agent_result_from_state(
+    *,
+    state: Dict[str, Any] | None,
+    human: HumanMessage,
+) -> Dict[str, Any]:
+    snapshot = state if isinstance(state, dict) else {}
+    if "__interrupt__" in snapshot:
+        interrupts = snapshot.get("__interrupt__") or []
+        if interrupts:
+            latest = interrupts[-1]
+            interrupt_payload = getattr(latest, "value", latest)
+        else:
+            interrupt_payload = {}
+        if isinstance(interrupt_payload, dict) and "interrupt_id" not in interrupt_payload:
+            interrupt_payload = {**interrupt_payload, "interrupt_id": f"int-{uuid.uuid4().hex}"}
+        question = ""
+        if isinstance(interrupt_payload, dict):
+            question = interrupt_payload.get("question") or interrupt_payload.get("content") or ""
+        ai_message = AIMessage(content=question)
+        return {
+            "human": human,
+            "ai": ai_message,
+            "raw_result": snapshot,
+            "agent_status": "interrupted",
+            "interrupt_payload": interrupt_payload,
+        }
+
+    messages = snapshot.get("messages") or []
+    ai_message: Optional[AIMessage] = None
+    if isinstance(messages, Iterable):
+        for msg in reversed(list(messages)):
+            if isinstance(msg, AIMessage):
+                ai_message = msg
+                break
+    if ai_message is None:
+        ai_message = AIMessage(content="")
+
+    return {
+        "human": human,
+        "ai": ai_message,
+        "raw_result": snapshot,
+        "agent_status": "completed",
+        "interrupt_payload": None,
+    }
+
+
+async def invoke_agent_stream(
+    agent: Any,
+    payload: MessagePayload,
+    conversation_id: str,
+    agent_id: Optional[str],
+    user_id: str,
+    user_role: Optional[str],
+    pending_interrupt: Optional[Dict[str, Any]] = None,
+) -> tuple[AsyncIterator[Dict[str, Any]], asyncio.Future]:
+    raw_user_text = None
+    raw_attachments: List[Dict[str, Any]] = []
+    if isinstance(payload.metadata, dict):
+        raw_user_text = payload.metadata.get("raw_user_text")
+        raw_attachments_value = payload.metadata.get("raw_attachments")
+        if isinstance(raw_attachments_value, list):
+            raw_attachments = [item for item in raw_attachments_value if isinstance(item, dict)]
+    human = build_human_message(payload, raw_text_override=raw_user_text if pending_interrupt else None)
+    config = build_agent_config(
+        conversation_id,
+        user_id,
+        user_role,
+        raw_attachments=raw_attachments or None,
+    )
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
+    result_future: asyncio.Future = loop.create_future()
+
+    def _set_result(value: Dict[str, Any]) -> None:
+        if not result_future.done():
+            result_future.set_result(value)
+
+    def _set_exception(error: BaseException) -> None:
+        if not result_future.done():
+            result_future.set_exception(error)
+
+    def _enqueue(item: Dict[str, Any] | None) -> None:
+        queue.put_nowait(item)
+
+    def _run() -> None:
+        last_state: Dict[str, Any] | None = None
+        saw_delta = False
+        stream_modes, subgraph_stream = agent_registry.stream_config(agent_id)
+        merged_chunk: AIMessageChunk | None = None
+        last_ai_message: AIMessage | None = None
+        try:
+            if pending_interrupt:
+                logging.info(
+                    "invoke_agent_stream resume conversation_id=%s interrupt_id=%s raw_user_text_chars=%d",
+                    conversation_id,
+                    pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
+                    len(raw_user_text or payload.text or ""),
+                )
+                stream = agent.stream(
+                    Command(resume=raw_user_text or payload.text or ""),
+                    config=config,
+                    stream_mode=stream_modes,
+                    subgraphs=subgraph_stream,
+                )
+            else:
+                initial_state: Dict[str, Any] = {"messages": [human]}
+                if raw_attachments:
+                    initial_state["attachments"] = raw_attachments
+                stream = agent.stream(
+                    initial_state,
+                    config=config,
+                    stream_mode=stream_modes,
+                    subgraphs=subgraph_stream,
+                )
+
+            for item in stream:
+                if not isinstance(item, tuple):
+                    continue
+                if len(item) == 2:
+                    mode, payload_item = item
+                elif len(item) == 3:
+                    _namespace, mode, payload_item = item
+                else:
+                    continue
+                if mode == "messages":
+                    message, _meta = payload_item
+                    if not isinstance(message, (AIMessage, AIMessageChunk)):
+                        continue
+                    delta = ""
+                    if isinstance(message, AIMessageChunk):
+                        message = _sanitize_chunk(message)
+                        merged_chunk = message if merged_chunk is None else merged_chunk + message
+                        delta = _extract_stream_delta(message)
+                    elif isinstance(message, AIMessage):
+                        last_ai_message = message
+                        if not saw_delta:
+                            delta = _extract_stream_delta(message)
+                    if delta:
+                        if not saw_delta:
+                            logging.debug(
+                                "invoke_agent_stream first chunk conversation_id=%s agent_id=%s",
+                                conversation_id,
+                                agent_id,
+                            )
+                        saw_delta = True
+                        loop.call_soon_threadsafe(_enqueue, {"type": "chunk", "content": delta})
+                elif mode == "values":
+                    if isinstance(payload_item, dict):
+                        last_state = payload_item
+                elif mode == "custom":
+                    loop.call_soon_threadsafe(_enqueue, {"type": "custom", "data": payload_item})
+        except BaseException as exc:
+            loop.call_soon_threadsafe(_set_exception, exc)
+        else:
+            if last_state is None and last_ai_message is None and merged_chunk is not None:
+                last_ai_message = message_chunk_to_message(merged_chunk)
+            if last_state is None and last_ai_message is not None:
+                last_state = {"messages": [last_ai_message]}
+            agent_result = _build_agent_result_from_state(state=last_state, human=human)
+            loop.call_soon_threadsafe(_set_result, agent_result)
+        finally:
+            loop.call_soon_threadsafe(_enqueue, None)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    async def _event_iter() -> AsyncIterator[Dict[str, Any]]:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+
+    return _event_iter(), result_future
 
 
 def serialise_message(message: BaseMessage) -> Dict[str, Any]:

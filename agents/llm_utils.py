@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Sequence
 import os
 
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ import config
 
 from langchain.agents.middleware import ModelFallbackMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.callbacks import BaseCallbackHandler
 
 from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
@@ -80,7 +81,10 @@ def get_llm(
         model: str = "base", 
         provider: str = None,
         temperature: Optional[float] = 0, 
-        frequency_penalty: Optional[float] = None 
+        frequency_penalty: Optional[float] = None,
+        *,
+        streaming: bool = True,
+        callbacks: Optional[Sequence[BaseCallbackHandler]] = None,    
     ):
     if provider is None:
         provider = config.LLM_PROVIDER
@@ -97,11 +101,12 @@ def get_llm(
             verbosity=verbosity,                     # короче ответы -> быстрее
             #max_tokens=2000,                      # ограничение генерации
             #service_tier="default",              # или "auto"/"flex" по политике
-            #streaming=True,                      # быстрее time-to-first-token
             use_previous_response_id=True,       # меньше контекста в каждом запросе
             model_kwargs={"max_tool_calls": 3},  # max number of tool calls per response
             temperature=temperature, 
-            frequency_penalty=frequency_penalty
+            frequency_penalty=frequency_penalty,
+            streaming=streaming,
+            callbacks=list(callbacks) if callbacks else None,
         )
         #return ChatOpenAI(model=llm_model, 
         #                temperature=temperature, 
@@ -109,14 +114,22 @@ def get_llm(
         #                verbosity=verbosity
         #                )
     elif provider == "openai_4":
-        return ChatOpenAI(model=llm_model, 
-                          temperature=temperature, 
-                          frequency_penalty=frequency_penalty)
+        return ChatOpenAI(
+            model=llm_model, 
+            temperature=temperature, 
+            frequency_penalty=frequency_penalty,
+            streaming=streaming,
+            callbacks=list(callbacks) if callbacks else None,
+        )
     elif provider == "openai_gv":
-        return ChatOpenAI(model=llm_model, 
-                          api_key=os.getenv("OPENAI_API_KEY_PERSONAL"),
-                          temperature=temperature, 
-                          frequency_penalty=frequency_penalty)
+        return ChatOpenAI(
+            model=llm_model, 
+            api_key=os.getenv("OPENAI_API_KEY_PERSONAL"),
+            temperature=temperature, 
+            frequency_penalty=frequency_penalty,
+            streaming=streaming,
+            callbacks=list(callbacks) if callbacks else None,
+        )
     elif provider == "gigachat":
         raise NotImplementedError
         #return GigaChat(
@@ -127,7 +140,13 @@ def get_llm(
         #    frequency_penalty=frequency_penalty,
         #    scope = config.GIGA_CHAT_SCOPE)
     elif provider == "mistral":
-        return ChatMistralAI(model=llm_model, temperature=temperature, frequency_penalty=frequency_penalty)
+        return ChatMistralAI(
+            model=llm_model, 
+            temperature=temperature, 
+            frequency_penalty=frequency_penalty,
+            streaming=streaming,
+            callbacks=list(callbacks) if callbacks else None,
+        )
     elif provider == "yandex":
         model_name=f'gpt://{config.YA_FOLDER_ID}/{llm_model}'
         return ChatYandexGPT(
@@ -136,7 +155,7 @@ def get_llm(
             folder_id=config.YA_FOLDER_ID, 
             model_uri=model_name,
             temperature=temperature
-            )
+        )
 
 
 def build_model_fallback_middleware(

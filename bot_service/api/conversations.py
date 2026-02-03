@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +21,7 @@ from ..schemas import (
     MessageView,
     SendMessageResponse,
 )
-from ..service import invoke_agent, serialise_message
+from ..service import invoke_agent, invoke_agent_stream, serialise_message
 from .deps import DbSession, UserContextDep
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -51,6 +52,98 @@ def _message_to_view(entity: Message) -> MessageView:
         metadata=entity.metadata_json or {},
         created_at=entity.created_at,
     )
+
+
+async def _persist_agent_result(
+    *,
+    session: AsyncSession,
+    conversation: Conversation,
+    payload: MessageCreate,
+    agent_result: Dict[str, Any],
+) -> SendMessageResponse | StreamingResponse:
+    human_payload = serialise_message(agent_result["human"])
+    human_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=human_payload["content"],
+        raw_text=human_payload["raw_text"],
+        metadata_json=payload.payload.metadata,
+    )
+    session.add(human_message)
+
+    ai_payload = serialise_message(agent_result["ai"])
+    agent_metadata = {"agent_id": conversation.agent_id}
+    if ai_payload.get("attachments"):
+        agent_metadata["attachments"] = ai_payload["attachments"]
+    if agent_result.get("agent_status"):
+        agent_metadata["agent_status"] = agent_result["agent_status"]
+    if agent_result.get("interrupt_payload"):
+        agent_metadata["interrupt_payload"] = agent_result["interrupt_payload"]
+        if ai_payload.get("raw_text"):
+            agent_metadata["question"] = ai_payload["raw_text"]
+            agent_metadata["content"] = ai_payload["raw_text"]
+    agent_message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=ai_payload["content"],
+        raw_text=ai_payload["raw_text"],
+        metadata_json=agent_metadata,
+    )
+    session.add(agent_message)
+
+    if agent_result.get("agent_status") == "interrupted":
+        conversation.status = "waiting_user"
+        base_metadata = conversation.metadata_json if isinstance(conversation.metadata_json, dict) else {}
+        if isinstance(agent_result.get("interrupt_payload"), dict):
+            interrupt_payload = agent_result["interrupt_payload"]
+            new_metadata = {
+                **base_metadata,
+                "pending_interrupt": {
+                    "interrupt_id": interrupt_payload.get("interrupt_id"),
+                    "question": interrupt_payload.get("question"),
+                    "content": interrupt_payload.get("content"),
+                    "artifact_id": interrupt_payload.get("artifact_id"),
+                    "artifact_name": interrupt_payload.get("artifact_name"),
+                },
+            }
+        else:
+            new_metadata = {
+                **base_metadata,
+                "pending_interrupt": {
+                    "interrupt_id": None,
+                    "question": ai_payload["raw_text"],
+                    "content": ai_payload["raw_text"],
+                },
+            }
+        conversation.metadata_json = new_metadata
+        logger.info(
+            "conversation %s stored pending_interrupt interrupt_id=%s",
+            conversation.id,
+            conversation.metadata_json["pending_interrupt"].get("interrupt_id"),
+        )
+    else:
+        conversation.status = "active"
+        base_metadata = conversation.metadata_json if isinstance(conversation.metadata_json, dict) else {}
+        new_metadata = dict(base_metadata)
+        new_metadata.pop("pending_interrupt", None)
+        conversation.metadata_json = new_metadata
+
+    conversation.last_message_at = func.now()
+
+    await session.commit()
+    await session.refresh(conversation)
+    await session.refresh(human_message)
+    await session.refresh(agent_message)
+
+    return SendMessageResponse(
+        conversation=_conversation_to_view(conversation),
+        user_message=_message_to_view(human_message),
+        agent_message=_message_to_view(agent_message),
+    )
+
+
+def _build_sse_payload(payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.post("/", response_model=ConversationView)
@@ -136,8 +229,13 @@ async def post_message(
     payload: MessageCreate,
     session: DbSession,
     user: UserContextDep,
-) -> SendMessageResponse:
-    conversation = await session.get(Conversation, conversation_id, with_for_update=True)
+    stream: bool = False,
+) -> SendMessageResponse | StreamingResponse:
+    conversation = await session.get(
+        Conversation,
+        conversation_id,
+        with_for_update=not stream,
+    )
     if conversation is None or conversation.user_id != user.user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
 
@@ -217,6 +315,84 @@ async def post_message(
                 pending_interrupt.get("interrupt_id"),
             )
 
+    if stream:
+        conversation_id_value = conversation.id
+        conversation_user_id = conversation.user_id
+        conversation_user_role = conversation.user_role
+        conversation_agent_id = conversation.agent_id
+        await session.rollback()
+
+        async def event_stream():
+            try:
+                events, result_future = await invoke_agent_stream(
+                    agent=agent,
+                    payload=payload.payload,
+                    conversation_id=conversation_id_value,
+                    agent_id=conversation_agent_id,
+                    user_id=conversation_user_id,
+                    user_role=conversation_user_role,
+                    pending_interrupt=pending_interrupt,
+                )
+            except Exception as exc:
+                logger.exception("Agent stream setup failed conversation_id=%s", conversation_id_value)
+                yield _build_sse_payload({"type": "failed", "error": str(exc)})
+                return
+
+            try:
+                async for event in events:
+                    if event.get("type") == "chunk":
+                        yield _build_sse_payload(
+                            {
+                                "type": "chunk",
+                                "content": event.get("content") or "",
+                                "conversation_id": conversation_id_value,
+                            }
+                        )
+                    elif event.get("type") == "custom":
+                        yield _build_sse_payload(
+                            {
+                                "type": "custom",
+                                "data": event.get("data"),
+                                "conversation_id": conversation_id_value,
+                            }
+                        )
+            except Exception as exc:
+                logger.exception("Agent streaming failed conversation_id=%s", conversation_id_value)
+                yield _build_sse_payload({"type": "failed", "error": str(exc)})
+                return
+
+            try:
+                agent_result = await result_future
+            except Exception as exc:
+                logger.exception("Agent stream result failed conversation_id=%s", conversation_id_value)
+                yield _build_sse_payload({"type": "failed", "error": str(exc)})
+                return
+
+            locked = await session.get(Conversation, conversation_id_value, with_for_update=True)
+            if locked is None or locked.user_id != user.user_id:
+                yield _build_sse_payload({"type": "failed", "error": "Conversation not found."})
+                return
+
+            response = await _persist_agent_result(
+                session=session,
+                conversation=locked,
+                payload=payload,
+                agent_result=agent_result,
+            )
+            agent_status = agent_result.get("agent_status")
+            payload_type = "interrupt" if agent_status == "interrupted" else "completed"
+            yield _build_sse_payload(
+                {
+                    "type": payload_type,
+                    "content": response.agent_message.raw_text,
+                    "metadata": response.agent_message.metadata,
+                    "conversation_id": response.conversation.id,
+                }
+            )
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     try:
         agent_result = await invoke_agent(
             agent=agent,
@@ -233,81 +409,9 @@ async def post_message(
             detail=f"Agent invocation failed: {exc}",
         ) from exc
 
-    human_payload = serialise_message(agent_result["human"])
-    human_message = Message(
-        conversation_id=conversation.id,
-        role="user",
-        content=human_payload["content"],
-        raw_text=human_payload["raw_text"],
-        metadata_json=payload.payload.metadata,
-    )
-    session.add(human_message)
-
-    ai_payload = serialise_message(agent_result["ai"])
-    agent_metadata = {"agent_id": conversation.agent_id}
-    if ai_payload.get("attachments"):
-        agent_metadata["attachments"] = ai_payload["attachments"]
-    if agent_result.get("agent_status"):
-        agent_metadata["agent_status"] = agent_result["agent_status"]
-    if agent_result.get("interrupt_payload"):
-        agent_metadata["interrupt_payload"] = agent_result["interrupt_payload"]
-        if ai_payload.get("raw_text"):
-            agent_metadata["question"] = ai_payload["raw_text"]
-            agent_metadata["content"] = ai_payload["raw_text"]
-    agent_message = Message(
-        conversation_id=conversation.id,
-        role="assistant",
-        content=ai_payload["content"],
-        raw_text=ai_payload["raw_text"],
-        metadata_json=agent_metadata,
-    )
-    session.add(agent_message)
-
-    if agent_result.get("agent_status") == "interrupted":
-        conversation.status = "waiting_user"
-        base_metadata = conversation.metadata_json if isinstance(conversation.metadata_json, dict) else {}
-        if isinstance(agent_result["interrupt_payload"], dict):
-            new_metadata = {
-                **base_metadata,
-                "pending_interrupt": {
-                    "interrupt_id": agent_result["interrupt_payload"].get("interrupt_id"),
-                    "question": agent_result["interrupt_payload"].get("question"),
-                    "content": agent_result["interrupt_payload"].get("content"),
-                    "artifact_id": agent_result["interrupt_payload"].get("artifact_id"),
-                    "artifact_name": agent_result["interrupt_payload"].get("artifact_name"),
-                },
-            }
-        else:
-            new_metadata = {
-                **base_metadata,
-                "pending_interrupt": {
-                    "interrupt_id": None,
-                    "question": ai_payload["raw_text"],
-                    "content": ai_payload["raw_text"],
-                },
-            }
-        conversation.metadata_json = new_metadata
-        logger.info(
-            "conversation %s stored pending_interrupt interrupt_id=%s",
-            conversation.id,
-            conversation.metadata_json["pending_interrupt"].get("interrupt_id"),
-        )
-    else:
-        conversation.status = "active"
-        base_metadata = conversation.metadata_json if isinstance(conversation.metadata_json, dict) else {}
-        new_metadata = dict(base_metadata)
-        new_metadata.pop("pending_interrupt", None)
-        conversation.metadata_json = new_metadata
-
-    conversation.last_message_at = func.now()
-
-    await session.commit()
-    await session.refresh(conversation)
-    await session.refresh(human_message)
-    await session.refresh(agent_message)
-
-    return SendMessageResponse(
-        conversation=_conversation_to_view(conversation),
-        user_message=_message_to_view(human_message),
-        agent_message=_message_to_view(agent_message),
+    return await _persist_agent_result(
+        session=session,
+        conversation=conversation,
+        payload=payload,
+        agent_result=agent_result,
     )

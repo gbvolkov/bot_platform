@@ -95,34 +95,49 @@ async def _process_job(
     start_time = time.monotonic()
     warn_emitted = False
     interval = max(queue_settings.worker_heartbeat_seconds, 1)
+    job_future: Optional[asyncio.Task] = None
 
-    job_future = asyncio.create_task(
-        client.send_message(
-            conversation_id=payload.conversation_id,
-            user_id=payload.user_id,
-            user_role=payload.user_role,
-            text=payload.text,
-            raw_user_text=payload.raw_user_text,
-            attachments=payload.attachments,
-            metadata=payload.metadata,
-        )
-    )
-
+    streamed_already = False
     try:
         response = None
-        while True:
-            try:
-                response = await asyncio.wait_for(asyncio.shield(job_future), timeout=interval)
-                break
-            except asyncio.TimeoutError:
+        if payload.stream:
+            streamed_parts: List[str] = []
+            stream_started = False
+            final_event: Optional[Dict[str, Any]] = None
+
+            async for event in client.send_message_stream(
+                conversation_id=payload.conversation_id,
+                user_id=payload.user_id,
+                user_role=payload.user_role,
+                text=payload.text,
+                raw_user_text=payload.raw_user_text,
+                attachments=payload.attachments,
+                metadata=payload.metadata,
+            ):
+                event_type = event.get("type")
+                if event_type == "chunk":
+                    content = event.get("content") or ""
+                    if not content:
+                        continue
+                    if not stream_started:
+                        await queue.mark_status(payload.job_id, "streaming")
+                        job_stage["value"] = "streaming"
+                        await queue.publish_event(
+                            QueueEvent(job_id=payload.job_id, type="status", status="streaming")
+                        )
+                        stream_started = True
+                        streamed_already = True
+                    streamed_parts.append(content)
+                    logger.debug("Publishing chunk job_id=%s size=%d", payload.job_id, len(content))
+                    await queue.publish_event(
+                        QueueEvent(job_id=payload.job_id, type="chunk", content=content)
+                    )
+                    await queue.update_heartbeat(payload.job_id, status=current_status())
+                elif event_type in {"completed", "interrupt", "failed"}:
+                    final_event = event
+                    break
+
                 elapsed = time.monotonic() - start_time
-                logger.debug(
-                    "Job %s still running after %.2fs (heartbeat interval %ss)",
-                    payload.job_id,
-                    elapsed,
-                    interval,
-                )
-                await queue.update_heartbeat(payload.job_id, status=current_status())
                 if soft_timeout and elapsed > soft_timeout and not warn_emitted:
                     logger.warning(
                         "Job %s exceeded configured bot request timeout (%ss) but is still running",
@@ -130,10 +145,95 @@ async def _process_job(
                         soft_timeout,
                     )
                     warn_emitted = True
-                continue
 
-        if response is None:
-            raise RuntimeError("Agent invocation returned no response")
+            if final_event is None:
+                raise RuntimeError("Stream ended without terminal event")
+
+            if final_event.get("type") == "failed":
+                error_message = final_event.get("error") or "Agent execution failed."
+                job_stage["value"] = "failed"
+                await queue.store_failure(payload.job_id, error_message)
+                await queue.publish_event(
+                    QueueEvent(job_id=payload.job_id, type="failed", status="failed", error=error_message)
+                )
+                await queue.update_heartbeat(payload.job_id, status=current_status())
+                return
+
+            raw_text = final_event.get("content") or "".join(streamed_parts)
+            metadata = final_event.get("metadata") or {}
+            if not stream_started and raw_text:
+                await queue.mark_status(payload.job_id, "streaming")
+                job_stage["value"] = "streaming"
+                await queue.publish_event(
+                    QueueEvent(job_id=payload.job_id, type="status", status="streaming")
+                )
+                for chunk in _chunk_text(raw_text, queue_settings.chunk_char_limit):
+                    await queue.publish_event(
+                        QueueEvent(job_id=payload.job_id, type="chunk", content=chunk)
+                    )
+                await queue.update_heartbeat(payload.job_id, status=current_status())
+                streamed_already = True
+
+            if final_event.get("type") == "interrupt":
+                if raw_text and "content" not in metadata:
+                    metadata = {**metadata, "content": raw_text}
+                job_stage["value"] = "interrupted"
+                await queue.mark_status(payload.job_id, "interrupted", {"result": metadata})
+                await queue.publish_event(
+                    QueueEvent(
+                        job_id=payload.job_id,
+                        type="interrupt",
+                        status="interrupted",
+                        metadata=metadata,
+                    )
+                )
+                await queue.clear_active_job(payload.job_id)
+                logger.info("Job %s interrupted; awaiting user input", payload.job_id)
+                return
+
+            response = {
+                "agent_message": {
+                    "raw_text": raw_text,
+                    "metadata": metadata,
+                }
+            }
+        else:
+            job_future = asyncio.create_task(
+                client.send_message(
+                    conversation_id=payload.conversation_id,
+                    user_id=payload.user_id,
+                    user_role=payload.user_role,
+                    text=payload.text,
+                    raw_user_text=payload.raw_user_text,
+                    attachments=payload.attachments,
+                    metadata=payload.metadata,
+                )
+            )
+
+            while True:
+                try:
+                    response = await asyncio.wait_for(asyncio.shield(job_future), timeout=interval)
+                    break
+                except asyncio.TimeoutError:
+                    elapsed = time.monotonic() - start_time
+                    logger.debug(
+                        "Job %s still running after %.2fs (heartbeat interval %ss)",
+                        payload.job_id,
+                        elapsed,
+                        interval,
+                    )
+                    await queue.update_heartbeat(payload.job_id, status=current_status())
+                    if soft_timeout and elapsed > soft_timeout and not warn_emitted:
+                        logger.warning(
+                            "Job %s exceeded configured bot request timeout (%ss) but is still running",
+                            payload.job_id,
+                            soft_timeout,
+                        )
+                        warn_emitted = True
+                    continue
+
+            if response is None:
+                raise RuntimeError("Agent invocation returned no response")
 
         agent_message = response.get("agent_message", {}) or {}
         raw_text = agent_message.get("raw_text") or ""
@@ -171,7 +271,7 @@ async def _process_job(
             logger.info("Job %s interrupted; awaiting user input", payload.job_id)
             return
 
-        if raw_text:
+        if raw_text and not streamed_already:
             await queue.mark_status(payload.job_id, "streaming")
             job_stage["value"] = "streaming"
             await queue.publish_event(QueueEvent(job_id=payload.job_id, type="status", status="streaming"))
@@ -209,7 +309,7 @@ async def _process_job(
         )
         await queue.update_heartbeat(payload.job_id, status=current_status())
     finally:
-        if not job_future.done():
+        if job_future is not None and not job_future.done():
             job_future.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await job_future

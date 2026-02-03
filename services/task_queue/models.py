@@ -47,6 +47,10 @@ class EnqueuePayload(BaseModel):
         default=None,
         description="Additional metadata forwarded to bot_service.",
     )
+    stream: bool = Field(
+        default=False,
+        description="Whether to request streaming responses from bot_service.",
+    )
 
 
 class QueueEvent(BaseModel):

@@ -39,6 +39,8 @@ class IdeatorAgentState(AgentState[Dict[str, Any]]):
     filtered_article_ids: NotRequired[List[int]]
     filtered_articles: NotRequired[List[Any]]
     ideas: NotRequired[List[Dict[str, Any]]]
+    skip_sense_llm: NotRequired[bool]
+    sense_lines_precomputed: NotRequired[bool]
     # phases: ready -> lines (choose/discuss lines) -> ideas (generate/discuss ideas) -> finish
     phase: NotRequired[str]
     ideas_cache: Annotated[NotRequired[Dict[str, List[Dict[str, Any]]]], _merge_dicts]

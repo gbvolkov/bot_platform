@@ -21,14 +21,15 @@ class ArtifactCreatorAgentState(AgentState[Dict[str, Any]]):
 
     system_prompt: NotRequired[str]
 
-    # phases: init -> set_prompt -> run
+    # phases: init -> set_prompt -> run -> confirm -> ready
     phase: NotRequired[str]
     greeted: NotRequired[bool]
     artifact: NotRequired[str]
     last_user_answer: NotRequired[str]
-    is_user_confirmed: NotRequired[bool]
+    is_artifact_confirmed: NotRequired[bool]
 
 class ConfirmationAgentState(TypedDict, total=False):
     # Keep it minimal. Only what the confirmation agent needs.
     messages: Annotated[List[BaseMessage], add_messages]
     last_user_answer: str
+    artifact: NotRequired[str]
