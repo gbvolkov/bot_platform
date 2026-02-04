@@ -351,10 +351,17 @@ _LOCALE_TEXT = {
         "options_task": (
             "- Provide 2-3 options labeled A/B/C, each 1-2 sentences.\n"
             "- Provide a short checklist of 3-6 criteria items.\n"
-            "- Ask exactly one question: choose A/B/C or describe edits."
+            "- Ask exactly one question: confirm the options with one word \"confirm\" or describe changes."
+        ),
+        "task": (
+            "- Give 2–3 options, labeled A/B/C, 1–2 sentences each.\n"
+            "- Provide a short checklist of criteria with 3–6 items.\n"
+            "- Discuss the options with the user and suggest choosing one of them."
+            "- After the user has chosen one of the options, produce the final artifact text.\n"
+            "- Discuss the final artifact text with the user, take their remarks into account, and ask for confirmation with one question."
         ),
         "options_tool": (
-            "- Call commit_artifact_options(artifact_id, options_text) with ONLY the options text."
+            "- Do not call any tools to save options. Respond with the options text only."
         ),
         "final_task": (
             "- Produce the final artifact text (no meta commentary).\n"
@@ -362,7 +369,7 @@ _LOCALE_TEXT = {
             "- Ask for confirmation in one question."
         ),
         "final_tool": (
-            "- Call commit_artifact_final_text(artifact_id, final_text) with ONLY the artifact text and assessment."
+            "- Call commit_artifact_final_text(final_text) with ONLY the artifact text and assessment."
         ),
     },
     "ru": {
@@ -386,11 +393,18 @@ _LOCALE_TEXT = {
         "tool_label": "Инструкция по инструменту:",
         "options_task": (
             "- Дай 2–3 варианта, помеченные A/B/C, по 1–2 предложения.\n"
-            "- Дай короткий чек‑лист критериев из 3–6 пунктов.\n"
-            "- Задай ровно один вопрос: выбрать A/B/C или описать правки."
+            "- Дай короткий чек-лист критериев из 3–6 пунктов.\n"
+            "- Задай ровно один вопрос: подтвердить варианты одним словом «подтверждаю» или описать замечания."
+        ),
+        "task": (
+            "- Дай 2–3 варианта, помеченные A/B/C, по 1–2 предложения.\n"
+            "- Дай короткий чек-лист критериев из 3–6 пунктов.\n"
+            "- Обсуди с пользователем варианты и предложи выбрать один из них."
+            "- После того, как пользователь выбрал один из вариантов, сформируй финальный текст артефакта.\n"
+            "- Обсуди с пользователем финальный текст артефакта, учти его замечания и попроси подтверждение одним вопросом."
         ),
         "options_tool": (
-            "- Вызови commit_artifact_options(artifact_id, options_text) и передай ТОЛЬКО текст вариантов."
+            "- Не вызывай инструменты для сохранения вариантов. Верни только текст вариантов."
         ),
         "final_task": (
             "- Сформируй финальный текст артефакта (без мета‑комментариев).\n"
@@ -398,7 +412,7 @@ _LOCALE_TEXT = {
             "- Попроси подтверждение одним вопросом."
         ),
         "final_tool": (
-            "- Вызови commit_artifact_final_text(artifact_id, final_text) и передай ТОЛЬКО текст артефакта и оценку."
+            "- После того, как пользователь окончательно подтвердил финальные текст артефакта, вызови commit_artifact_final_text(final_text) и передай ТОЛЬКО текст артефакта и оценку."
         ),
     },
 }
@@ -421,6 +435,48 @@ def get_summary_prompt(locale: str | None = None) -> str:
 def get_format_prompt(locale: str | None = None) -> str:
     locale_key = resolve_locale(locale)
     return _LOCALE_TEXT[locale_key]["format_prompt"]
+
+
+def get_generation_prompt(
+    *,
+    artifact_id: int,
+    artifact_name: str,
+    goal: str,
+    methodology: str,
+    components: str,
+    criteria: str,
+    data_source: str,
+    context_str: str,
+    user_prompt: str,
+    previous_options_text: str,
+    locale: str | None = None,
+) -> str:
+    locale_key = resolve_locale(locale)
+    text = _LOCALE_TEXT[locale_key]
+    blocks = [
+        _format_block(text["context_title"], context_str),
+        _format_block(text["previous_options_title"], previous_options_text),
+    ]
+    context_block = "\n".join(block for block in blocks if block)
+    data_block = f"{text['data_source_label']} {data_source}" if data_source else ""
+    return (
+        f"{text['system_prompt']}\n\n"
+        f"{text['working_on'].format(artifact_number=artifact_id + 1, artifact_name=artifact_name)}\n"
+        f"{text['goal'].format(goal=goal)}\n"
+        f"{text['methodology'].format(methodology=methodology)}\n"
+        f"{text['components'].format(components=components)}\n"
+        f"{text['criteria'].format(criteria=criteria)}\n"
+        f"{data_block}\n\n"
+        f"{text['user_prompt_label']}\n{user_prompt}\n\n"
+        f"{context_block}\n\n"
+        f"{text['task_label']}\n"
+        f"{text['task']}\n\n"
+        f"{text['format_prompt']}\n\n"
+        f"{text['tool_label']}\n"
+        f"{text['final_tool']}\n"
+        f"{text['search_tool']}\n"
+    )
+
 
 
 def get_options_prompt(

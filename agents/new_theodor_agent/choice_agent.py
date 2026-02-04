@@ -30,9 +30,9 @@ from ..tools.yandex_search import YandexSearchTool as SearchTool
 from .artifacts_defs import ARTIFACTS
 from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_locale
 
-from .prompts import get_final_prompt, get_options_prompt, get_summary_prompt
+from .prompts import get_generation_prompt, get_summary_prompt
 from .state import ArtifactStage, TheodorAgentContext, TheodorAgentState
-from .tools import commit_artifact_final_text, commit_artifact_options
+from .tools import commit_artifact_final_text
 
 LOG = logging.getLogger(__name__)
 
@@ -43,10 +43,10 @@ _yandex_tool = SearchTool(
     summarize=True
 )
 
-
 _LOCALE_TEXT = {
     "en": {
-        "select_question": "Choose A/B/C or describe edits.",
+        "options_confirm_question": "Confirm the options with one word \"confirm\" or describe changes.",
+        "select_question": "Which option do you choose? Reply with A/B/C.",
         "confirm_question": "Confirm this artifact or describe changes.",
         "no_previous_artifacts": "No previous artifacts yet.",
         "not_finalized": "(not finalized)",
@@ -80,7 +80,8 @@ _LOCALE_TEXT = {
         "option_label": "Option {label}",
     },
     "ru": {
-        "select_question": "Выберите A/B/C или опишите правки.",
+        "options_confirm_question": "Подтвердите варианты одним словом «подтверждаю» или напишите замечания.",
+        "select_question": "Какой вариант выбираете? Ответьте A/B/C.",
         "confirm_question": "Подтвердите артефакт или скажите, что нужно изменить.",
         "no_previous_artifacts": "Предыдущих артефактов пока нет.",
         "not_finalized": "(не завершено)",
@@ -96,6 +97,7 @@ _LOCALE_TEXT = {
         ],
         "confirm_keywords": [
             "подтверждаю",
+            "подтверждаюю",
             "подтвердить",
             "да",
             "ок",
@@ -172,89 +174,33 @@ def _build_context_str(artifacts: Dict[int, Any]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def _resolve_selected_option_index(text: str) -> Optional[int]:
-    if not text:
-        return None
-    match = re.search(r"\b([ABCАБВ])\b", text, flags=re.IGNORECASE)
-    if match:
-        letter = match.group(1).upper()
-        return {"A": 0, "B": 1, "C": 2, "А": 0, "Б": 1, "В": 2}.get(letter)
-    match = re.search(r"\b([1-3])\b", text)
-    if match:
-        return int(match.group(1)) - 1
-    return None
-
-
-def _is_change_request(text: str) -> bool:
-    lowered = (text or "").lower()
-    markers = _LOCALE_TEXT[_CURRENT_LOCALE]["edit_keywords"]
-    return any(marker in lowered for marker in markers)
-
-
-def _is_confirmed(text: str) -> bool:
-    lowered = (text or "").lower()
-    markers = _LOCALE_TEXT[_CURRENT_LOCALE]["confirm_keywords"]
-    return any(marker in lowered for marker in markers)
-
-
 def _text(key: str) -> str:
     return _LOCALE_TEXT[_CURRENT_LOCALE][key]
 
-
-def _option_label(idx: int) -> str:
-    label = chr(ord("A") + idx)
-    return _text("option_label").format(label=label)
-
-
-def create_init_node(artifact_id: int):
-    def init_node(
-        state: TheodorAgentState,
-        config: RunnableConfig,
-        runtime: Runtime[TheodorAgentContext],
-    ) -> TheodorAgentState:
-        if state.get("current_artifact_id") != artifact_id:
-            state["current_artifact_id"] = artifact_id
-            state["current_artifact_state"] = ArtifactStage.INIT
-
-        if not state.get("user_prompt"):
-            prompt = None
-            if runtime and runtime.context and runtime.context.get("user_prompt"):
-                prompt = runtime.context["user_prompt"]
-            if not prompt:
-                for msg in reversed(state.get("messages") or []):
-                    if isinstance(msg, HumanMessage) or getattr(msg, "type", "") == "human":
-                        prompt = _extract_text(msg)
-                        break
-            if prompt:
-                state["user_prompt"] = prompt
-        return state
-
-    return init_node
-
-
-def _build_options_agent(
-    model: BaseChatModel,
-    summary_model: BaseChatModel,
-    artifact_id: int,
-):
-    summarization = SummarizationMiddleware(
-        model=summary_model,
-        trigger=("tokens", 60000),
-        keep=("messages", 20),
-        summary_prompt=get_summary_prompt(_CURRENT_LOCALE),
-    )
-
+def _build_artifact_agent(
+        model: BaseChatModel, 
+        summarization_model: BaseChatModel, 
+        artifact_id: int,
+    ):
+    summarization_model = summarization_model or model
+    _summarizator = SummarizationMiddleware(
+            model=summarization_model,
+            trigger=("tokens", 80000),
+            keep=("messages", 20),
+            summary_prompt=get_summary_prompt(_CURRENT_LOCALE),
+            )
+    _artifact_id = artifact_id
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state = request.state
         artifacts = state.get("artifacts") or {}
-        definition = _artifact_definition(artifact_id)
-        previous_options = (artifacts.get(artifact_id) or {}).get("artifact_options_text", "")
+        definition = _artifact_definition(_artifact_id)
+        previous_options = (artifacts.get(_artifact_id) or {}).get("artifact_options_text", "")
         components = "\n".join(f"- {item}" for item in definition.get("components", []) or [])
         criteria = "\n".join(f"- {item}" for item in definition.get("criteria", []) or [])
-        return get_options_prompt(
-            artifact_id=artifact_id,
-            artifact_name=str(definition.get("name") or f"Artifact {artifact_id + 1}"),
+        return get_generation_prompt(
+            artifact_id=_artifact_id,
+            artifact_name=str(definition.get("name") or f"Artifact {_artifact_id + 1}"),
             goal=str(definition.get("goal") or ""),
             methodology=str(definition.get("methodology") or ""),
             components=components,
@@ -266,167 +212,41 @@ def _build_options_agent(
             locale=_CURRENT_LOCALE,
         )
 
+
     return create_agent(
         model=model,
-        tools=[commit_artifact_options, _yandex_tool],
-        middleware=[summarization, build_prompt],
+        tools=[
+            commit_artifact_final_text, 
+            _yandex_tool
+        ],
+        middleware=[
+            _summarizator,
+            build_prompt,        
+        ],
         state_schema=TheodorAgentState,
         context_schema=TheodorAgentContext,
     )
 
-
-def _build_final_agent(
-    model: BaseChatModel,
-    summary_model: BaseChatModel,
-    artifact_id: int,
-):
-    summarization = SummarizationMiddleware(
-        model=summary_model,
-        trigger=("tokens", 60000),
-        keep=("messages", 20),
-        summary_prompt=get_summary_prompt(_CURRENT_LOCALE),
+def create_generate_artifact_node(
+        model: BaseChatModel, 
+        summarization_model: BaseChatModel,
+        artifact_id: int,
+    ):
+    _run_agent = _build_artifact_agent(
+        model=model, 
+        summarization_model=summarization_model, 
+        artifact_id=artifact_id
     )
-
-    @dynamic_prompt
-    def build_prompt(request: ModelRequest) -> str:
-        state = request.state
-        artifacts = state.get("artifacts") or {}
-        definition = _artifact_definition(artifact_id)
-        selected_option = (artifacts.get(artifact_id) or {}).get("selected_option_text", "")
-        criteria = "\n".join(f"- {item}" for item in definition.get("criteria", []) or [])
-        return get_final_prompt(
-            artifact_id=artifact_id,
-            artifact_name=str(definition.get("name") or f"Artifact {artifact_id + 1}"),
-            goal=str(definition.get("goal") or ""),
-            methodology=str(definition.get("methodology") or ""),
-            criteria=criteria,
-            context_str=_build_context_str(artifacts),
-            user_prompt=str(state.get("user_prompt") or ""),
-            selected_option_text=str(selected_option or ""),
-            locale=_CURRENT_LOCALE,
-        )
-
-    return create_agent(
-        model=model,
-        tools=[commit_artifact_final_text],
-        middleware=[summarization, build_prompt],
-        state_schema=TheodorAgentState,
-        context_schema=TheodorAgentContext,
-    )
-
-
-def create_generate_options_node(agent: Any, artifact_id: int):
-    def node(
+    def run_node(
         state: TheodorAgentState,
         config: RunnableConfig,
         runtime: Runtime[TheodorAgentContext],
     ) -> TheodorAgentState:
-        result = agent.invoke(state, config=config, context=runtime.context)
-        artifacts = result.get("artifacts") or {}
-        details = artifacts.get(artifact_id) or {}
-        if "artifact_definition" not in details:
-            details["artifact_definition"] = _artifact_definition(artifact_id)
-            artifacts[artifact_id] = details
-            result["artifacts"] = artifacts
-        result["current_artifact_id"] = artifact_id
-        result["current_artifact_state"] = ArtifactStage.OPTIONS_GENERATED
+        
+        result = _run_agent.invoke(state, config=config, context=runtime.context)
         return result
 
-    return node
-
-
-def create_generate_final_node(agent: Any, artifact_id: int):
-    def node(
-        state: TheodorAgentState,
-        config: RunnableConfig,
-        runtime: Runtime[TheodorAgentContext],
-    ) -> TheodorAgentState:
-        result = agent.invoke(state, config=config, context=runtime.context)
-        artifacts = result.get("artifacts") or {}
-        details = artifacts.get(artifact_id) or {}
-        if "artifact_definition" not in details:
-            details["artifact_definition"] = _artifact_definition(artifact_id)
-            artifacts[artifact_id] = details
-            result["artifacts"] = artifacts
-        result["current_artifact_id"] = artifact_id
-        result["current_artifact_state"] = ArtifactStage.ARTIFACT_GENERATED
-        return result
-
-    return node
-
-
-def select_option_node(
-    state: TheodorAgentState,
-    config: RunnableConfig,
-    runtime: Runtime[TheodorAgentContext],
-) -> TheodorAgentState:
-    messages = state.get("messages") or []
-    last_user = None
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage) or getattr(msg, "type", "") == "human":
-            last_user = msg
-            break
-    if last_user is None:
-        return Command(goto=END, update={"messages": [AIMessage(content=_text("select_question"))]})
-
-    user_text = _extract_text(last_user)
-    if _is_change_request(user_text):
-        return Command(goto="generate_options")
-
-    selected_idx = _resolve_selected_option_index(user_text)
-    if selected_idx is None:
-        return Command(goto=END, update={"messages": [AIMessage(content=_text("select_question"))]})
-
-    artifact_id = state.get("current_artifact_id", 0)
-    selection_text = user_text.strip() or _option_label(selected_idx)
-    return Command(
-        goto="generate_final",
-        update={
-            "artifacts": {artifact_id: {"selected_option_text": selection_text}},
-            "current_artifact_state": ArtifactStage.OPTION_SELECTED,
-        },
-    )
-
-
-def confirm_node(
-    state: TheodorAgentState,
-    config: RunnableConfig,
-    runtime: Runtime[TheodorAgentContext],
-) -> TheodorAgentState:
-    messages = state.get("messages") or []
-    last_user = None
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage) or getattr(msg, "type", "") == "human":
-            last_user = msg
-            break
-    if last_user is None:
-        return Command(goto=END, update={"messages": [AIMessage(content=_text("confirm_question"))]})
-
-    user_text = _extract_text(last_user)
-    if _is_change_request(user_text):
-        return Command(goto="generate_final")
-    if _is_confirmed(user_text):
-        return Command(
-            goto=END,
-            update={"current_artifact_state": ArtifactStage.ARTIFACT_CONFIRMED},
-        )
-    return Command(goto="generate_final")
-
-
-def _route_after_init(state: TheodorAgentState) -> str:
-    stage = state.get("current_artifact_state") or ArtifactStage.INIT
-    if stage == ArtifactStage.INIT:
-        return "generate_options"
-    if stage == ArtifactStage.OPTIONS_GENERATED:
-        return "select_option"
-    if stage == ArtifactStage.OPTION_SELECTED:
-        return "generate_final"
-    if stage == ArtifactStage.ARTIFACT_GENERATED:
-        return "confirm"
-    if stage == ArtifactStage.ARTIFACT_CONFIRMED:
-        return "end"
-    return "generate_options"
-
+    return _run_agent
 
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
@@ -457,32 +277,14 @@ def initialize_agent(
     llm = get_llm(model="base", provider=provider.value, temperature=0.4, streaming=streaming)
     summary_llm = get_llm(model="mini", provider=provider.value, temperature=0.0, streaming=False)
 
-    options_agent = _build_options_agent(llm, summary_llm, artifact_id)
-    final_agent = _build_final_agent(llm, summary_llm, artifact_id)
-
     builder = StateGraph(TheodorAgentState)
-    builder.add_node("init", create_init_node(artifact_id))
-    builder.add_node("generate_options", create_generate_options_node(options_agent, artifact_id))
-    builder.add_node("select_option", select_option_node)
-    builder.add_node("generate_final", create_generate_final_node(final_agent, artifact_id))
-    builder.add_node("confirm", confirm_node)
+    builder.add_node("generate_aftifact", create_generate_artifact_node(
+        model=llm, 
+        summarization_model=summary_llm, 
+        artifact_id=artifact_id))
 
-    builder.add_edge(START, "init")
-    builder.add_conditional_edges(
-        "init",
-        _route_after_init,
-        {
-            "generate_options": "generate_options",
-            "select_option": "select_option",
-            "generate_final": "generate_final",
-            "confirm": "confirm",
-            "end": END,
-        },
-    )
-    builder.add_edge("generate_options", END)
-    builder.add_edge("generate_final", END)
-    builder.add_edge("select_option", END)
-    builder.add_edge("confirm", END)
+    builder.add_edge(START, "generate_aftifact")
+    builder.add_edge("generate_aftifact", END)
 
     graph = builder.compile(checkpointer=memory, debug=False).with_config({"callbacks": callback_handlers})
     return graph

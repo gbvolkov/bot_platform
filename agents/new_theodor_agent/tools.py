@@ -7,7 +7,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from .artifacts_defs import ARTIFACTS
-
+from .state import ArtifactStage
 
 def _resolve_definition(artifact_id: int) -> Dict[str, Any]:
     if 0 <= artifact_id < len(ARTIFACTS):
@@ -54,12 +54,12 @@ def commit_artifact_selection(
 
 @tool("commit_artifact_final_text")
 def commit_artifact_final_text(
-    artifact_id: int,
     final_text: str,
     runtime: ToolRuntime = None,
 ) -> Command:
     """Persist the final artifact text (including criteria assessment)."""
     tool_call_id = runtime.tool_call_id if runtime else None
+    artifact_id = runtime.state["current_artifact_id"]
     details = {
         "artifact_definition": _resolve_definition(artifact_id),
         "artifact_final_text": final_text,
@@ -67,6 +67,8 @@ def commit_artifact_final_text(
     return Command(
         update={
             "artifacts": {artifact_id: details},
+            "current_artifact_state": ArtifactStage.ARTIFACT_CONFIRMED,
+            #"current_artifact_id": artifact_id+1,
             "messages": [ToolMessage(content="Success", tool_call_id=tool_call_id)],
         }
     )

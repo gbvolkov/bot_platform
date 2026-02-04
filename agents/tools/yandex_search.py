@@ -1,5 +1,5 @@
 import requests
-from typing import Type
+from typing import Type, Any
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 import base64
@@ -12,7 +12,54 @@ import logging
 
 
 
-summariser_llm = get_llm("nano", provider="openai", temperature=0)
+summariser_llm = get_llm("nano", provider="openai", temperature=0, streaming=False)
+
+
+def extract_text_from_content(content: Any) -> str:
+    parts: list[str] = []
+
+    def _append(text: str) -> None:
+        if text:
+            parts.append(text)
+
+    def _walk(obj: Any) -> None:
+        if obj is None:
+            return
+        if isinstance(obj, str):
+            _append(obj)
+            return
+        if isinstance(obj, bytes):
+            try:
+                _append(obj.decode("utf-8"))
+            except Exception:
+                _append(obj.decode(errors="ignore"))
+            return
+        if isinstance(obj, dict):
+            for key in ("text", "output_text", "input_text"):
+                value = obj.get(key)
+                if isinstance(value, str):
+                    _append(value)
+            if "content" in obj:
+                _walk(obj.get("content"))
+            return
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                _walk(item)
+            return
+
+        text_attr = getattr(obj, "text", None)
+        if isinstance(text_attr, str):
+            _append(text_attr)
+            return
+        content_attr = getattr(obj, "content", None)
+        if content_attr is not None:
+            _walk(content_attr)
+            return
+
+    _walk(content)
+    if parts:
+        return "\n".join(p for p in parts if p)
+    return str(content)
 def summarise_content(content: str, thematic: str, maxlen: int = 4096) -> str:
     if len(content) <= maxlen:
         return content
@@ -25,9 +72,9 @@ def summarise_content(content: str, thematic: str, maxlen: int = 4096) -> str:
             f"The length of the response shall not exceed {maxlen} characters.")
         result = summariser_llm.invoke(prompt)
     except Exception as e:
-        logging.error("Error occured at summarise_request.\nException: {e}")
-        raise e
-    return result.content
+        logging.error("Error occured at summarise_content.\nException: %s", e)
+        raise
+    return extract_text_from_content(getattr(result, "content", result))
 
 
 def _build_payload(api_key: str, query: str, max_results: int, folder_id: str):
