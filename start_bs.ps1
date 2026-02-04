@@ -1,1 +1,1 @@
-uvicorn bot_service.main:app --no-reload
+uvicorn bot_service.main:app #--reload
