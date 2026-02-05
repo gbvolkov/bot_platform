@@ -399,15 +399,20 @@ async def invoke_agent_stream(
                     message, _meta = payload_item
                     if not isinstance(message, (AIMessage, AIMessageChunk)):
                         continue
-                    delta = ""
                     if isinstance(message, AIMessageChunk):
                         message = _sanitize_chunk(message)
                         merged_chunk = message if merged_chunk is None else merged_chunk + message
                         delta = _extract_stream_delta(message)
-                    elif isinstance(message, AIMessage):
+                    else:
                         last_ai_message = message
-                        if not saw_delta:
-                            delta = _extract_stream_delta(message)
+                        message_text = _extract_stream_delta(message)
+                        if merged_chunk is not None:
+                            merged_message = message_chunk_to_message(merged_chunk)
+                            merged_text = _extract_stream_delta(merged_message)
+                            merged_chunk = None
+                            if merged_text == message_text:
+                                message_text = ""
+                        delta = message_text
                     if delta:
                         if not saw_delta:
                             logging.debug(
