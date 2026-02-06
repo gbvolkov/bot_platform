@@ -15,7 +15,6 @@ from langgraph.runtime import Runtime
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 
-from agents.artifact_creator_agent.prompts import ARTIFACT_URL_PROMPT_RU
 import config
 from agents.utils import ModelType
 from platform_utils.llm_logger import JSONFileTracer
