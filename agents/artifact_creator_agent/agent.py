@@ -13,8 +13,6 @@ from langchain.agents.structured_output import (
     StructuredOutputValidationError,
     ToolStrategy,
 )
-from langchain_core.runnables.config import merge_configs
-from langgraph.constants import TAG_NOSTREAM
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
@@ -37,7 +35,12 @@ from utils.utils import is_valid_json_string
 from agents.tools.think import ThinkTool
 from agents.tools.yandex_search import YandexSearchTool as SearchTool
 from agents.structured_prompt_utils import provider_then_tool
-from agents.utils import ModelType, get_llm, _extract_text
+from agents.utils import (
+    ModelType,
+    _extract_text,
+    build_internal_invoke_config,
+    get_llm,
+)
 
 from platform_utils.llm_logger import JSONFileTracer
 
@@ -195,11 +198,9 @@ def _build_confirmation_agent(model: BaseChatModel):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state: ConfirmationAgentState  = request.state
-        artifact_id = state.get("artifact_id", 0)
-        artifacts = state.get("artifacts")
-        artifact = ""
-        if artifacts and artifact_id in artifacts:
-            artifact = artifacts[artifact_id]
+        artifact = state.get("artifact")
+        if not isinstance(artifact, str):
+            artifact = str(artifact or "")
 
         #response = state.get("last_user_answer")
         prompt = (
@@ -240,7 +241,10 @@ def create_confirmation_node(model: BaseChatModel):
             "messages": [last_message],  # ensure no chat history is provided
             "artifact": artifact,
         }
-        confirm_config = merge_configs(config, {"tags": [TAG_NOSTREAM]})
+        confirm_config = build_internal_invoke_config(
+            config,
+            extra_tags=[_CONFIRMATION_STREAM_TAG],
+        )
 
         result = _confirmation_agent.invoke(confirmation_state, config=confirm_config, context=runtime.context)
         structured = result.get("structured_response") or {}

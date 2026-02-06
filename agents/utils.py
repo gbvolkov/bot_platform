@@ -1,14 +1,18 @@
 import os
 import config
 from enum import Enum
-from typing import List
+from typing import List, Sequence
 import re
 import unicodedata
 
 
+from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_core.callbacks.manager import BaseCallbackManager
 from langchain_core.messages import ToolMessage, BaseMessage
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables.config import ensure_config
+from langchain_core.runnables import RunnableConfig, RunnableLambda
 
+from langgraph.constants import TAG_NOSTREAM
 from langgraph.prebuilt import ToolNode
 
 from langchain_core.messages import HumanMessage
@@ -20,6 +24,11 @@ import telegramify_markdown.customize as customize
 from .llm_utils import get_llm
 
 customize.strict_markdown = False
+
+try:
+    from langgraph.pregel._messages import StreamMessagesHandler as _StreamMessagesHandler
+except Exception:  # pragma: no cover - safety for version drift
+    _StreamMessagesHandler = None
 
 class ModelType(Enum):
     GPT = ("openai", "GPT")
@@ -53,6 +62,73 @@ def create_tool_node_with_fallback(tools: list) -> dict:
     return ToolNode(tools).with_fallbacks(
         [RunnableLambda(handle_tool_error)], exception_key="error"
     )
+
+
+def _is_public_stream_messages_handler(handler: BaseCallbackHandler) -> bool:
+    if _StreamMessagesHandler is not None and isinstance(handler, _StreamMessagesHandler):
+        return True
+    handler_cls = handler.__class__
+    return (
+        handler_cls.__module__ == "langgraph.pregel._messages"
+        and handler_cls.__name__ == "StreamMessagesHandler"
+    )
+
+
+def _strip_public_stream_callbacks(callbacks):
+    if callbacks is None:
+        return []
+
+    if isinstance(callbacks, list):
+        return [h for h in callbacks if not _is_public_stream_messages_handler(h)]
+
+    if isinstance(callbacks, BaseCallbackManager):
+        manager = callbacks.copy()
+        manager.handlers = [
+            h for h in (getattr(manager, "handlers", []) or [])
+            if not _is_public_stream_messages_handler(h)
+        ]
+        manager.inheritable_handlers = [
+            h for h in (getattr(manager, "inheritable_handlers", []) or [])
+            if not _is_public_stream_messages_handler(h)
+        ]
+        return manager
+
+    return callbacks
+
+
+def build_internal_invoke_config(
+    parent_config: RunnableConfig | None,
+    *,
+    extra_tags: Sequence[str] | None = None,
+) -> RunnableConfig:
+    """Build config for nested/internal invokes while keeping monitoring callbacks."""
+    base_config = ensure_config(parent_config)
+    parent_tags = list(base_config.get("tags") or [])
+    tags = list(dict.fromkeys([*parent_tags, TAG_NOSTREAM, *(extra_tags or [])]))
+
+    callbacks = _strip_public_stream_callbacks(base_config.get("callbacks"))
+    internal_config: RunnableConfig = {
+        "callbacks": callbacks,
+        "tags": tags,
+    }
+
+    configurable = base_config.get("configurable")
+    if isinstance(configurable, dict):
+        internal_config["configurable"] = configurable.copy()
+
+    metadata = base_config.get("metadata")
+    if isinstance(metadata, dict):
+        internal_config["metadata"] = metadata.copy()
+
+    recursion_limit = base_config.get("recursion_limit")
+    if isinstance(recursion_limit, int):
+        internal_config["recursion_limit"] = recursion_limit
+
+    max_concurrency = base_config.get("max_concurrency")
+    if isinstance(max_concurrency, int):
+        internal_config["max_concurrency"] = max_concurrency
+
+    return internal_config
 
 
 def _print_event(event: dict, _printed: set, max_length=1500):
