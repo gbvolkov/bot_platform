@@ -235,7 +235,7 @@ def initialize_agent(
     global _CURRENT_LOCALE
     _CURRENT_LOCALE = resolve_locale(locale)
     set_global_locale(_CURRENT_LOCALE)
-    log_name = f"new_theodor_agent_{time.strftime('%Y%m%d%H%M')}"
+    log_name = f"theodor_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [StreamWriterCallbackHandler(), json_handler]
     if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:

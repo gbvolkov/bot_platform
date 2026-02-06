@@ -229,7 +229,7 @@ def initialize_agent(
 ):
     set_locale(locale)
     #set_models_locale(locale)
-    log_name = f"simple_agent_{time.strftime('%Y%m%d%H%M')}"
+    log_name = f"ideator_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [StreamWriterCallbackHandler(), json_handler]
     if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
