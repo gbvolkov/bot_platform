@@ -371,6 +371,12 @@ _LOCALE_TEXT = {
         "final_tool": (
             "- Call commit_artifact_final_text(final_text) with ONLY the artifact text and assessment."
         ),
+        "final_report": (
+            "(Final report available for download)[{url}]\n"
+        ),
+        "store_report_error": (
+            "Unfortunateluy, we were unable to store the final report."
+        ),
     },
     "ru": {
         "system_prompt": SYSTEM_PROMPT_RU_TEMPLATE,
@@ -413,6 +419,12 @@ _LOCALE_TEXT = {
         ),
         "final_tool": (
             "- После того, как пользователь окончательно подтвердил финальные текст артефакта, вызови commit_artifact_final_text(final_text) и передай ТОЛЬКО текст артефакта и оценку."
+        ),
+        "final_report": (
+            "(Здесь вы можете скачать финальный отчёт)[{url}]\n"
+        ),
+        "store_report_error": (
+            "К сожалению, не могу сохранить артефакт в хранилище."
         ),
     },
 }

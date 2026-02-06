@@ -15,6 +15,7 @@ from langgraph.runtime import Runtime
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 
+from agents.artifact_creator_agent.prompts import ARTIFACT_URL_PROMPT_RU
 import config
 from agents.utils import ModelType
 from platform_utils.llm_logger import JSONFileTracer
@@ -213,9 +214,12 @@ def final_output_node(
     config: RunnableConfig,
     runtime: Runtime[TheodorAgentContext],
 ) -> TheodorAgentState:
-    out_path = store_artifacts(state.get("artifacts") or {})
-    template = _LOCALE_TEXT[_CURRENT_LOCALE]["final_report"]
-    return {"messages": [AIMessage(content=template.format(url=out_path))]}
+    if state.get("artifacts"):
+        out_path = store_artifacts(state.get("artifacts") or {})
+        template = _LOCALE_TEXT[_CURRENT_LOCALE]["final_report"]
+        return {"messages": [AIMessage(content=template.format(url=out_path))]}
+    else:
+        return {"messages": [AIMessage(content=_LOCALE_TEXT[_CURRENT_LOCALE]["store_report_error"])]}
 
 
 def initialize_agent(

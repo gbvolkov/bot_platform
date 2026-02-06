@@ -11,7 +11,7 @@ from agents.llm_utils import (
 
 _response_analyser_llm = get_llm(model="nano", provider="openai", temperature=0)
 
-class UserChangeRequest(BaseModel):
+class UserConfirmation(BaseModel):
     """User change request.
     Запрос пользователя на изменение.
     """
@@ -22,17 +22,4 @@ class UserChangeRequest(BaseModel):
         Field(description="Did user finally confirmed the artifact. True or False."),
     ]
 
-    # NotRequired[str] -> optional field in Pydantic: give it a default
-    #change_request: Annotated[
-    #    str | None,
-    #    Field(default=None, description="Request to change."),
-    #] = None
-
-    #@model_validator(mode="after")
-    #def validate_change_request(self) -> "UserChangeRequest":
-    #    # Cross-field validation (v2 replacement for most root_validator use cases)
-    #    if self.is_artifact_confirmed and not (self.change_request and self.change_request.strip()):
-    #        raise ValueError("change_request must be provided when is_change_requested=True")
-    #    return self
-
-
+    

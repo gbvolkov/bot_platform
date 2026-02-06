@@ -7,6 +7,12 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 
+class ArtifactStage:
+    INIT = "INIT"
+    ARTIFACT_GENERATED = "ARTIFACT_GENERATED"
+    ARTIFACT_CONFIRMED = "ARTIFACT_CONFIRMED"
+
+
 class ArtifactCreatorAgentContext(TypedDict, total=False):
     """Runtime context for the system agent."""
 
@@ -25,8 +31,11 @@ class ArtifactCreatorAgentState(AgentState[Dict[str, Any]]):
     phase: NotRequired[str]
     greeted: NotRequired[bool]
     artifact: NotRequired[str]
+    artifacts: NotRequired[List[dict]]
+    current_artifact_id: NotRequired[int]
     last_user_answer: NotRequired[str]
     is_artifact_confirmed: NotRequired[bool]
+    final_artifact_url: NotRequired[str]
 
 class ConfirmationAgentState(TypedDict, total=False):
     # Keep it minimal. Only what the confirmation agent needs.

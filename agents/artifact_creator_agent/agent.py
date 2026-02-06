@@ -13,6 +13,8 @@ from langchain.agents.structured_output import (
     StructuredOutputValidationError,
     ToolStrategy,
 )
+from langchain_core.runnables.config import merge_configs
+from langgraph.constants import TAG_NOSTREAM
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
@@ -44,18 +46,23 @@ from .state import (
     , ArtifactCreatorAgentState
     , ConfirmationAgentState
 )
-from .utils import UserChangeRequest
-
+from .utils import UserConfirmation
+from .tools import commit_artifact_final_text
+from .store_artifacts import store_artifacts
 
 from .prompts import (
+    ARTIFACT_STORE_ERROR_RU,
     GREETINGS_WITH_PROMPT_RU
     , GREETINGS_WITHOUT_PROMPT_RU
     , SET_PROPMT_REQUEST_RU
     , PROMPT_CONFIRMATION_RU
     , DEFAULT_SYSTEM_PROMPT_RU
+    , СOMMIT_TOOL_PROMPT_RU
+    , ARTIFACT_URL_PROMPT_RU
 )
 
 LOG = logging.getLogger(__name__)
+_CONFIRMATION_STREAM_TAG = "internal_confirmation_agent"
 
 def route(state: ArtifactCreatorAgentState) -> str:
     if not state.get("greeted"):
@@ -103,6 +110,7 @@ def create_set_prompt_node(model: BaseChatModel):
         
         original_messages = state.get("messages", [])
 
+        last_user_msg = None
         for msg in reversed(original_messages):
             if isinstance(msg, HumanMessage) or getattr(msg, "type", "") == "human":
                 last_user_msg = msg
@@ -115,7 +123,10 @@ def create_set_prompt_node(model: BaseChatModel):
         else:
             response_text = PROMPT_CONFIRMATION_RU
             #all_msg_ids = [m.id for m in state["messages"]]
-            state["system_prompt"] = last_user_msg.content
+            if isinstance(last_user_msg.content, str):
+                state["system_prompt"] = last_user_msg.content
+            else:
+                state["system_prompt"] = _extract_text(last_user_msg)
             state["phase"] = "cleanup"
             # Returning RemoveMessage instances instructs the reducer to delete them
             #return {
@@ -148,33 +159,35 @@ def _build_run_agent(model: BaseChatModel):
     def build_prompt(request: ModelRequest) -> str:
         state: ArtifactCreatorAgentState = request.state
         system_prompt = state.get("system_prompt")
-        return system_prompt or DEFAULT_SYSTEM_PROMPT_RU
+        if system_prompt:
+            if not isinstance(system_prompt, str):
+                try:
+                    system_prompt = _extract_text(HumanMessage(content=system_prompt))
+                except Exception:
+                    system_prompt = str(system_prompt)
+            return f"{system_prompt}\n\n{СOMMIT_TOOL_PROMPT_RU}"
+        return DEFAULT_SYSTEM_PROMPT_RU
 
     return create_agent(
         model=model,
-        #tools=[_think_tool],
+        tools=[commit_artifact_final_text],
         middleware=[build_prompt],
         state_schema=ArtifactCreatorAgentState,
         context_schema=ArtifactCreatorAgentContext,
     )
     
-def create_run_node(model: BaseChatModel):
-    _run_agent = _build_run_agent(model)
-    def run_node(
-        state: ArtifactCreatorAgentState,
-        config: RunnableConfig,
-        runtime: Runtime[ArtifactCreatorAgentContext],
-    ) -> ArtifactCreatorAgentState:
-        
-        result_state = _run_agent.invoke(state, config=config, context=runtime.context)
-        last_message = result_state["messages"][-1]
-        if isinstance(last_message, AIMessage):
-            result_state["artifact"] = _extract_text(last_message)
-            result_state["phase"] = "confirm"
-
-        return result_state
-
-    return run_node
+#def create_run_node(model: BaseChatModel):
+#    _run_agent = _build_run_agent(model)
+#    def run_node(
+#        state: ArtifactCreatorAgentState,
+#        config: RunnableConfig,
+#        runtime: Runtime[ArtifactCreatorAgentContext],
+#    ) -> ArtifactCreatorAgentState:
+#        
+#        result_state = _run_agent.invoke(state, config=config, context=runtime.context)
+#        return result_state
+#
+#    return run_node
 
 
 def _build_confirmation_agent(model: BaseChatModel):
@@ -182,11 +195,17 @@ def _build_confirmation_agent(model: BaseChatModel):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state: ConfirmationAgentState  = request.state
+        artifact_id = state.get("artifact_id", 0)
+        artifacts = state.get("artifacts")
+        artifact = ""
+        if artifacts and artifact_id in artifacts:
+            artifact = artifacts[artifact_id]
+
         #response = state.get("last_user_answer")
         prompt = (
             "You have to analyze user's response to artifact.\n" 
             "=======================================\n"
-            f"ARTIFACT TEXT:\n{state['artifact']}\n"
+            f"ARTIFACT TEXT:\n{artifact}\n"
             "END OF ARTIFACT TEXT\n"
             "=======================================\n"
             "Determine if user confirmed the text or requested change."        
@@ -195,12 +214,13 @@ def _build_confirmation_agent(model: BaseChatModel):
         return prompt
 
 
-    return create_agent(
+    confirmation_agent = create_agent(
         model=model,
         middleware=[build_prompt, provider_then_tool],
-        response_format=UserChangeRequest,
+        response_format=UserConfirmation,
         state_schema=ConfirmationAgentState,
     )
+    return confirmation_agent.with_config({"tags": [_CONFIRMATION_STREAM_TAG]})
 
 def create_confirmation_node(model: BaseChatModel):
     _confirmation_agent = _build_confirmation_agent(model)
@@ -209,38 +229,71 @@ def create_confirmation_node(model: BaseChatModel):
         config: RunnableConfig, 
         runtime: Runtime[ArtifactCreatorAgentContext],
     ) -> ArtifactCreatorAgentState:
-        #interrupt_payload = {
-        #    "type": "confirm",
-        #    "content": f"{state['artifact']}\n\nПодтвердите артефакт или предложите изменения.",
-        #    "question": "Подтвердите артефакт или предложите изменения.",
-        #}
-        #user_response = interrupt(interrupt_payload)
-        #message_update = [HumanMessage(content=str(user_response))]    
-        #state["last_user_answer"] = user_response
-
         last_message = state["messages"][-1]
+        artifact_id = state.get("artifact_id", 0)
+        artifacts = state.get("artifacts")
+        artifact = ""
+        if artifacts and artifact_id in artifacts:
+            artifact = artifacts[artifact_id].get("artifact_final_text", "")
+
         confirmation_state = {
             "messages": [last_message],  # ensure no chat history is provided
-            "artifact": state["artifact"],
+            "artifact": artifact,
         }
+        confirm_config = merge_configs(config, {"tags": [TAG_NOSTREAM]})
 
-        result = _confirmation_agent.invoke(confirmation_state, config=config, context=runtime.context)
+        result = _confirmation_agent.invoke(confirmation_state, config=confirm_config, context=runtime.context)
         structured = result.get("structured_response") or {}
         state["is_artifact_confirmed"] = structured.is_artifact_confirmed
-        if not structured.is_artifact_confirmed:
-            state["messages"].append(AIMessage(content=f"Работа завершена.\nСогласованный текст артефакта:\n\n{state['artifact']}"))
+        if structured.is_artifact_confirmed:
+            try:
+                store_url = store_artifacts(state["artifacts"] or [])
+                link_text = f"[{ARTIFACT_URL_PROMPT_RU}]({store_url})"
+                state["final_artifact_url"] = store_url
+            except Exception as e:
+                logging.error(f"Error occured at store_artifacts.\nException: {e}")
+            #state["messages"].append(AIMessage(content=f"\n***Работа завершена***.\nСогласованный текст артефакта:\n\n{artifact}\n\n{link_text}\n"))
+            #state["messages"].append(AIMessage(content=f"\n\n***Работа завершена***.\nСогласованный текст артефакта:\n\n{artifact}\n\n{link_text}\n"))
+            
+            state["phase"] = "ready"
         return state
 
     return confirmation_node
+
+def final_print_node(
+        state: ArtifactCreatorAgentState, 
+        config: RunnableConfig, 
+        runtime: Runtime[ArtifactCreatorAgentContext],
+    ) -> ArtifactCreatorAgentState:
+    store_url = state["final_artifact_url"]
+    if store_url:            
+        link_text = f"[{ARTIFACT_URL_PROMPT_RU}]({store_url})"
+    else:
+        link_text = ARTIFACT_STORE_ERROR_RU
+        
+    message_update = [AIMessage(content=f"\n\n***Работа завершена***.\n\n{link_text}\n")]    
+    return Command(
+        update={
+            "messages": message_update,
+            "phase": "ready",
+        },
+    )
 
 
 def is_confirmed(
     state: ArtifactCreatorAgentState, 
 ) -> ArtifactCreatorAgentState:
+
     if not state["is_artifact_confirmed"]:
         return "run"
     else:
-        state["messages"].append(AIMessage(content=f"Работа завершена.\nСогласованный текст артефакта:\n\n{state['artifact']}"))
+        #artifact_id = state.get("artifact_id", 0)
+        #artifacts = state.get("artifacts")
+        #artifact = ""
+        #if artifacts and artifact_id in artifacts:
+        #    artifact = artifacts[artifact_id].get("artifact_final_text", "")
+
+        #state["messages"].append(AIMessage(content=f"\nРабота завершена.\nСогласованный текст артефакта:\n\n{artifact}"))
         return "ready"
 
 
@@ -249,7 +302,19 @@ def ready_node(
         config: RunnableConfig,
         runtime: Runtime[ArtifactCreatorAgentContext],
     ) -> ArtifactCreatorAgentState:
-    message_update = [AIMessage(content=f"Согласованный текст артефакта:\n\n{state['artifact']}")]    
+    artifact_id = state.get("artifact_id", 0)
+    artifacts = state.get("artifacts")
+    artifact = ""
+    if artifacts and artifact_id in artifacts:
+        artifact = artifacts[artifact_id].get("artifact_final_text", "")
+
+    store_url = state["final_artifact_url"]
+    if store_url:            
+        link_text = f"[{ARTIFACT_URL_PROMPT_RU}]({store_url})"
+    else:
+        link_text = ARTIFACT_STORE_ERROR_RU
+        
+    message_update = [AIMessage(content=f"\n\n***Работа завершена***.\nСогласованный текст артефакта:\n\n{artifact}\n\n{link_text}\n")]    
     return Command(
         update={
             "messages": message_update,
@@ -280,14 +345,15 @@ def initialize_agent(
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     llm = get_llm(model="base", provider=provider.value, temperature=0.4)
-    response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0)
+    response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0, streaming=False)
     
     builder = StateGraph(ArtifactCreatorAgentState)
     builder.add_node("greetings", create_greetings_node())
     builder.add_node("set_prompt", create_set_prompt_node(llm))
     builder.add_node("cleanup", cleanup_messages_node)
-    builder.add_node("run", create_run_node(llm))
+    builder.add_node("run", _build_run_agent(llm))
     builder.add_node("confirm", create_confirmation_node(response_analyser_llm))
+    builder.add_node("final_print", final_print_node)
     builder.add_node("ready", ready_node)
 
     builder.add_conditional_edges(
@@ -307,15 +373,26 @@ def initialize_agent(
     builder.add_edge("set_prompt", END)
     builder.add_edge("cleanup", "run")
     builder.add_conditional_edges(
-        "confirm",
+        "run",
+        route,
+        {
+            "confirm": "confirm",
+            "run": END,
+            "ready": END,
+            "greetings": END,
+            "set_prompt": END,
+            "cleanup": END,
+        },
+    )
+    builder.add_edge("confirm", "final_print")
+    builder.add_conditional_edges(
+        "final_print",
         is_confirmed,
         {
             "run": "run",
-            "ready": "ready"
+            "ready": END
         },
     )
-    builder.add_edge("run", END)
     builder.add_edge("ready", END)
-
     graph = builder.compile(checkpointer=memory, debug=False).with_config({"callbacks": callback_handlers})
     return graph
