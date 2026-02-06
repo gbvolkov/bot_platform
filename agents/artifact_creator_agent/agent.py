@@ -220,7 +220,7 @@ def _build_confirmation_agent(model: BaseChatModel):
         response_format=UserConfirmation,
         state_schema=ConfirmationAgentState,
     )
-    return confirmation_agent.with_config({"tags": [_CONFIRMATION_STREAM_TAG]})
+    return confirmation_agent #.with_config({"tags": [_CONFIRMATION_STREAM_TAG]})
 
 def create_confirmation_node(model: BaseChatModel):
     _confirmation_agent = _build_confirmation_agent(model)

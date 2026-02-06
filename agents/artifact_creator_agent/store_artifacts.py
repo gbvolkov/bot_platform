@@ -18,9 +18,27 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Artifacts</title>
 <style>
+@font-face {{
+  font-family: "ArtifactSans";
+  src: url("{font_regular}");
+  font-style: normal;
+  font-weight: normal;
+}}
+@font-face {{
+  font-family: "ArtifactSans";
+  src: url("{font_bold}");
+  font-style: normal;
+  font-weight: bold;
+}}
+@font-face {{
+  font-family: "ArtifactMono";
+  src: url("{font_mono}");
+  font-style: normal;
+  font-weight: normal;
+}}
 @page {{ size: A4; margin: 20mm; }}
 body {{
-  font-family: "Segoe UI", Arial, sans-serif;
+  font-family: "ArtifactSans", sans-serif;
   font-size: 12pt;
   line-height: 1.45;
   color: #111;
@@ -37,7 +55,7 @@ pre {{
   overflow: auto;
 }}
 code {{
-  font-family: "Consolas", "Courier New", monospace;
+  font-family: "ArtifactMono", monospace;
   font-size: 10.5pt;
 }}
 blockquote {{
@@ -75,6 +93,13 @@ section.chapter:first-of-type {{
 </body>
 </html>
 """
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FONTS_DIR = _REPO_ROOT / "assets" / "fonts"
+_FONT_REGULAR = _FONTS_DIR / "DejaVuSans.ttf"
+_FONT_BOLD = _FONTS_DIR / "DejaVuSans-Bold.ttf"
+_FONT_MONO = _FONTS_DIR / "DejaVuSansMono.ttf"
 
 
 _MARKER_SPECS = {
@@ -252,6 +277,14 @@ def _markdown_v2_to_html(text: str) -> str:
         return renderer.render(Document(normalized)).strip()
 
 
+def _font_url(path: Path) -> str:
+    resolved = path.resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Font file is missing: {resolved}")
+    # Forward slashes are valid for CSS URLs on Linux and Windows.
+    return resolved.as_posix()
+
+
 def _build_html_document(entries: List[Dict[str, str]]) -> str:
     sections: List[str] = []
     for entry in entries:
@@ -259,7 +292,41 @@ def _build_html_document(entries: List[Dict[str, str]]) -> str:
         body_html = _markdown_v2_to_html(entry["body"])
         content = body_html or "<p></p>"
         sections.append(f'<section class="chapter"><h1>{title}</h1>\n{content}\n</section>')
-    return _HTML_TEMPLATE.format(content="\n".join(sections))
+    return _HTML_TEMPLATE.format(
+        content="\n".join(sections),
+        font_regular=_font_url(_FONT_REGULAR),
+        font_bold=_font_url(_FONT_BOLD),
+        font_mono=_font_url(_FONT_MONO),
+    )
+
+
+def _patch_windows_named_tempfile_font_bug() -> None:
+    # xhtml2pdf 0.2.17 uses NamedTemporaryFile for fonts; on Windows this may
+    # produce locked temp files that reportlab cannot reopen.
+    if os.name != "nt":
+        return
+
+    try:
+        from xhtml2pdf import files as pisa_files
+    except Exception:
+        return
+
+    if getattr(pisa_files, "_gv_named_file_patch_applied", False):
+        return
+
+    original_get_named_file = pisa_files.pisaFileObject.getNamedFile
+
+    def _patched_get_named_file(self):  # noqa: ANN001
+        if isinstance(self.instance, pisa_files.LocalFileURI):
+            local_path = Path(self.instance.path)
+            if not local_path.is_absolute() and self.instance.basepath:
+                local_path = Path(self.instance.basepath) / local_path
+            if local_path.exists():
+                return str(local_path.resolve())
+        return original_get_named_file(self)
+
+    pisa_files.pisaFileObject.getNamedFile = _patched_get_named_file
+    pisa_files._gv_named_file_patch_applied = True
 
 
 def _render_pdf(html_document: str, output_path: Path) -> None:
@@ -269,6 +336,7 @@ def _render_pdf(html_document: str, output_path: Path) -> None:
 
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _patch_windows_named_tempfile_font_bug()
 
     with output_path.open("wb") as f:
         # CreatePDF signature: CreatePDF(src, dest=..., encoding=..., path=..., ...)
