@@ -357,7 +357,7 @@ def _render_pdf(html_document: str, output_path: Path) -> None:
 
 
 def _resolve_output_path() -> Path:
-    configured = os.getenv("THEODOR_ARTIFACTS_PDF_PATH")
+    configured = os.getenv("ARTIFACTS_PDF_PATH")
     store_path = Path(configured) if configured else Path.cwd()
     store_path.mkdir(parents=True, exist_ok=True)
     if not os.access(store_path, os.W_OK):
@@ -377,7 +377,7 @@ def store_artifacts(artifacts: Any) -> str:
     for artifact_id, details in artifact_items:
         details = details or {}
         definition = details.get("artifact_definition") or {}
-        name = definition.get("name") or f"Artifact {artifact_id + 1}"
+        name = definition.get("name") or f"№{artifact_id + 1}"
         parts.append(f"## {artifact_id + 1}. {name}\n")
         body_text = (details.get("artifact_final_text") or "").strip()
         parts.extend((body_text, ""))

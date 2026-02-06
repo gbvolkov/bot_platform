@@ -51,7 +51,7 @@ from .state import (
 )
 from .utils import UserConfirmation
 from .tools import commit_artifact_final_text
-from .store_artifacts import store_artifacts
+from ..store_artifacts import store_artifacts
 
 from .prompts import (
     ARTIFACT_STORE_ERROR_RU,

@@ -44,7 +44,7 @@ from .context_reduction import (
     last_summary_index,
     summarize_artifact_discussion,
 )
-from .store_artifacts import store_artifacts
+from ..store_artifacts import store_artifacts
 
 
 _CONFIRMED_BANNER_BORDER = "────────────────────────────────"

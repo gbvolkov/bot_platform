@@ -22,7 +22,7 @@ from platform_utils.llm_logger import JSONFileTracer
 
 from .artifacts_defs import ARTIFACTS
 from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_locale
-from .store_artifacts import store_artifacts
+from ..store_artifacts import store_artifacts
 
 from .choice_agent import initialize_agent as build_choice_agent
 from .state import ArtifactStage, TheodorAgentContext, TheodorAgentState
