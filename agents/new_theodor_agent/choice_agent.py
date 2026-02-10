@@ -21,7 +21,7 @@ from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 
 import config
-from agents.utils import ModelType, get_llm, _extract_text
+from agents.utils import ModelType, get_llm, extract_text
 from platform_utils.llm_logger import JSONFileTracer
 
 from ..tools.yandex_search import YandexSearchTool as SearchTool

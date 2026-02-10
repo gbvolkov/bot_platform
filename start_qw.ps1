@@ -1,1 +1,0 @@
-python -m services.task_queue.worker

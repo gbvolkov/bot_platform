@@ -25,7 +25,7 @@ from langfuse.langchain import CallbackHandler
 import config as cfg
 
 from agents.state.state import ConfigSchema
-from agents.utils import ModelType, get_llm, _extract_text
+from agents.utils import ModelType, get_llm, extract_text
 from platform_utils.llm_logger import JSONFileTracer
 
 from .prompts import (
@@ -400,7 +400,7 @@ def init_node(state: IsmartTutorAgentState, config: RunnableConfig) -> IsmartTut
     state["reset_done"] = False
     state["profile_complete_at_turn_start"] = _profile_is_complete(state.get("person_profile"))
     last_user = next((m for m in reversed(messages) if m.type == "human"), None)
-    last_user_text = _extract_text(last_user) if last_user else ""
+    last_user_text = extract_text(last_user) if last_user else ""
     state["last_user_text"] = last_user_text
     state["hint_raw"] = None
     state["needs_person_info"] = False

@@ -113,6 +113,38 @@ def get_llm(
         #                frequency_penalty=frequency_penalty,
         #                verbosity=verbosity
         #                )
+        
+    elif provider == "openai_think":
+        #TODO: model=="base" is a temporary fix for verbosity issue and sgall be removed in future
+        verbosity = "low" if model == "base" else "medium"
+        reasoning = {
+            "effort": "medium",  # 'low', 'medium', or 'high'
+            #"summary": "auto",  # 'detailed', 'auto', or None
+        } if model == "base"  else {
+            "effort": "minimal",  # 'low', 'medium', or 'high'
+            #"summary": "auto",  # 'detailed', 'auto', or None
+        }
+
+        return ChatOpenAI(
+            model=llm_model,
+            api_key=os.getenv("OPENAI_API_KEY_PERSONAL"),
+            use_responses_api=True,              # важно для GPT-5.x параметров
+            reasoning=reasoning,                # минимум латентности
+            verbosity=verbosity,                     # короче ответы -> быстрее
+            #max_tokens=2000,                      # ограничение генерации
+            #service_tier="default",              # или "auto"/"flex" по политике
+            use_previous_response_id=True,       # меньше контекста в каждом запросе
+            model_kwargs={"max_tool_calls": 3},  # max number of tool calls per response
+            temperature=temperature, 
+            frequency_penalty=frequency_penalty,
+            streaming=streaming,
+            callbacks=list(callbacks) if callbacks else None,
+        )
+        #return ChatOpenAI(model=llm_model, 
+        #                temperature=temperature, 
+        #                frequency_penalty=frequency_penalty,
+        #                verbosity=verbosity
+        #                )
     elif provider == "openai_4":
         return ChatOpenAI(
             model=llm_model, 
@@ -121,7 +153,7 @@ def get_llm(
             streaming=streaming,
             callbacks=list(callbacks) if callbacks else None,
         )
-    elif provider == "openai_gv":
+    elif provider == "openai_pers":
         return ChatOpenAI(
             model=llm_model, 
             api_key=os.getenv("OPENAI_API_KEY_PERSONAL"),

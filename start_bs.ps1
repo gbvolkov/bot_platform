@@ -1,1 +1,0 @@
-uvicorn bot_service.main:app #--reload

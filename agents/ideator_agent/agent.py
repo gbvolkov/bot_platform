@@ -32,7 +32,7 @@ from utils.utils import is_valid_json_string
 from agents.tools.think import ThinkTool
 from agents.tools.yandex_search import YandexSearchTool as SearchTool
 
-from agents.utils import ModelType, get_llm, _extract_text
+from agents.utils import ModelType, get_llm, extract_text
 from agents.structured_prompt_utils import build_json_prompt, provider_then_tool
 from agents.prettifier import prettify
 from platform_utils.llm_logger import JSONFileTracer
@@ -433,7 +433,7 @@ def create_init_node():
             messages = state.get("messages") or []
             last_message = messages[-1] if messages else None
             if last_message and getattr(last_message, "type", None) == "human":
-                content = _extract_text(last_message)
+                content = extract_text(last_message)
                 #content = content.replace("\xa0", "")
                 #getattr(last_message, "content", "")
                 if is_valid_json_string(content):

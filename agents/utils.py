@@ -39,6 +39,7 @@ class ModelType(Enum):
     #GGUF = ("gguf", "GGUF")
     GPT4 = ("openai_4", "GPT4")
     GPT_PERS = ("openai_pers", "GPT_PERS")
+    GPT_THINK = ("openai_think", "GPT_THINK")
 
     def __init__(self, value, display_name):
         self._value_ = value
@@ -188,7 +189,7 @@ def clean_text(s: str) -> str:
     return s
 
 
-def _extract_text(message: BaseMessage) -> str:
+def extract_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return clean_text(content).strip()

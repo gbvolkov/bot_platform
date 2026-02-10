@@ -37,7 +37,7 @@ from agents.tools.yandex_search import YandexSearchTool as SearchTool
 from agents.structured_prompt_utils import provider_then_tool
 from agents.utils import (
     ModelType,
-    _extract_text,
+    extract_text,
     build_internal_invoke_config,
     get_llm,
 )
@@ -129,7 +129,7 @@ def create_set_prompt_node(model: BaseChatModel):
             if isinstance(last_user_msg.content, str):
                 state["system_prompt"] = last_user_msg.content
             else:
-                state["system_prompt"] = _extract_text(last_user_msg)
+                state["system_prompt"] = extract_text(last_user_msg)
             state["phase"] = "cleanup"
             # Returning RemoveMessage instances instructs the reducer to delete them
             #return {
@@ -165,7 +165,7 @@ def _build_run_agent(model: BaseChatModel):
         if system_prompt:
             if not isinstance(system_prompt, str):
                 try:
-                    system_prompt = _extract_text(HumanMessage(content=system_prompt))
+                    system_prompt = extract_text(HumanMessage(content=system_prompt))
                 except Exception:
                     system_prompt = str(system_prompt)
             return f"{system_prompt}\n\n{СOMMIT_TOOL_PROMPT_RU}"
