@@ -438,7 +438,8 @@ class AgentRegistry:
                 continue
             if agent_id in self._init_errors:
                 self._init_errors.pop(agent_id, None)
-            self._start_initialization(agent_id)
+            if self._definitions[agent_id].is_active:
+                self._start_initialization(agent_id)
 
 
 agent_registry = AgentRegistry()

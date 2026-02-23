@@ -44,6 +44,7 @@ class IdeatorAgentContext(TypedDict, total=False):
 
 class IdeatorAgentState(AgentState[Dict[str, Any]]):
     """State schema for simple agent graph."""
+    locale: NotRequired[Dict[str, Any]]
 
     messages: Annotated[List[BaseMessage], add_messages]
     attachments: NotRequired[List[Dict[str, Any]]]

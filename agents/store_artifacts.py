@@ -10,6 +10,7 @@ from platform_utils.storage_svc import upload_and_get_link
 from mistletoe import Document
 from mistletoe.html_renderer import HtmlRenderer
 from xhtml2pdf import pisa
+import logging
 
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
@@ -94,12 +95,15 @@ section.chapter:first-of-type {{
 </html>
 """
 
+import os
+if not (_FONTS_DIR := os.environ.get('FONTS_DIR')):
+    #_REPO_ROOT = Path(__file__).resolve().parents[2]
+    #_FONTS_DIR = _REPO_ROOT / "assets" / "fonts"
+    _FONTS_DIR = "./assets/fonts"
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_FONTS_DIR = _REPO_ROOT / "assets" / "fonts"
-_FONT_REGULAR = _FONTS_DIR / "DejaVuSans.ttf"
-_FONT_BOLD = _FONTS_DIR / "DejaVuSans-Bold.ttf"
-_FONT_MONO = _FONTS_DIR / "DejaVuSansMono.ttf"
+_FONT_REGULAR = Path(_FONTS_DIR) / "DejaVuSans.ttf"
+_FONT_BOLD = Path(_FONTS_DIR) / "DejaVuSans-Bold.ttf"
+_FONT_MONO = Path(_FONTS_DIR) / "DejaVuSansMono.ttf"
 
 
 _MARKER_SPECS = {
@@ -366,6 +370,25 @@ def _resolve_output_path() -> Path:
     return store_path / unique_name
 
 
+
+def store_chapters(chapters: List[Dict[str, str]], final_text: str) -> str:
+    output_path: Optional[Path] = None
+    try:
+        output_path = _resolve_output_path()
+        html_document = _build_html_document(chapters)
+        _render_pdf(html_document, output_path)
+    except Exception as e:
+        logging.error("Error occured at store_chapters. Storing as md file.\nException: {e}")
+        fallback_path = (
+            output_path.with_suffix(".md")
+            if output_path
+            else _resolve_output_path().with_suffix(".md")
+        )
+        fallback_path.write_text(final_text, encoding="utf-8")
+        output_path = fallback_path
+    user_url = upload_and_get_link(str(output_path))
+    return str(user_url)
+
 def store_artifacts(artifacts: Any) -> str:
     if isinstance(artifacts, dict):
         artifact_items = ((k, artifacts[k]) for k in sorted(artifacts))
@@ -373,7 +396,7 @@ def store_artifacts(artifacts: Any) -> str:
         artifact_items = enumerate(artifacts)
 
     parts: List[str] = []
-    entries: List[Dict[str, str]] = []
+    chapters: List[Dict[str, str]] = []
     for artifact_id, details in artifact_items:
         details = details or {}
         definition = details.get("artifact_definition") or {}
@@ -381,7 +404,7 @@ def store_artifacts(artifacts: Any) -> str:
         parts.append(f"## {artifact_id + 1}. {name}\n")
         body_text = (details.get("artifact_final_text") or "").strip()
         parts.extend((body_text, ""))
-        entries.append(
+        chapters.append(
             {
                 "title": f"{artifact_id + 1}. {name}",
                 "body": body_text,
@@ -390,19 +413,5 @@ def store_artifacts(artifacts: Any) -> str:
 
     final_text = "\n".join(parts).rstrip() + "\n"
 
-    if entries:
-        output_path: Optional[Path] = None
-        try:
-            output_path = _resolve_output_path()
-            html_document = _build_html_document(entries)
-            _render_pdf(html_document, output_path)
-        except Exception as e:
-            fallback_path = (
-                output_path.with_suffix(".md")
-                if output_path
-                else _resolve_output_path().with_suffix(".md")
-            )
-            fallback_path.write_text(final_text, encoding="utf-8")
-            output_path = fallback_path
-        user_url = upload_and_get_link(str(output_path))
-        return str(user_url)
+    if chapters:
+        return store_chapters(chapters, final_text) 

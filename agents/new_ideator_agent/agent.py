@@ -35,7 +35,6 @@ from agents import state
 import config
 
 from utils.utils import is_valid_json_string
-from agents.tools.think import ThinkTool
 from agents.tools.yandex_search import YandexSearchTool as SearchTool
 
 from agents.utils import ModelType, get_llm, extract_text
@@ -46,6 +45,14 @@ from .tools import (
     commit_thematic_threads,
     commit_ideas,
     commit_final_docset
+)
+from agents.tools.store import store_artifact_tool
+
+_web_search_tool = SearchTool(
+    api_key=config.YA_API_KEY,
+    folder_id=config.YA_FOLDER_ID,
+    max_results=5,
+    summarize=True
 )
 
 
@@ -121,6 +128,7 @@ def create_greetings_node():
         runtime: Runtime[IdeatorAgentContext],
     ) -> IdeatorAgentState:
         scout_report = None
+        state["locale"] = _LOCALE
         if runtime.context and runtime.context.get("scout_report"):
             scout_report = runtime.context["scout_report"]
             state["scout_report"] = scout_report
@@ -193,8 +201,8 @@ def _build_run_agent(model: BaseChatModel, summarization_model: BaseChatModel = 
     summarization_model = summarization_model or model
     return create_agent(
         model=model,
-        tools=[commit_thematic_threads, commit_ideas, commit_final_docset],
-        system_prompt=_PROMPTS["ideator_prompt"],
+        tools=[commit_thematic_threads, commit_ideas, commit_final_docset, store_artifact_tool, _web_search_tool],
+        system_prompt=_PROMPTS["ideator_prompt"] + "\n\n" + _PROMPTS["web_search_prompt"],
         middleware=[SummarizationMiddleware(
             model=summarization_model,
             trigger=("tokens", 80000),

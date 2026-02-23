@@ -12,6 +12,53 @@ import logging
 
 
 
+SEARCH_TOOL_POLICY_PROMPT_RU = """
+
+==================================================================================================================================================
+### Web Search
+1. **Запрет самовольного поиска.**  
+   Веб-поиск запрещён без явного запроса пользователя.  
+2. **Вызов `web_search`.**  
+   Если пользователь явно попросил интернет/внешние источники, ты **ДОЛЖЕН** вызвать `web_search`.  
+   Во всех остальных случаях **НЕ** вызывай `web_search`.  
+3. **Язык запроса.**  
+   Сначала пробуй на русском, затем на английском при необходимости.  
+4. **Упорный поиск.**  
+   Если результатов недостаточно, расширяй запрос (синонимы, альтернативные термины) и повторяй, пока не получишь данные или не исчерпаешь разумные варианты.  
+   *ВАЖНО*: не более 3 поисков за ход.  
+5. **Разделение источников.**  
+   Внешние данные явно отделяй от отчёта «Разведчика» и не выдавай гипотезы за факты.  
+6. **Формат ссылок.**  
+   Внешние ссылки выводи полностью в Markdown и в угловых скобках: Название/домен — <https://...> (не сокращать).  
+7. **Тайминг ответа.**  
+   Не отправляй свободный текст пользователю, пока не обработал результаты `web_search` (если вызван).
+==================================================================================================================================================
+"""
+
+SEARCH_TOOL_POLICY_PROMPT_EN = """
+
+==================================================================================================================================================
+### Web Search
+1. **No autonomous search.**  
+   Web search is forbidden without an explicit user request.  
+2. **Calling `web_search`.**  
+   If the user explicitly asks for internet/external sources, you **MUST** call `web_search`.  
+   Otherwise you **MUST NOT** call `web_search`.  
+3. **Query language.**  
+   Use English whenever it is possble.  
+4. **Persistent search.**  
+   If results are insufficient, broaden the query (synonyms, alternatives) and retry until you have enough data or exhaust reasonable options.  
+   *IMPORTANT*: Max 3 searches per turn.  
+5. **Source separation.**  
+   Clearly separate external data from the «Разведчик» report and do not present hypotheses as facts.  
+6. **Link format.**  
+   Output external links in full Markdown with angle brackets: Title/domain — <https://...> (no shortening).  
+7. **Answer timing.**  
+   Do **not** send any free-text response to the user until you have processed `web_search` results (if invoked).
+==================================================================================================================================================
+"""
+
+
 summariser_llm = get_llm("nano", provider="openai", temperature=0, streaming=False)
 
 
@@ -103,7 +150,7 @@ class YandexSearchInput(BaseModel):
     query: str = Field(..., description="Search query for web search. Can be in Russian (prefferred) on in English.")
 
 class YandexSearchTool(BaseTool):
-    name: str = "web_search_summary"
+    name: str = "web_search"
     description: str = (
         "A wrapper around Yandex Search. "
         "Useful for when you need an information from internet."

@@ -1,3 +1,5 @@
+from agents.tools.yandex_search import SEARCH_TOOL_POLICY_PROMPT_EN, SEARCH_TOOL_POLICY_PROMPT_RU
+
 GREETINGS_RU = """
 Привет! 👋 Я — Генератор идей 💡
 Я помогаю превращать отчёты бота «Разведчик» в понятные продуктовые направления и гипотезы, с которыми можно дальше работать и принимать решения.
@@ -130,8 +132,6 @@ ________________________________________
 • один вопрос — один список;
 • не задавай несколько вопросов подряд;
 • формулируй коротко.
-Любая цифра относится только к последнему списку; если неоднозначно — уточни: «Правильно понимаю, вы выбираете пункт №X из последнего списка?»
-Каждый этап диалога завершается конкретным нумерованным выбором (1,2,3…).
 Запрещено: финальные решения; самовольный интернет; выдавать гипотезы за факты; скрывать неопределённость.
 UX-подсказка (кратко, уместно): можно подключить Критик.ai (например, через @Критик, если доступно).
 ________________________________________
@@ -158,7 +158,11 @@ ________________________________________
 - После подтверждение пользоателем ранжирования идей
 - После подтверждения пользователем формулировки идеи или артефактов для идеи
 - После запроса пользователя на фиксацию списка идей
+________________________________________
+15. Сохранение артефактов
+- Используй инструмент `store_artifact_tool`, если пользователь просит сохранить артефакт в файле.
 """
+
 IDEATOR_PROMPT_EN = """
 
 1. ROLE
@@ -223,8 +227,6 @@ ________________________________________
 - one question - one list;
 - do not ask multiple questions in a row;
 - keep it short.
-Any number refers only to the last list; if ambiguous, ask: "Am I correct in understanding that you're choosing item #X from the last list?"
-Each stage ends with a concrete numbered choice (1,2,3...). Include number and short title in the list.
 Forbidden: final decisions; autonomous internet; presenting hypotheses as facts; hiding uncertainty.
 UX hint (brief, as appropriate): you can connect Critic.ai (e.g., via @Critic if available).
 ________________________________________
@@ -251,6 +253,9 @@ ALWAYS use the `commit_ideas` tool
 - After the user confirms idea ranking
 - After the user confirms idea wording or artifacts for the idea
 - After the user asks to lock the list of ideas
+________________________________________
+15. Artifact persistence
+- Use `store_artifact_tool` when the user requests that an artifact be persisted.
 """
 
 DEFAULT_LOCALE = "ru"
@@ -260,12 +265,14 @@ LOCALES = {
         "prompts": {
             "ideator_prompt": IDEATOR_PROMPT_RU,
             "summary_prompt": SUMMARY_PROMPT,
+            "web_search_prompt": SEARCH_TOOL_POLICY_PROMPT_RU,
         },
         "agent": {
             "greeting": GREETINGS_RU,
             "set_report_request": SET_REPORT_REQUEST_RU,
             "report_confirmation": REPORT_CONFIRMATION_RU,
         },
+        "save_confirmation": "[Теперь Вы можете скачать файл.]({url})",
     },
     "en": {
         "prompts": {
@@ -276,7 +283,9 @@ LOCALES = {
             "greeting": GREETINGS_EN,
             "set_report_request": SET_REPORT_REQUEST_EN,
             "report_confirmation": REPORT_CONFIRMATION_EN,
+            "web_search_prompt": SEARCH_TOOL_POLICY_PROMPT_EN,
         },
+        "save_confirmation": "[You can now download the file.]({url})",
     },
 }
 
