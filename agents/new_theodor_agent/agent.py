@@ -25,27 +25,28 @@ from ..store_artifacts import store_artifacts
 
 from .choice_agent import initialize_agent as build_choice_agent
 from .state import ArtifactStage, TheodorAgentContext, TheodorAgentState
+from .prompts import _LOCALE_TEXT
 
 LOG = logging.getLogger(__name__)
 
 _PROGRESS_BANNER_BORDER = "════════════════════════════════"
 
-_LOCALE_TEXT = {
-    "en": {
-        "final_report": "Final report: {url}",
-        "progress_label": "PROGRESS: {bar} ({current}/{total})",
-        "current_label": "CURRENT: Artifact {number} - {name}",
-        "next_label": "NEXT: Artifact {number} - {name}",
-        "next_finish": "NEXT: finish",
-    },
-    "ru": {
-        "final_report": "Финальный отчет: {url}",
-        "progress_label": "ПРОГРЕСС: {bar} ({current}/{total})",
-        "current_label": "ТЕКУЩИЙ: Артефакт {number} — {name}",
-        "next_label": "СЛЕДУЮЩИЙ: Артефакт {number} — {name}",
-        "next_finish": "СЛЕДУЮЩИЙ: завершение",
-    },
-}
+#_LOCALE_TEXT = {
+#    "en": {
+#        "final_report": "Final report: {url}",
+#        "progress_label": "PROGRESS: {bar} ({current}/{total})",
+#        "current_label": "CURRENT: Artifact {number} - {name}",
+#        "next_label": "NEXT: Artifact {number} - {name}",
+#        "next_finish": "NEXT: finish",
+#    },
+#    "ru": {
+#        "final_report": "Финальный отчет: {url}",
+#        "progress_label": "ПРОГРЕСС: {bar} ({current}/{total})",
+#        "current_label": "ТЕКУЩИЙ: Артефакт {number} — {name}",
+#        "next_label": "СЛЕДУЮЩИЙ: Артефакт {number} — {name}",
+#        "next_finish": "СЛЕДУЮЩИЙ: завершение",
+#    },
+#}
 
 _CURRENT_LOCALE = DEFAULT_LOCALE
 
@@ -114,6 +115,7 @@ def _format_progress_banner(
 
     return "\n".join(
         [
+            "\n\n",
             _PROGRESS_BANNER_BORDER,
             progress_line,
             current_line,
@@ -130,24 +132,33 @@ def create_progress_node(artifact_id: int):
         config: RunnableConfig,
         runtime: Runtime[TheodorAgentContext],
     ) -> TheodorAgentState:
-        total_artifacts = len(ARTIFACTS)
-        current_def = ARTIFACTS[artifact_id]
-        current_number = artifact_id + 1
-        current_name = str(current_def.get("name") or f"Artifact {current_number}")
+        current_artifact_id = state.get("current_artifact_id", 0)
+        prev_artifact_id = state.get("prev_artifact_id")
 
-        next_def = ARTIFACTS[artifact_id + 1] if artifact_id + 1 < total_artifacts else None
-        next_number = int(next_def["id"]) + 1 if next_def else None
-        next_name = str(next_def.get("name") or f"Artifact {next_def['id'] + 1}") if next_def else None
+        if prev_artifact_id is None or prev_artifact_id != current_artifact_id:
+            total_artifacts = len(ARTIFACTS)
+            current_def = ARTIFACTS[artifact_id]
+            current_number = artifact_id + 1
+            current_name = str(current_def.get("name") or f"Artifact {current_number}")
 
-        banner = _format_progress_banner(
-            completed_count=artifact_id,
-            total_count=total_artifacts,
-            current_artifact_number=current_number,
-            current_artifact_name=current_name,
-            next_artifact_number=next_number,
-            next_artifact_name=next_name,
-        )
-        return {"messages": [AIMessage(content=banner)]}
+            next_def = ARTIFACTS[artifact_id + 1] if artifact_id + 1 < total_artifacts else None
+            next_number = int(next_def["id"]) + 1 if next_def else None
+            next_name = str(next_def.get("name") or f"Artifact {next_def['id'] + 1}") if next_def else None
+
+            banner = _format_progress_banner(
+                completed_count=artifact_id,
+                total_count=total_artifacts,
+                current_artifact_number=current_number,
+                current_artifact_name=current_name,
+                next_artifact_number=next_number,
+                next_artifact_name=next_name,
+            )
+            return {
+                "prev_artifact_id": current_artifact_id,
+                "messages": [AIMessage(content=banner)]
+            }
+
+        return state
 
     return node
 
@@ -157,6 +168,8 @@ def init_node(
     config: RunnableConfig,
     runtime: Runtime[TheodorAgentContext],
 ) -> TheodorAgentState:
+    state["locale"] = _LOCALE_TEXT[_CURRENT_LOCALE]        
+
     if state.get("current_artifact_id") is None:
         state["current_artifact_id"] = 0
     if state.get("current_artifact_state") is None:
@@ -178,11 +191,31 @@ def init_node(
 
 
 def _route_by_artifact(state: TheodorAgentState) -> str:
+    if not state.get("greeted"):
+        return "greetings"
     artifact_id = state.get("current_artifact_id", 0)
     if artifact_id is None:
         artifact_id = 0
     artifact_id = max(0, min(int(artifact_id), len(ARTIFACTS) - 1))
     return f"progress_{artifact_id}"
+
+def create_greetings_node():
+
+    def greetings_node(
+        state: TheodorAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[TheodorAgentContext],
+    ) -> TheodorAgentState:
+
+        if not state.get("greeted"):
+            greet = (
+                 state["locale"]["greetings"].format(artifacts_count=len(ARTIFACTS))
+            )
+            state["messages"] = (state.get("messages") or []) + [AIMessage(content=greet)]
+            state["greeted"] = True
+        return state
+
+    return greetings_node
 
 
 def _after_choice_route(state: TheodorAgentState) -> str:
@@ -203,6 +236,7 @@ def advance_node(
     current_id = state.get("current_artifact_id", 0)
     next_id = min(current_id + 1, len(ARTIFACTS) - 1)
     return {
+        "prev_artifact_id": current_id,
         "current_artifact_id": next_id,
         "current_artifact_state": ArtifactStage.INIT,
     }
@@ -215,10 +249,10 @@ def final_output_node(
 ) -> TheodorAgentState:
     if state.get("artifacts"):
         out_path = store_artifacts(state.get("artifacts") or {})
-        template = _LOCALE_TEXT[_CURRENT_LOCALE]["final_report"]
+        template = state["locale"]["final_report"]
         return {"messages": [AIMessage(content=template.format(url=out_path))]}
     else:
-        return {"messages": [AIMessage(content=_LOCALE_TEXT[_CURRENT_LOCALE]["store_report_error"])]}
+        return {"messages": [AIMessage(content=state["locale"]["store_report_error"])]}
 
 
 def initialize_agent(
@@ -249,6 +283,7 @@ def initialize_agent(
 
     builder = StateGraph(TheodorAgentState)
     builder.add_node("init", init_node)
+    builder.add_node("greetings", create_greetings_node())
 
     total_artifacts = len(ARTIFACTS)
     for artifact in ARTIFACTS:
@@ -284,8 +319,9 @@ def initialize_agent(
     builder.add_conditional_edges(
         "init",
         _route_by_artifact,
-        {f"progress_{idx}": f"progress_{idx}" for idx in range(total_artifacts)},
+        {f"progress_{idx}": f"progress_{idx}" for idx in range(total_artifacts)} | {"greetings": "greetings"},
     )
+    builder.add_edge("greetings", END)
     builder.add_conditional_edges(
         "advance",
         _route_by_artifact,

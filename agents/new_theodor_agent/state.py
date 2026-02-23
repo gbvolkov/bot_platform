@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Dict, List, NotRequired, TypedDict
+from typing import Optional, Annotated, Any, Dict, List, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 from langchain_core.messages import BaseMessage
@@ -46,12 +46,17 @@ def _merge_artifacts(
 
 
 class TheodorAgentState(AgentState[Dict[str, Any]]):
+    locale: NotRequired[Dict[str, Any]]
+
     messages: Annotated[List[BaseMessage], add_messages]
     attachments: NotRequired[List[Dict[str, Any]]]
 
     user_prompt: NotRequired[Annotated[str, _merge_latest]]
     artifacts: NotRequired[Annotated[Dict[int, ArtifactDetails], _merge_artifacts]]
 
+    prev_artifact_id: NotRequired[Annotated[Optional[int], _merge_latest]]
     current_artifact_id: NotRequired[Annotated[int, _merge_latest]]
     current_artifact_state: NotRequired[Annotated[str, _merge_latest]]
     current_artifact_text: NotRequired[Annotated[str, _merge_latest]]
+
+    greeted: NotRequired[bool]

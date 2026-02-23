@@ -33,6 +33,8 @@ from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_lo
 from .prompts import get_generation_prompt, get_summary_prompt
 from .state import ArtifactStage, TheodorAgentContext, TheodorAgentState
 from .tools import commit_artifact_final_text
+from agents.tools.store import store_artifact_tool
+
 
 LOG = logging.getLogger(__name__)
 
@@ -217,6 +219,7 @@ def _build_artifact_agent(
         model=model,
         tools=[
             commit_artifact_final_text, 
+            store_artifact_tool,
             _yandex_tool
         ],
         middleware=[
