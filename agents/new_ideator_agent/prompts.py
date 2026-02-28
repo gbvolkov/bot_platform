@@ -263,6 +263,36 @@ ________________________________________
 - Use `store_artifact_tool` when the user requests that an artifact be persisted.
 """
 
+FORMAT_PROMPT_EN = """
+Format your response as MarkdownV2:
+- Add headings where it makes sense.
+- Use bullet or numbered lists when appropriate.
+- Use code fences for code or commands.
+- **IMPORTANT** Format links properly! Pay attention to titles!
+- **IMPORTANT** Do not change wording!
+- **IMPORTANT** Do not remove or cut any information!
+- Fix obvious grammar and spacing.
+- Use fency icons to highlight important information.
+- Output ONLY Markdown, no explanation.
+- **IMPORTANT**: Do not add or modify text, only format!.
+"""
+
+FORMAT_PROMPT_RU = """
+Отформатируй свой ответ в MarkdownV2:
+- Добавляй заголовки там, где это уместно.  
+- Используй маркированные или нумерованные списки, когда это подходит.  
+- Используй блоки кода для кода или команд.  
+- **ВАЖНО** Правильно оформляй ссылки! Обращай внимание на заголовки!  
+- **ВАЖНО** Не изменяй формулировки!  
+- **ВАЖНО** Не удаляй и не сокращай информацию!  
+- Исправляй очевидные грамматические и пробельные ошибки.  
+- Используй эффектные значки, чтобы выделить важную информацию. 
+
+- Выводи ТОЛЬКО Markdown, без объяснений.  
+- **ВАЖНО**: Не добавляй и не изменяй текст, только форматируй!
+"""
+
+
 DEFAULT_LOCALE = "ru"
 
 LOCALES = {
@@ -271,6 +301,7 @@ LOCALES = {
             "ideator_prompt": IDEATOR_PROMPT_RU,
             "summary_prompt": SUMMARY_PROMPT,
             "web_search_prompt": SEARCH_TOOL_POLICY_PROMPT_RU,
+            "format_prompt": FORMAT_PROMPT_RU,
         },
         "agent": {
             "greeting": GREETINGS_RU,
@@ -283,6 +314,7 @@ LOCALES = {
         "prompts": {
             "ideator_prompt": IDEATOR_PROMPT_EN,
             "summary_prompt": SUMMARY_PROMPT,
+            "format_prompt": FORMAT_PROMPT_EN,
         },
         "agent": {
             "greeting": GREETINGS_EN,

@@ -202,7 +202,7 @@ def _build_run_agent(model: BaseChatModel, summarization_model: BaseChatModel = 
     return create_agent(
         model=model,
         tools=[commit_thematic_threads, commit_ideas, commit_final_docset, store_artifact_tool, _web_search_tool],
-        system_prompt=_PROMPTS["ideator_prompt"] + "\n\n" + _PROMPTS["web_search_prompt"],
+        system_prompt=_PROMPTS["ideator_prompt"] + "\n\n" + _PROMPTS["format_prompt"] + "\n\n" + _PROMPTS["web_search_prompt"],
         middleware=[SummarizationMiddleware(
             model=summarization_model,
             trigger=("tokens", 80000),
