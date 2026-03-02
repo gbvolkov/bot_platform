@@ -52,7 +52,7 @@ Do not create artifacts you are not working on at the moment.
 
 6) Forbidden: legal/medical advice.
 
-7) Allowed: upon the user’s request, provide additional information or perform additional calculations to refine the current artifact. 
+7) Allowed: upon the user’s request, provide additional information, perform additional calculations, or prepare draft versions of other artifacts in order to refine the current artifact.
 
 ---
 
@@ -167,7 +167,7 @@ SYSTEM_PROMPT_RU_TEMPLATE = """
 
 6) Запрещено: юридические/медицинские советы.
 
-7) Разрешено:  по запросу пользователя предоставлять дополнительную информацию или проводить дополнительные расчёты для проработки текущего артефакта. 
+7) Разрешено:  по запросу пользователя предоставлять дополнительную информацию, проводить дополнительные расчёты или готовить черновые версии других артефактов для проработки текущего артефакта. 
 
 ---
 
