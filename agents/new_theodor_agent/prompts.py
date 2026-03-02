@@ -450,7 +450,7 @@ _LOCALE_TEXT = {
             "- Ask for confirmation in one question."
         ),
         "final_tool": (
-            "- Call commit_artifact_final_text(final_text) with ONLY the artifact text and assessment."
+            "- After the user has definitively confirmed the final text of the artifact {artifact_name}, call commit_artifact_final_text(final_text) and pass ONLY the text of the artifact {artifact_name} and the rating. Calling the commit_artifact_final_text(final_text) tool is FORBIDDEN for artifacts other than {artifact_name}."
         ),
         "final_report": (
             "(Final report available for download)[{url}]\n"
@@ -507,7 +507,7 @@ _LOCALE_TEXT = {
             "- Попроси подтверждение одним вопросом."
         ),
         "final_tool": (
-            "- После того, как пользователь окончательно подтвердил финальные текст артефакта, вызови commit_artifact_final_text(final_text) и передай ТОЛЬКО текст артефакта и оценку."
+            "- После того, как пользователь окончательно подтвердил финальные текст артефакта {artifact_name}, вызови commit_artifact_final_text(final_text) и передай ТОЛЬКО текст артефакта {artifact_name} и оценку. ЗАПРЕЩЁН вызов инструмента commit_artifact_final_text(final_text) для артефактов, отличных от {artifact_name}."
         ),
         "final_report": (
             "(Здесь вы можете скачать финальный отчёт)[{url}]\n"
@@ -575,7 +575,7 @@ def get_generation_prompt(
         f"{text['task']}\n\n"
         f"{text['format_prompt']}\n\n"
         f"{text['tool_label']}\n"
-        f"{text['final_tool']}\n"
+        f"{text['final_tool'].format(artifact_name=artifact_name)}\n"
         f"{text['search_tool']}\n"
     )
 
@@ -649,5 +649,5 @@ def get_final_prompt(
         f"{text['final_task']}\n\n"
         f"{text['format_prompt']}\n\n"
         f"{text['tool_label']}\n"
-        f"{text['final_tool']}\n"
+        f"{text['final_tool'].format(artifact_name=artifact_name)}\n"
     )
