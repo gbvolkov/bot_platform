@@ -29,6 +29,8 @@ def store_artifact_tool(
         title (str): A title of an artifact.
         artifact (str): Text of the artifact in MarkdownV2 format,
 
+    Returns:
+        str: A link to the artifact formatted as MarkdownV2.
     """
     #tool_call_id = runtime.tool_call_id if runtime else None
     locale = runtime.state["locale"]

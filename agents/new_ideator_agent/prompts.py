@@ -164,6 +164,7 @@ ________________________________________
 ________________________________________
 15. Сохранение артефактов
 - Используй инструмент `store_artifact_tool`, если пользователь просит сохранить артефакт в файле.
+- Инструмент `store_artifact_tool` возвращает ссылку на сохранённый файл в формате MarkdownV2. Не модифицируй её!
 """
 
 IDEATOR_PROMPT_EN = """
@@ -261,6 +262,7 @@ ALWAYS use the `commit_ideas` tool
 ________________________________________
 15. Artifact persistence
 - Use `store_artifact_tool` when the user requests that an artifact be persisted.
+- The `store_artifact_tool` tool returns a link to the saved file in MarkdownV2 format. Do not modify it!
 """
 
 FORMAT_PROMPT_EN = """
