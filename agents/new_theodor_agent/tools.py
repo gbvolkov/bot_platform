@@ -60,8 +60,9 @@ def commit_artifact_final_text(
     """Persist the final artifact text (including criteria assessment)."""
     tool_call_id = runtime.tool_call_id if runtime else None
     artifact_id = runtime.state["current_artifact_id"]
+    artifact_definition = _resolve_definition(artifact_id)
     details = {
-        "artifact_definition": _resolve_definition(artifact_id),
+        "artifact_definition": artifact_definition,
         "artifact_final_text": final_text,
     }
     return Command(
@@ -69,6 +70,6 @@ def commit_artifact_final_text(
             "artifacts": {artifact_id: details},
             "current_artifact_state": ArtifactStage.ARTIFACT_CONFIRMED,
             #"current_artifact_id": artifact_id+1,
-            "messages": [ToolMessage(content="Success", tool_call_id=tool_call_id)],
+            "messages": [ToolMessage(content=f"Articact {artifact_id}:{artifact_definition.get('name')} successfully committed.", tool_call_id=tool_call_id)],
         }
     )

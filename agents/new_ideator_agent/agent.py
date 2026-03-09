@@ -249,7 +249,7 @@ def initialize_agent(
         callback_handlers += [CallbackHandler()]
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model="base", provider=provider.value, temperature=0.4, streaming=streaming)
+    llm = get_llm(model="base", provider=provider.value, temperature=0.4, streaming=streaming, reasoning="medium")
     summarization_llm = get_llm(model="mini", provider=provider.value, temperature=0.0)
     
     builder = StateGraph(IdeatorAgentState)

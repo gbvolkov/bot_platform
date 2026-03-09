@@ -1,4 +1,4 @@
-__pycache__
+﻿__pycache__
 .venv
 data
 keys
@@ -14,7 +14,10 @@ auth_glossary.json
 nohup.out
 *.db
 *.log
-docs
+docs/*
+!docs/platform/
+!docs/platform/**
 uv.lock
 *.db-shm
 *.db-wal
+

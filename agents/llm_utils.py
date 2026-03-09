@@ -77,6 +77,8 @@ def get_model(provider: str, mode: str, config_path: str = "models.toml") -> str
 # Example:
 # model = get_model("openai", "mini")  # -> "gpt-4o-mini"
 
+
+#@lru_cache(maxsize=1)
 def get_llm(
         model: str = "base", 
         provider: str = None,
@@ -84,6 +86,9 @@ def get_llm(
         frequency_penalty: Optional[float] = None,
         *,
         streaming: bool = True,
+        verbosity: Optional[str] = None,
+        reasoning: Optional[str] = None,
+        max_tool_calls: Optional[int] = 3,
         callbacks: Optional[Sequence[BaseCallbackHandler]] = None,    
     ):
     if provider is None:
@@ -91,8 +96,8 @@ def get_llm(
     llm_model = get_model(provider, model)
     if provider == "openai":
         #TODO: model=="base" is a temporary fix for verbosity issue and sgall be removed in future
-        verbosity = "low" if model == "base" else "medium"
-        reasoning = "none" if model == "base" else "minimal"
+        if verbosity is None: verbosity = "low" if model == "base" else "medium"
+        if reasoning is None: reasoning = "none" if model == "base" else "minimal"
 
         return ChatOpenAI(
             model=llm_model,
@@ -101,8 +106,8 @@ def get_llm(
             verbosity=verbosity,                     # короче ответы -> быстрее
             #max_tokens=2000,                      # ограничение генерации
             #service_tier="default",              # или "auto"/"flex" по политике
-            use_previous_response_id=True,       # меньше контекста в каждом запросе
-            model_kwargs={"max_tool_calls": 3},  # max number of tool calls per response
+            use_previous_response_id=False,       # меньше контекста в каждом запросе
+            model_kwargs={"max_tool_calls": max_tool_calls},  # max number of tool calls per response
             temperature=temperature, 
             frequency_penalty=frequency_penalty,
             streaming=streaming,
@@ -116,25 +121,19 @@ def get_llm(
         
     elif provider == "openai_think":
         #TODO: model=="base" is a temporary fix for verbosity issue and sgall be removed in future
-        verbosity = "low" if model == "base" else "medium"
-        reasoning = {
-            "effort": "medium",  # 'low', 'medium', or 'high'
-            #"summary": "auto",  # 'detailed', 'auto', or None
-        } if model == "base"  else {
-            "effort": "minimal",  # 'low', 'medium', or 'high'
-            #"summary": "auto",  # 'detailed', 'auto', or None
-        }
+        if verbosity is None: verbosity = "low" if model == "base" else "medium"
+        if reasoning is None: reasoning = "medium" if model == "base"  else "minimal"
 
         return ChatOpenAI(
             model=llm_model,
             api_key=os.getenv("OPENAI_API_KEY_PERSONAL"),
             use_responses_api=True,              # важно для GPT-5.x параметров
-            reasoning=reasoning,                # минимум латентности
+            reasoning={"effort": reasoning},                # минимум латентности
             verbosity=verbosity,                     # короче ответы -> быстрее
             #max_tokens=2000,                      # ограничение генерации
             #service_tier="default",              # или "auto"/"flex" по политике
             use_previous_response_id=True,       # меньше контекста в каждом запросе
-            model_kwargs={"max_tool_calls": 3},  # max number of tool calls per response
+            model_kwargs={"max_tool_calls": max_tool_calls},  # max number of tool calls per response
             temperature=temperature, 
             frequency_penalty=frequency_penalty,
             streaming=streaming,
