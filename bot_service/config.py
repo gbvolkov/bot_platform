@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal, Optional
@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     )
     api_base_path: str = Field(default="/api")
     agent_config_path: str = Field(
-        default="bot_service/load.json",
+        default="data/load.json",
         description="Path to JSON/YAML agent registry configuration.",
     )
 
@@ -62,3 +62,4 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+

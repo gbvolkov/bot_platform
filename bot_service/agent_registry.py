@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import importlib
@@ -48,7 +48,7 @@ _SKIP_CHECKPOINTER = object()
 def _resolve_config_path(raw_path: str | None) -> Path:
     base_dir = Path(__file__).resolve().parent.parent
     if not raw_path:
-        raw_path = "bot_service/load.json"
+        raw_path = "data/load.json"
     path = Path(raw_path)
     if path.is_absolute():
         return path
@@ -443,3 +443,4 @@ class AgentRegistry:
 
 
 agent_registry = AgentRegistry()
+

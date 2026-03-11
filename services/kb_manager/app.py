@@ -16,6 +16,7 @@ except ImportError as exc:  # pragma: no cover - optional dependency
 import config
 
 from .enums import ChunkingStrategy, ChunkSizeUnit, EmbeddingBackend, KnowledgeBasePreparationMethod
+from .gaz_runtime import GazRuntimeService
 from .models import ChunkingConfig, WebhookRegistration
 from .notifications import get_broadcaster
 from .service import KnowledgeBaseManagerService
@@ -97,9 +98,45 @@ class IndexPathPayload(BaseModel):
     path: str
 
 
+class GazRebuildPayload(BaseModel):
+    force: bool = False
+
+
+class GazPackPayload(BaseModel):
+    slots: Dict[str, Any] = Field(default_factory=dict)
+    problem_summary: str = ""
+    top_k: int = Field(5, ge=1, le=5)
+
+
+class GazReadPayload(BaseModel):
+    focus: str = Field(..., min_length=1)
+    max_segments: int = Field(3, ge=1, le=5)
+
+
+class GazSearchPayload(BaseModel):
+    query: str = Field(..., min_length=1)
+    intent: str = Field(..., min_length=1)
+    families: Sequence[str] = ()
+    competitor: str = ""
+    top_k: int = Field(5, ge=1, le=6)
+
+
+class GazResearchEstimatePayload(BaseModel):
+    query: str = Field(..., min_length=1)
+    intended_depth: str = Field(..., min_length=1)
+    intent: str = Field(..., min_length=1)
+    families: Sequence[str] = ()
+    competitor: str = ""
+
+
 kb_service = KnowledgeBaseManagerService(
     reload_broadcaster=get_broadcaster(),
     default_index_path=Path(config.PRODUCT_INDEX_FOLDER),
+)
+
+gaz_runtime_service = GazRuntimeService(
+    docs_root=Path("data/gaz-docs"),
+    cache_root=Path("data/gaz_index"),
 )
 
 
@@ -133,10 +170,7 @@ def ingest_directory(payload: DirectoryIngestPayload) -> Dict[str, Any]:
 @app.post("/documents/{document_id}/chunk", response_model=Dict[str, Any])
 def chunk_document(document_id: str, payload: ChunkingConfigPayload | None = None) -> Dict[str, Any]:
     try:
-        chunks = kb_service.chunk_document(
-            document_id,
-            chunking=payload.to_config() if payload else None,
-        )
+        chunks = kb_service.chunk_document(document_id, chunking=payload.to_config() if payload else None)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"document_id": document_id, "chunk_count": len(chunks)}
@@ -148,10 +182,7 @@ def list_chunks(document_id: str) -> Dict[str, Any]:
         chunks = kb_service.show_chunked_document(document_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {
-        "document_id": document_id,
-        "chunks": [chunk.__dict__ for chunk in chunks],
-    }
+    return {"document_id": document_id, "chunks": [chunk.__dict__ for chunk in chunks]}
 
 
 @app.post("/documents/index", response_model=Dict[str, Any])
@@ -166,11 +197,7 @@ def index_documents(payload: IndexingPayload) -> Dict[str, Any]:
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {
-        "event_type": event.event_type,
-        "document_ids": list(event.document_ids),
-        "payload": event.payload,
-    }
+    return {"event_type": event.event_type, "document_ids": list(event.document_ids), "payload": event.payload}
 
 
 @app.post("/webhooks", response_model=Dict[str, str])
@@ -242,7 +269,7 @@ def set_preparation(payload: Dict[str, str]) -> Dict[str, str]:
 
 @app.post("/config/chunking", response_model=Dict[str, Any])
 def configure_chunking(payload: ChunkingConfigPayload) -> Dict[str, Any]:
-    config = kb_service.configure_chunking(
+    current = kb_service.configure_chunking(
         strategy=payload.strategy,
         size=payload.size,
         overlap=payload.overlap,
@@ -251,12 +278,97 @@ def configure_chunking(payload: ChunkingConfigPayload) -> Dict[str, Any]:
         respect_table_rows=payload.respect_table_rows,
         join_on_retrieval=payload.join_on_retrieval,
     )
-    return {"chunking": config.__dict__}
+    return {"chunking": current.__dict__}
+
+
+@app.get("/gaz/runtime/collections/{collection_id}/status", response_model=Dict[str, Any])
+def gaz_collection_status(collection_id: str) -> Dict[str, Any]:
+    return gaz_runtime_service.collection_status(collection_id)
+
+
+@app.post("/gaz/runtime/collections/{collection_id}/rebuild", response_model=Dict[str, Any])
+def gaz_rebuild_collection(collection_id: str, payload: GazRebuildPayload) -> Dict[str, Any]:
+    return gaz_runtime_service.rebuild_collection(collection_id=collection_id, force=payload.force)
+
+
+@app.post("/gaz/runtime/collections/{collection_id}/materials/search", response_model=Dict[str, Any])
+def gaz_search_materials(collection_id: str, payload: GazSearchPayload) -> Dict[str, Any]:
+    try:
+        return gaz_runtime_service.search_sales_materials(
+            query=payload.query,
+            intent=payload.intent,
+            families=payload.families,
+            competitor=payload.competitor,
+            top_k=payload.top_k,
+            collection_id=collection_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/gaz/runtime/collections/{collection_id}/materials/estimate", response_model=Dict[str, Any])
+def gaz_estimate_materials(collection_id: str, payload: GazResearchEstimatePayload) -> Dict[str, Any]:
+    try:
+        return gaz_runtime_service.estimate_research_cost(
+            query=payload.query,
+            intended_depth=payload.intended_depth,
+            intent=payload.intent,
+            families=payload.families,
+            competitor=payload.competitor,
+            collection_id=collection_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/gaz/runtime/collections/{collection_id}/packs/{branch}", response_model=Dict[str, Any])
+def gaz_get_branch_pack(collection_id: str, branch: str, payload: GazPackPayload) -> Dict[str, Any]:
+    try:
+        return gaz_runtime_service.get_branch_pack(
+            branch=branch,
+            slots=payload.slots,
+            problem_summary=payload.problem_summary,
+            top_k=payload.top_k,
+            collection_id=collection_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/gaz/runtime/collections/{collection_id}/materials/{candidate_id}/read", response_model=Dict[str, Any])
+def gaz_read_material(collection_id: str, candidate_id: str, payload: GazReadPayload) -> Dict[str, Any]:
+    try:
+        return gaz_runtime_service.read_material(
+            candidate_id=candidate_id,
+            focus=payload.focus,
+            max_segments=payload.max_segments,
+            collection_id=collection_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/gaz/runtime/collections/{collection_id}/candidates/{candidate_id}/read", response_model=Dict[str, Any])
+def gaz_read_candidate_legacy(collection_id: str, candidate_id: str, payload: GazReadPayload) -> Dict[str, Any]:
+    try:
+        return gaz_runtime_service.read_material(
+            candidate_id=candidate_id,
+            focus=payload.focus,
+            max_segments=payload.max_segments,
+            collection_id=collection_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def create_app() -> FastAPI:
     """Factory that returns the FastAPI application instance."""
     return app
+
 
 
 def main() -> None:  # pragma: no cover - executable entrypoint

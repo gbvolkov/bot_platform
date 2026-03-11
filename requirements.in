@@ -20,6 +20,7 @@ protobuf==6.33.0
 pydantic==2.12.3
 pymorphy2==0.9.1
 python-dotenv==1.1.1
+python-pptx>=1.0.2
 rank_llm
 Requests==2.32.5
 telegramify_markdown==0.5.2
@@ -29,3 +30,4 @@ transliterate==1.10.2
 typing_extensions==4.15.0
 whisper==1.1.10
 palimpsest@git+https://github.com/gbvolkov/PalimpsestLib.git
+rag-lib[raptor]@git+https://github.com/gbvolkov/rag-lib.git

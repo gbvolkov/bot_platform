@@ -19,11 +19,11 @@ def main() -> None:
     parser.add_argument(
         "--reload",
         dest="reload",
-        action="store_true",
+        action="store_false",
         default=_env_flag("BOT_SERVICE_RELOAD", True),
         help="Enable auto-reload (default: on).",
     )
-    parser.add_argument("--no-reload", dest="reload", action="store_false", help="Disable auto-reload.")
+    parser.add_argument("--no-reload", dest="reload", action="store_true", help="Disable auto-reload.")
     parser.add_argument(
         "--log-level",
         default=os.getenv("BOT_SERVICE_LOG_LEVEL", "info"),
