@@ -20,4 +20,7 @@ docs/*
 uv.lock
 *.db-shm
 *.db-wal
+.tmp_sysadmin_mcp_kit/
+pytest-cache*
+
 
