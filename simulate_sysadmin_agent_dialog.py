@@ -19,7 +19,6 @@ try:
 except ImportError:  # pragma: no cover - Windows
     termios = None
 
-from agents.sysadmin_agent.agent import initialize_agent
 from agents.utils import ModelType, extract_text, get_llm
 
 
@@ -52,6 +51,7 @@ Commands:
   /exit              leave the simulator
 
 In AI mode, press Enter to generate the next customer turn.
+For multi-line human replies or command output, enter /multiline, then finish with /end.
 """.strip()
 _MCP_AUTH_ERROR_TEXT = "Sysadmin MCP auth is not configured."
 _MCP_AUTH_FAILED_TEXT = "Sysadmin MCP authentication failed."
@@ -59,6 +59,8 @@ _MCP_AUTH_REFRESH_ERROR_TEXT = "Sysadmin MCP authentication failed after refresh
 _MCP_URL = os.environ.get("SYSADMIN_MCP_URL", "http://127.0.0.1:8000/mcp")
 _SECRET_HINTS = ("password", "passphrase", "secret")
 _INPUT_FALLBACK_ENCODINGS = ("utf-8", "cp1251", "cp866", "latin-1")
+_MULTILINE_START = "/multiline"
+_MULTILINE_END = "/end"
 
 
 def _parse_provider(raw_value: str) -> ModelType:
@@ -200,6 +202,27 @@ def _read_interrupt_input(prompt: str, *, secret: bool) -> str:
     return raw_value
 
 
+def _read_text_input(
+    prompt: str,
+    *,
+    secret: bool,
+    allow_multiline: bool = False,
+) -> str:
+    raw_value = _read_interrupt_input(prompt, secret=secret)
+    if secret or not allow_multiline:
+        return raw_value
+    if raw_value.strip().lower() != _MULTILINE_START:
+        return raw_value
+
+    print(f"[Multiline mode] Paste text. Finish with {_MULTILINE_END} on a separate line.")
+    lines: list[str] = []
+    while True:
+        line = _read_interrupt_input("... ", secret=False)
+        if line.strip().lower() == _MULTILINE_END:
+            return "\n".join(lines)
+        lines.append(line)
+
+
 def _interrupt_resume_value(payload: Mapping[str, Any]) -> Any:
     fields = _interrupt_fields(payload)
     non_approval_fields = [
@@ -209,9 +232,10 @@ def _interrupt_resume_value(payload: Mapping[str, Any]) -> Any:
     if payload.get("responseMode") == "text" and len(non_approval_fields) == 1:
         field = non_approval_fields[0]
         label = str(field.get("title") or field.get("name") or "Value")
-        value = _read_interrupt_input(
+        value = _read_text_input(
             f"{label}> ",
             secret=bool(field.get("secret")),
+            allow_multiline=not bool(field.get("secret")),
         )
         return {"value": value}
 
@@ -223,9 +247,10 @@ def _interrupt_resume_value(payload: Mapping[str, Any]) -> Any:
                 continue
             label = str(field.get("title") or field_name)
             field_type = str(field.get("type") or "").lower()
-            value = _read_interrupt_input(
+            value = _read_text_input(
                 f"{label}> ",
                 secret=bool(field.get("secret")),
+                allow_multiline=field_type != "boolean" and not bool(field.get("secret")),
             )
             if not value and not field.get("required"):
                 continue
@@ -423,6 +448,8 @@ async def run_dialog_simulator(
     mode: str = DEFAULT_MODE,
     scenario: str = DEFAULT_SCENARIO,
 ) -> None:
+    from agents.sysadmin_agent.agent import initialize_agent
+
     graph = initialize_agent(provider=provider, streaming=False)
     customer_llm = get_llm(
         model="mini",
@@ -445,7 +472,11 @@ async def run_dialog_simulator(
 
     while True:
         prompt = "Customer (human)> " if mode == "human" else "Customer (AI, Enter=generate)> "
-        raw_text = _read_raw_console_input(prompt, secret=False)
+        raw_text = _read_text_input(
+            prompt,
+            secret=False,
+            allow_multiline=mode == "human",
+        )
         handled, mode, scenario, should_reset = _handle_command(raw_text, mode=mode, scenario=scenario)
         if should_reset:
             history = []
