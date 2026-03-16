@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, AsyncIterator
 
-from fastapi.concurrency import run_in_threadpool
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -177,30 +175,27 @@ async def invoke_agent(
         raw_attachments=raw_attachments or None,
     )
 
-    runtime_context: Optional[Dict[str, Any]] = None
+    if pending_interrupt:
+        logging.info(
+            "invoke_agent resume conversation_id=%s interrupt_id=%s raw_user_text_chars=%d",
+            conversation_id,
+            pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
+            len(raw_user_text or payload.text or ""),
+        )
+        response = await agent.ainvoke(
+            Command(resume=raw_user_text or payload.text or ""),
+            config=config,
+        )
+    else:
+        initial_state: Dict[str, Any] = {"messages": [human]}
+        if raw_attachments:
+            initial_state["attachments"] = raw_attachments
+        response = await agent.ainvoke(initial_state, config=config)
 
-    def _invoke() -> Dict[str, Any]:
-        if pending_interrupt:
-            logging.info(
-                "invoke_agent resume conversation_id=%s interrupt_id=%s raw_user_text_chars=%d",
-                conversation_id,
-                pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
-                len(raw_user_text or payload.text or ""),
-            )
-            response = agent.invoke(
-                Command(resume=raw_user_text or payload.text or ""),
-                config=config,
-            )
-        else:
-            initial_state: Dict[str, Any] = {"messages": [human]}
-            if raw_attachments:
-                initial_state["attachments"] = raw_attachments
-            response = agent.invoke(initial_state, config=config)
-        if isinstance(response, dict):
-            return response
-        return {"messages": response}
-
-    result = await run_in_threadpool(_invoke)
+    if isinstance(response, dict):
+        result = response
+    else:
+        result = {"messages": response}
     messages = result.get("messages") or []
 
     ai_message: Optional[AIMessage] = None
@@ -340,9 +335,8 @@ async def invoke_agent_stream(
         raw_attachments=raw_attachments or None,
     )
 
-    loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
-    result_future: asyncio.Future = loop.create_future()
+    result_future: asyncio.Future = asyncio.get_running_loop().create_future()
 
     def _set_result(value: Dict[str, Any]) -> None:
         if not result_future.done():
@@ -355,7 +349,7 @@ async def invoke_agent_stream(
     def _enqueue(item: Dict[str, Any] | None) -> None:
         queue.put_nowait(item)
 
-    def _run() -> None:
+    async def _run() -> None:
         last_state: Dict[str, Any] | None = None
         saw_delta = False
         stream_modes, subgraph_stream = agent_registry.stream_config(agent_id)
@@ -369,7 +363,7 @@ async def invoke_agent_stream(
                     pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
                     len(raw_user_text or payload.text or ""),
                 )
-                stream = agent.stream(
+                stream = agent.astream(
                     Command(resume=raw_user_text or payload.text or ""),
                     config=config,
                     stream_mode=stream_modes,
@@ -379,14 +373,14 @@ async def invoke_agent_stream(
                 initial_state: Dict[str, Any] = {"messages": [human]}
                 if raw_attachments:
                     initial_state["attachments"] = raw_attachments
-                stream = agent.stream(
+                stream = agent.astream(
                     initial_state,
                     config=config,
                     stream_mode=stream_modes,
                     subgraphs=subgraph_stream,
                 )
 
-            for item in stream:
+            async for item in stream:
                 if not isinstance(item, tuple):
                     continue
                 if len(item) == 2:
@@ -421,25 +415,25 @@ async def invoke_agent_stream(
                                 agent_id,
                             )
                         saw_delta = True
-                        loop.call_soon_threadsafe(_enqueue, {"type": "chunk", "content": delta})
+                        _enqueue({"type": "chunk", "content": delta})
                 elif mode == "values":
                     if isinstance(payload_item, dict):
                         last_state = payload_item
                 elif mode == "custom":
-                    loop.call_soon_threadsafe(_enqueue, {"type": "custom", "data": payload_item})
+                    _enqueue({"type": "custom", "data": payload_item})
         except BaseException as exc:
-            loop.call_soon_threadsafe(_set_exception, exc)
+            _set_exception(exc)
         else:
             if last_state is None and last_ai_message is None and merged_chunk is not None:
                 last_ai_message = message_chunk_to_message(merged_chunk)
             if last_state is None and last_ai_message is not None:
                 last_state = {"messages": [last_ai_message]}
             agent_result = _build_agent_result_from_state(state=last_state, human=human)
-            loop.call_soon_threadsafe(_set_result, agent_result)
+            _set_result(agent_result)
         finally:
-            loop.call_soon_threadsafe(_enqueue, None)
+            await queue.put(None)
 
-    threading.Thread(target=_run, daemon=True).start()
+    asyncio.create_task(_run())
 
     async def _event_iter() -> AsyncIterator[Dict[str, Any]]:
         while True:
