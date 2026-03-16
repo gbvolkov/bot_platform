@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import locale
 import os
+import sys
 import uuid
 from typing import Any, Mapping
 
@@ -11,6 +13,11 @@ import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools.base import ToolException
 from langgraph.types import Command
+
+try:
+    import termios
+except ImportError:  # pragma: no cover - Windows
+    termios = None
 
 from agents.sysadmin_agent.agent import initialize_agent
 from agents.utils import ModelType, extract_text, get_llm
@@ -51,6 +58,7 @@ _MCP_AUTH_FAILED_TEXT = "Sysadmin MCP authentication failed."
 _MCP_AUTH_REFRESH_ERROR_TEXT = "Sysadmin MCP authentication failed after refreshing the access token."
 _MCP_URL = os.environ.get("SYSADMIN_MCP_URL", "http://127.0.0.1:8000/mcp")
 _SECRET_HINTS = ("password", "passphrase", "secret")
+_INPUT_FALLBACK_ENCODINGS = ("utf-8", "cp1251", "cp866", "latin-1")
 
 
 def _parse_provider(raw_value: str) -> ModelType:
@@ -132,8 +140,61 @@ def _interrupt_fields(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return fields
 
 
+def _decode_console_bytes(raw_value: bytes) -> str:
+    encodings: list[str] = []
+    seen: set[str] = set()
+    for encoding in (
+        sys.stdin.encoding,
+        locale.getpreferredencoding(False),
+        *_INPUT_FALLBACK_ENCODINGS,
+    ):
+        normalized = str(encoding or "").strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        encodings.append(normalized)
+
+    for encoding in encodings:
+        try:
+            return raw_value.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    fallback = encodings[0] if encodings else "utf-8"
+    return raw_value.decode(fallback, errors="replace")
+
+
+def _read_raw_console_input(prompt: str, *, secret: bool) -> str:
+    stdin_buffer = getattr(sys.stdin, "buffer", None)
+    if stdin_buffer is None:
+        return getpass.getpass(prompt) if secret else input(prompt)
+
+    if secret and termios is not None and sys.stdin.isatty():
+        fd = sys.stdin.fileno()
+        original = termios.tcgetattr(fd)
+        hidden = termios.tcgetattr(fd)
+        hidden[3] &= ~termios.ECHO
+        print(prompt, end="", flush=True)
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, hidden)
+            raw_value = stdin_buffer.readline()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original)
+            print()
+    else:
+        if secret and os.name == "nt":
+            return getpass.getpass(prompt)
+        print(prompt, end="", flush=True)
+        raw_value = stdin_buffer.readline()
+
+    if not raw_value:
+        raise EOFError
+    return _decode_console_bytes(raw_value.rstrip(b"\r\n"))
+
+
 def _read_interrupt_input(prompt: str, *, secret: bool) -> str:
-    raw_value = getpass.getpass(prompt) if secret else input(prompt)
+    raw_value = _read_raw_console_input(prompt, secret=secret)
     if raw_value.strip().lower() in {"/exit", "exit"}:
         raise KeyboardInterrupt
     return raw_value
@@ -384,7 +445,7 @@ async def run_dialog_simulator(
 
     while True:
         prompt = "Customer (human)> " if mode == "human" else "Customer (AI, Enter=generate)> "
-        raw_text = input(prompt)
+        raw_text = _read_raw_console_input(prompt, secret=False)
         handled, mode, scenario, should_reset = _handle_command(raw_text, mode=mode, scenario=scenario)
         if should_reset:
             history = []
