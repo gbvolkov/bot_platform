@@ -11,6 +11,7 @@ class SimpleAgentContext(TypedDict, total=False):
     """Runtime context for the system agent."""
 
     system_prompt: str
+    tools: List[Any]
 
 
 

@@ -7,12 +7,6 @@ from typing import Annotated, Any, Dict, List, NotRequired, Optional, TypedDict
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
-from langchain.agents.structured_output import (
-    AutoStrategy,
-    ProviderStrategy,
-    StructuredOutputValidationError,
-    ToolStrategy,
-)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.modifier import RemoveMessage
@@ -28,12 +22,7 @@ from langgraph.config import get_stream_writer
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 
-from agents import state
 import config
-
-from utils.utils import is_valid_json_string
-from agents.tools.think import ThinkTool
-from agents.tools.yandex_search import YandexSearchTool as SearchTool
 
 from agents.utils import ModelType, get_llm
 from platform_utils.llm_logger import JSONFileTracer
@@ -170,7 +159,7 @@ def cleanup_messages_node(
         "phase" : "run"
     }
 
-def _build_run_agent(model: BaseChatModel):
+def _build_run_agent(model: BaseChatModel, tools: List[Any] | None = None):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state: SimpleAgentState = request.state
@@ -179,7 +168,7 @@ def _build_run_agent(model: BaseChatModel):
 
     return create_agent(
         model=model,
-        #tools=[_think_tool],
+        tools=tools or [],
         middleware=[build_prompt],
         state_schema=SimpleAgentState,
         context_schema=SimpleAgentContext,
@@ -187,7 +176,19 @@ def _build_run_agent(model: BaseChatModel):
 
 
 def create_run_node(model: BaseChatModel):
-    return _build_run_agent(model)
+    def run_node(
+        state: SimpleAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[SimpleAgentContext],
+    ) -> SimpleAgentState:
+        tools = []
+        if runtime.context:
+            tools = runtime.context.get("tools") or []
+
+        run_agent = _build_run_agent(model, tools)
+        return run_agent.invoke(state, config=config, context=runtime.context)
+
+    return run_node
 
 
 def initialize_agent(
