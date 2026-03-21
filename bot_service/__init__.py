@@ -1,6 +1,8 @@
-"""Lightweight web chat service wiring."""
+"""Common bot_service package.
 
-from .main import create_app
+Import concrete entry points from submodules, e.g. `bot_service.main`.
+"""
 
-__all__ = ["create_app"]
+from __future__ import annotations
 
+__all__: list[str] = []

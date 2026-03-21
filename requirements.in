@@ -1,3 +1,4 @@
+deepagents
 duckduckgo_search==8.1.1
 fastapi==0.120.0
 google_api_python_client==2.185.0

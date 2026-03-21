@@ -36,7 +36,11 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+def load_model_modules() -> None:
+    from . import models as _models  # noqa: F401
+
+
 async def init_models() -> None:
+    load_model_modules()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-

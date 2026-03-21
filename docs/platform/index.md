@@ -4,14 +4,15 @@ This documentation set describes the current platform implementation in `C:\Proj
 
 ## Reading order
 
-1. [Platform Principles And Topology](architecture/principles-and-topology.md)
-2. [Runtime Flows](architecture/runtime-flows.md)
-3. [Platform Building Blocks](architecture/platform-building-blocks.md)
-4. [Registry And Variants](architecture/registry-and-variants.md)
-5. [Common Agent Architecture](agents/common-agent-architecture.md)
-6. [Agent Support Modules](agents/support-modules.md)
-7. Agent implementation pages in [`agents/`](agents/index.md)
-8. Service and protocol references in [`interfaces/`](interfaces/index.md)
+1. [Repository Findings](findings.md)
+2. [Platform Principles And Topology](architecture/principles-and-topology.md)
+3. [Runtime Flows](architecture/runtime-flows.md)
+4. [Platform Building Blocks](architecture/platform-building-blocks.md)
+5. [Registry And Variants](architecture/registry-and-variants.md)
+6. [Common Agent Architecture](agents/common-agent-architecture.md)
+7. [Agent Support Modules](agents/support-modules.md)
+8. Agent implementation pages in [`agents/`](agents/index.md)
+9. Service and protocol references in [`interfaces/`](interfaces/index.md)
 
 ## Documentation map
 
@@ -37,9 +38,9 @@ This documentation set describes the current platform implementation in `C:\Proj
 
 ## Quick links
 
+- [Repository Findings](findings.md)
 - [Common Agent Architecture](agents/common-agent-architecture.md)
 - [Support Modules](agents/support-modules.md)
 - [Bot Service API](interfaces/bot_service_api.md)
 - [Task Queue And Worker](interfaces/task_queue_and_worker.md)
 - [OpenAI Proxy API](interfaces/openai_proxy_api.md)
-
