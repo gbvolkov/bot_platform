@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from typing import Annotated, Any, NotRequired
+
+from langchain.agents import AgentState
+from langchain.agents.middleware.types import OmitFromInput
+
+
+class SalesLeadAgentState(AgentState[Any]):
+    current_user_request: NotRequired[Annotated[str, OmitFromInput]]
+    active_run_id: NotRequired[Annotated[str | None, OmitFromInput]]
+    active_run_ready: NotRequired[Annotated[bool, OmitFromInput]]
+    active_run_query_signature: NotRequired[Annotated[str | None, OmitFromInput]]
+    current_run_id: NotRequired[Annotated[str | None, OmitFromInput]]
+    current_query_signature: NotRequired[Annotated[str | None, OmitFromInput]]
+    last_processed_human_message_id: NotRequired[Annotated[str | None, OmitFromInput]]
+    task_understanding: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    procurement_relevance: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    turn_validation: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    turn_tool_requirements: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    turn_tool_usage: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    assessment: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    risk_verification: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    search_url: NotRequired[Annotated[str | None, OmitFromInput]]
+    search_filters: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    acquisition_status: NotRequired[Annotated[str | None, OmitFromInput]]
+    acquisition_attempts: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    last_acquisition_error: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    last_purchase_search_result: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    last_open_source_fetch_result: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    raw_procurement_hits: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    procurement_hits: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    dropped_procurement_hits: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    unclassified_procurement_hits: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    open_source_hits: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    prepared_documents: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    index_id: NotRequired[Annotated[str | None, OmitFromInput]]
+    extracted_facts: NotRequired[Annotated[dict[str, Any], OmitFromInput]]
+    normalized_inns: NotRequired[Annotated[list[str], OmitFromInput]]
+    company_names: NotRequired[Annotated[list[str], OmitFromInput]]
+    scoring_results: NotRequired[Annotated[dict[str, Any], OmitFromInput]]
+    fssp_results: NotRequired[Annotated[dict[str, Any], OmitFromInput]]
+    last_doc_search_result: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    evidence: NotRequired[Annotated[list[dict[str, Any]], OmitFromInput]]
+    missing_data: NotRequired[Annotated[list[str], OmitFromInput]]
+    recommended_next_step: NotRequired[Annotated[str | None, OmitFromInput]]
+    normalized_final_answer: NotRequired[Annotated[dict[str, Any] | None, OmitFromInput]]
+    rendered_answer: NotRequired[Annotated[str | None, OmitFromInput]]
+    semantic_dirty: NotRequired[Annotated[bool, OmitFromInput]]
+    session_notes: NotRequired[Annotated[list[str], OmitFromInput]]
+    traceability_notes: NotRequired[Annotated[list[str], OmitFromInput]]

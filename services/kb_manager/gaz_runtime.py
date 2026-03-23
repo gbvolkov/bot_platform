@@ -36,84 +36,84 @@ _SUPPORTED_EXTENSIONS = {
 }
 
 _PASSENGER_KEYWORDS = (
-    "\u043f\u0430\u0441\u0441\u0430\u0436\u0438\u0440",
-    "\u0430\u0432\u0442\u043e\u0431\u0443\u0441",
-    "\u043c\u0430\u0440\u0448\u0440\u0443\u0442",
+    "пассажир",
+    "автобус",
+    "маршрут",
     "vector",
     "citymax",
-    "\u043f\u0430\u0437",
+    "паз",
 )
 _SPECIAL_BODY_KEYWORDS = {
-    "refrigerator": ("\u0445\u043e\u043b\u043e\u0434", "\u0440\u0435\u0444\u0440\u0438\u0436\u0435\u0440", "cold", "reefer", "fridge"),
-    "vacuum": ("\u0432\u0430\u043a\u0443\u0443\u043c",),
-    "kmu": ("\u043a\u043c\u0443", "\u043a\u0440\u0430\u043d\u043e\u043c\u0430\u043d\u0438\u043f"),
-    "platform": ("\u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c",),
-    "tow": ("\u044d\u0432\u0430\u043a\u0443\u0430\u0442", "tow"),
-    "garbage": ("\u043c\u0443\u0441\u043e\u0440",),
-    "tank": ("\u0446\u0438\u0441\u0442\u0435\u0440\u043d", "tank"),
-    "tipper": ("\u0441\u0430\u043c\u043e\u0441\u0432\u0430\u043b", "tipper"),
-    "lift": ("\u043f\u043e\u0434\u044a\u0451\u043c", "lift"),
-    "bunker": ("\u0431\u0443\u043d\u043a\u0435\u0440",),
+    "refrigerator": ("холод", "рефрижер", "cold", "reefer", "fridge"),
+    "vacuum": ("вакуум",),
+    "kmu": ("кму", "краноманип"),
+    "platform": ("платформ",),
+    "tow": ("эвакуат", "tow"),
+    "garbage": ("мусор",),
+    "tank": ("цистерн", "tank"),
+    "tipper": ("самосвал", "tipper"),
+    "lift": ("подъём", "lift"),
+    "bunker": ("бункер",),
 }
 _PRODUCT_KEYWORDS = {
-    "gazelle_next": ("\u0433\u0430\u0437\u0435\u043b\u044c next", "gazelle next"),
-    "gazelle_nn": ("\u0433\u0430\u0437\u0435\u043b\u044c nn", "gazelle nn"),
-    "gazelle_city": ("\u0433\u0430\u0437\u0435\u043b\u044c city", "gazelle city"),
-    "sobol_nn": ("\u0441\u043e\u0431\u043e\u043b\u044c nn", "sobol nn"),
-    "sobol_business": ("\u0441\u043e\u0431\u043e\u043b\u044c business", "sobol business", "\u0441\u043e\u0431\u043e\u043b\u044c \u0431\u0438\u0437\u043d\u0435\u0441"),
-    "gazon_next": ("\u0433\u0430\u0437\u043e\u043d next", "gazon next"),
-    "valdai": ("\u0432\u0430\u043b\u0434\u0430\u0439", "valdai"),
-    "sadko": ("\u0441\u0430\u0434\u043a\u043e", "sadko"),
-    "vector_next": ("vector next", "\u0432\u0435\u043a\u0442\u043e\u0440 next"),
-    "citymax": ("citymax", "city max", "\u0441\u0438\u0442\u0438\u043c\u0430\u043a\u0441"),
-    "paz": ("\u043f\u0430\u0437", "paz"),
-    "sat": ("\u0441\u0430\u0442", "sat"),
+    "gazelle_next": ("газель next", "gazelle next"),
+    "gazelle_nn": ("газель nn", "gazelle nn"),
+    "gazelle_city": ("газель city", "gazelle city"),
+    "sobol_nn": ("соболь nn", "sobol nn"),
+    "sobol_business": ("соболь business", "sobol business", "соболь бизнес"),
+    "gazon_next": ("газон next", "gazon next"),
+    "valdai": ("валдай", "valdai"),
+    "sadko": ("садко", "sadko"),
+    "vector_next": ("vector next", "вектор next"),
+    "citymax": ("citymax", "city max", "ситимакс"),
+    "paz": ("паз", "paz"),
+    "sat": ("сат", "sat"),
 }
 _PRODUCT_FAMILY_ALIASES = {
     "gazelle_next": "gazelle_next",
     "gazelle next": "gazelle_next",
-    "\u0433\u0430\u0437\u0435\u043b\u044c next": "gazelle_next",
+    "газель next": "gazelle_next",
     "gazelle_nn": "gazelle_nn",
     "gazelle nn": "gazelle_nn",
-    "\u0433\u0430\u0437\u0435\u043b\u044c nn": "gazelle_nn",
+    "газель nn": "gazelle_nn",
     "gazelle_city": "gazelle_city",
     "gazelle city": "gazelle_city",
-    "\u0433\u0430\u0437\u0435\u043b\u044c city": "gazelle_city",
+    "газель city": "gazelle_city",
     "sobol_nn": "sobol_nn",
     "sobol nn": "sobol_nn",
-    "\u0441\u043e\u0431\u043e\u043b\u044c nn": "sobol_nn",
+    "соболь nn": "sobol_nn",
     "sobol_business": "sobol_business",
     "sobol business": "sobol_business",
-    "\u0441\u043e\u0431\u043e\u043b\u044c business": "sobol_business",
-    "\u0441\u043e\u0431\u043e\u043b\u044c \u0431\u0438\u0437\u043d\u0435\u0441": "sobol_business",
+    "соболь business": "sobol_business",
+    "соболь бизнес": "sobol_business",
     "gazon_next": "gazon_next",
     "gazon next": "gazon_next",
-    "\u0433\u0430\u0437\u043e\u043d next": "gazon_next",
+    "газон next": "gazon_next",
     "valdai": "valdai",
-    "\u0432\u0430\u043b\u0434\u0430\u0439": "valdai",
+    "валдай": "valdai",
     "sadko": "sadko",
-    "\u0441\u0430\u0434\u043a\u043e": "sadko",
+    "садко": "sadko",
     "vector_next": "vector_next",
     "vector next": "vector_next",
-    "\u0432\u0435\u043a\u0442\u043e\u0440 next": "vector_next",
+    "вектор next": "vector_next",
     "citymax": "citymax",
     "city max": "citymax",
-    "\u0441\u0438\u0442\u0438\u043c\u0430\u043a\u0441": "citymax",
+    "ситимакс": "citymax",
     "paz": "paz",
-    "\u043f\u0430\u0437": "paz",
+    "паз": "paz",
     "sat": "sat",
-    "\u0441\u0430\u0442": "sat",
+    "сат": "sat",
 }
 _COMPETITOR_KEYWORDS = {
-    "sollers_atlant": ("\u0430\u0442\u043b\u0430\u043d\u0442", "atlant", "sollers atlant", "\u0441\u043e\u043b\u043b\u0435\u0440\u0441"),
-    "sollers_tr": ("tr80", "tr120", "tr180", "sollers tr", "\u0441\u043e\u043b\u043b\u0435\u0440\u0441 tr"),
-    "paz": ("\u043f\u0430\u0437", "paz"),
+    "sollers_atlant": ("атлант", "atlant", "sollers atlant", "соллерс"),
+    "sollers_tr": ("tr80", "tr120", "tr180", "sollers tr", "соллерс tr"),
+    "paz": ("паз", "paz"),
 }
 _SPECIAL_CONDITION_KEYWORDS = {
-    "offroad": ("\u0431\u0435\u0437\u0434\u043e\u0440\u043e\u0436", "offroad", "4x4", "4\u04454"),
-    "harsh": ("\u0441\u0443\u0440\u043e\u0432", "harsh", "severe"),
-    "municipal": ("\u043c\u0443\u043d\u0438\u0446\u0438\u043f", "municipal"),
-    "heavy": ("\u0442\u044f\u0436\u0435\u043b", "heavy"),
+    "offroad": ("бездорож", "offroad", "4x4", "4х4"),
+    "harsh": ("суров", "harsh", "severe"),
+    "municipal": ("муницип", "municipal"),
+    "heavy": ("тяжел", "heavy"),
 }
 _INTENT_DOC_KIND_BONUS = {
     "overview": {"general": 4, "configuration": 3, "comparison": 1},
@@ -303,15 +303,15 @@ class GazRuntimeService:
         }
 
     def _detect_doc_kind(self, rel_lower: str) -> str:
-        if any(token in rel_lower for token in ("\u0441\u0440\u0430\u0432\u043d", "\u043a\u043e\u043d\u043a\u0443\u0440\u0435\u043d\u0442", "atlant", "sollers")):
+        if any(token in rel_lower for token in ("сравн", "конкурент", "atlant", "sollers")):
             return "comparison"
-        if any(token in rel_lower for token in ("\u0442\u0441\u043e", "\u044d\u043a\u043e\u043d\u043e\u043c", "tco", "\u0441\u0442\u043e\u0438\u043c")):
+        if any(token in rel_lower for token in ("тсо", "эконом", "tco", "стоим")):
             return "tco"
-        if any(token in rel_lower for token in ("\u0441\u0435\u0440\u0432\u0438\u0441", "\u0433\u0430\u0440\u0430\u043d\u0442", "\u0440\u0435\u043c\u043e\u043d\u0442", "\u0437\u0430\u043f\u0447\u0430\u0441\u0442", "downtime")):
+        if any(token in rel_lower for token in ("сервис", "гарант", "ремонт", "запчаст", "downtime")):
             return "service"
-        if any(token in rel_lower for token in ("\u043a\u043e\u043c\u043f\u043b\u0435\u043a\u0442", "\u0431\u0430\u0437\u0430", "\u043e\u043f\u0446", "\u0442\u0435\u0445", "\u0445\u0430\u0440\u0430\u043a\u0442")):
+        if any(token in rel_lower for token in ("комплект", "база", "опц", "тех", "характ")):
             return "configuration"
-        if any(token in rel_lower for token in ("\u0444\u0438\u043d\u0430\u043d\u0441", "\u043b\u0438\u0437\u0438\u043d\u0433", "\u043a\u0440\u0435\u0434\u0438\u0442", "\u043e\u0434\u043e\u0431\u0440")):
+        if any(token in rel_lower for token in ("финанс", "лизинг", "кредит", "одобр")):
             return "approval"
         if any(token in rel_lower for values in _SPECIAL_BODY_KEYWORDS.values() for token in values):
             return "special_body"

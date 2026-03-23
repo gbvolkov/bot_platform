@@ -69,8 +69,11 @@ dependencies = [
     "psycopg[binary]>=3.3.2",
     "langgraph-checkpoint-sqlite>=3.0.3",
     "unstructured-inference>=1.2.0",
+    "zakupki-crawler",
+    "pytest>=8.4.2",
 ]
 
 [tool.uv.sources]
 palimpsest = { git = "https://github.com/gbvolkov/PalimpsestLib.git" }
 rag-lib = { git = "https://github.com/gbvolkov/rag-lib.git" }
+zakupki-crawler = { git = "https://github.com/gbvolkov/purchase_scraper.git" }
