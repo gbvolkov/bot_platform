@@ -33,6 +33,7 @@ from rag_lib.chunkers.json import JsonSplitter
 from rag_lib.chunkers.markdown_table import MarkdownTableSplitter
 from rag_lib.chunkers.recursive import RecursiveCharacterTextSplitter
 from rag_lib.chunkers.regex import RegexSplitter
+from rag_lib.chunkers.semantic import SemanticChunker
 from rag_lib.chunkers.sentence import SentenceSplitter
 from rag_lib.retrieval.composition import create_scored_dual_storage_retriever
 from rag_lib.retrieval.scored_retriever import HydrationMode, SearchType
@@ -527,7 +528,7 @@ class GazRuntimeService:
                     max_rows_per_chunk=self._rag_settings.ingestion.chunk_size,
                     summarizer=self._get_table_summarizer(),
                     summarize_table=True,
-                    summarize_chunks=True,
+                    summarize_chunks=False,
                     inject_summaries_into_content=True,
                 ).split_documents(documents),
                 documents,
@@ -539,25 +540,26 @@ class GazRuntimeService:
                     max_rows_per_chunk=self._rag_settings.ingestion.chunk_size,
                     summarizer=self._get_table_summarizer(),
                     summarize_table=True,
-                    summarize_chunks=True,
+                    summarize_chunks=False,
                     inject_summaries_into_content=True,
                 ).split_documents(documents),
                 documents,
             )
         if extension in _TEXT_EXTENSIONS:
-            pass1 = SentenceSplitter(
-                chunk_size=_SENTENCE_PASS1_CHUNK_SIZE,
-                chunk_overlap=_SENTENCE_PASS1_OVERLAP,
+            semantic = SemanticChunker(
+                embeddings=self._get_embeddings(),
                 language="auto",
+                threshold=0.8,
+                window_size=4,
             )
-            pass2 = SentenceSplitter(
+            sentence = SentenceSplitter(
                 chunk_size=_SENTENCE_PASS2_CHUNK_SIZE,
                 chunk_overlap=_SENTENCE_PASS2_OVERLAP,
                 language="auto",
             )
-            first_pass = self._ensure_segments(pass1.split_documents(documents), documents)
-            second_docs = self._segments_to_documents(first_pass)
-            return self._ensure_segments(pass2.split_documents(second_docs), second_docs)
+            semantic_segments = self._ensure_segments(semantic.split_documents(documents), documents)
+            sentence_docs = self._segments_to_documents(semantic_segments)
+            return self._ensure_segments(sentence.split_documents(sentence_docs), sentence_docs)
         if extension == ".html":
             html_segments = self._ensure_segments(
                 HTMLSplitter(
@@ -565,7 +567,7 @@ class GazRuntimeService:
                     split_table_rows=True,
                     summarizer=self._get_table_summarizer(),
                     summarize_table=True,
-                    summarize_chunks=True,
+                    summarize_chunks=False,
                     inject_summaries_into_content=True,
                 ).split_documents(documents),
                 documents,

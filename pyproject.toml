@@ -71,6 +71,7 @@ dependencies = [
     "unstructured-inference>=1.2.0",
     "zakupki-crawler",
     "pytest>=8.4.2",
+    "nltk>=3.9.4",
 ]
 
 [tool.uv.sources]
