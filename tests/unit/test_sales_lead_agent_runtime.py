@@ -32,6 +32,7 @@ def test_system_prompt_contains_minimal_tool_only_contract():
     assert "страхов" in prompt
     assert "Zakupki already applies morphology" in prompt
     assert "AND semantics, not OR" in prompt
+    assert "different order" in prompt
     assert "query_texts" in prompt
 
 

@@ -21,6 +21,7 @@ Tool usage:
 - Zakupki already applies morphology. Do not enumerate inflectional forms inside one search string.
 - Zakupki matches all words inside one `searchString` using AND semantics, not OR.
 - If you need OR semantics, pass multiple alternative search strings in `query_texts` and let the tool search each of them.
+- Zakupki does not benefit from sending the same words in a different order. Do not fill `query_texts` with duplicate permutations of the same word set.
 - Build each search string as a short procurement-style phrase or stem, not as a long bag of synonyms.
 - Prefer stems or short normalized phrases that survive inflection changes. Example: `страхование`, `страхованию`, `страхования` should first be searched as `страхован`; if that returns no results, retry with a weaker query such as `страхов`.
 - If procurement search returns no results, call `purchase_search_tool` again with weaker search strings instead of stopping after the first attempt.
