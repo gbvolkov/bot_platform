@@ -1,530 +1,308 @@
+from __future__ import annotations
+
 import asyncio
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from zakupki_crawler.crawler import ZakupkiCrawler
+
 from agents.sales_lead_agent import tools as sales_tools
-from agents.sales_lead_agent.services import ClassifierExecutionError
-from agents.sales_lead_agent.schemas import (
+from agents.sales_lead_agent.tools import (
     DocSearchResponse,
     PreparedDocument,
     PreparedDocumentEntities,
+    ProcurementQueryBuilder,
     PurchaseSearchItem,
-    PurchaseSearchResponse,
+    RunWorkspace,
+    SalesLeadAgentDependencies,
+    SalesLeadAgentSettings,
+    ToolUserCorrectableError,
+    build_sales_lead_tools,
 )
-from agents.sales_lead_agent.tools import _resolve_purchase_run_id, _search_filters_from_args, build_sales_lead_tools
 
 
-def test_search_filters_are_reconstructed_from_flat_tool_args():
-    filters = _search_filters_from_args(
-        query_text="insurance services",
-        law="44-FZ",
-        customer_name="Acme",
-        supplier_hint="CASCO",
-    )
-
-    assert filters is not None
-    assert filters.query_text == "insurance services"
-    assert filters.law == "44-FZ"
-    assert filters.customer_name == "Acme"
-    assert filters.supplier_hint == "CASCO"
-
-
-def test_purchase_run_reuses_active_run_only_for_same_query_signature():
-    state = {
-        "active_run_id": "run-1",
-        "current_query_signature": "sig-a",
-        "active_run_query_signature": "sig-a",
-    }
-
-    assert _resolve_purchase_run_id(state, None) == "run-1"
-    assert _resolve_purchase_run_id({**state, "current_query_signature": "sig-b"}, None) is None
-    assert _resolve_purchase_run_id(state, "run-2") == "run-2"
-
-
-def test_purchase_run_reuses_active_run_for_followup_document_turns():
-    state = {
-        "active_run_id": "run-1",
-        "active_run_ready": True,
-        "current_query_signature": "sig-b",
-        "active_run_query_signature": "sig-a",
-        "task_understanding": {"task_kind": "fact_lookup"},
-        "prepared_documents": [{"document_id": "doc-1", "index_status": "ready", "chunks_count": 2}],
-    }
-
-    assert _resolve_purchase_run_id(state, None) == "run-1"
-
-
-def test_purchase_run_does_not_reuse_active_run_for_new_followup_acquisition_context():
-    state = {
-        "active_run_id": "run-1",
-        "active_run_ready": True,
-        "current_query_signature": "sig-b",
-        "active_run_query_signature": "sig-a",
-        "task_understanding": {"task_kind": "procurement_analysis"},
-        "prepared_documents": [{"document_id": "doc-1", "index_status": "ready", "chunks_count": 2}],
-    }
-
-    assert (
-        _resolve_purchase_run_id(
-            state,
-            None,
-            current_search_url="https://zakupki.gov.ru/epz/order/extendedsearch/results.html?searchString=new",
-        )
-        is None
-    )
-
-
-def test_purchase_run_does_not_reuse_failed_or_unready_active_context():
-    state = {
-        "active_run_id": "run-1",
-        "active_run_ready": False,
-        "current_query_signature": "sig-b",
-        "active_run_query_signature": "sig-a",
-        "task_understanding": {"task_kind": "fact_lookup"},
-        "prepared_documents": [{"document_id": "doc-1", "index_status": "failed", "chunks_count": 0}],
-    }
-
-    assert _resolve_purchase_run_id(state, None) is None
-
-
-def test_purchase_run_does_not_reuse_zero_chunk_non_searchable_context_even_if_marked_ready():
-    state = {
-        "active_run_id": "run-1",
-        "active_run_ready": True,
-        "current_query_signature": "sig-b",
-        "active_run_query_signature": "sig-a",
-        "task_understanding": {"task_kind": "fact_lookup"},
-        "prepared_documents": [
-            {
-                "document_id": "doc-1",
-                "parse_status": "partial",
-                "index_status": "failed",
-                "chunks_count": 0,
-                "error": "No indexable content extracted.",
-            }
-        ],
-    }
-
-    assert _resolve_purchase_run_id(state, None) is None
-
-
-def test_purchase_search_tool_marks_hits_unclassified_when_relevance_classifier_fails(tmp_path: Path):
-    workspace = SimpleNamespace(
-        run_id="run-1",
-        index_id="run-1",
-        downloads_dir=tmp_path / "downloads",
-        artifacts_dir=tmp_path / "artifacts",
-    )
-    workspace.downloads_dir.mkdir(parents=True, exist_ok=True)
-    workspace.artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-    base_response = PurchaseSearchResponse(
-        run_id="",
-        index_id="",
-        status="success",
-        errors=[],
-        items=[
-            PurchaseSearchItem(
-                bundle_id="b1",
-                registry_number="123",
-                law="44-FZ",
-                purchase_title="Insurance services",
-                customer_name="Acme",
-                price_text="100",
-                published_at=None,
-                updated_at=None,
-                submission_deadline=None,
-                detail_url="https://example.test/purchase/123",
-                common_info_url=None,
-                documents_url=None,
-                document_urls=[],
-                downloaded_files=[],
-                prepared_document_ids=[],
-                documents_json=None,
-                common_info_json=None,
-                lots_json=None,
-                crawl_status="success",
-                crawl_error=None,
-                crawl_ts_utc="2026-03-22T00:00:00Z",
-            )
-        ],
-        prepared_documents=[],
-    )
-
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
-        document_service=SimpleNamespace(prepare_files=lambda **kwargs: []),
-        classifier=SimpleNamespace(
-            classify_procurement_hits=lambda **kwargs: (_ for _ in ()).throw(
-                ClassifierExecutionError("relevance boom")
-            )
-        ),
-        purchase_adapter=SimpleNamespace(
-            search=lambda **kwargs: ("https://example.test/search", base_response),
-            summarize_hits=lambda response: [{"bundle_id": "b1", "registry_number": "123", "purchase_title": "Insurance services"}],
-        ),
-        counterparty_clients=SimpleNamespace(),
-        open_source_max_concurrency=4,
-    )
-
-    tool = build_sales_lead_tools(deps)[0]
-    command = tool.func(
-        runtime=SimpleNamespace(
-            state={
-                "messages": [],
-                "missing_data": [],
-                "current_user_request": "find insurance procurements",
-                "task_understanding": {"task_kind": "procurement_search"},
-            }
-        ),
-        query_text="insurance",
-    )
-
-    update = command.update
-    assert update["procurement_hits"] == []
-    assert len(update["unclassified_procurement_hits"]) == 1
-    assert update["turn_validation"]["issues"][0]["code"] == "procurement_relevance_classifier_failed"
-    assert "procurement_relevance_verification" in update["missing_data"]
-
-
-def test_purchase_search_tool_returns_validation_error_when_criteria_missing():
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(create_run=lambda: None, get=lambda run_id: None),
-        document_service=SimpleNamespace(),
-        classifier=SimpleNamespace(),
-        purchase_adapter=SimpleNamespace(),
-        counterparty_clients=SimpleNamespace(),
-        open_source_max_concurrency=4,
-    )
-
-    tool = build_sales_lead_tools(deps)[0]
-    command = tool.func(runtime=SimpleNamespace(state={"messages": [], "missing_data": []}))
-
-    assert command.update["turn_validation"]["issues"][0]["code"] == "purchase_search_missing_criteria"
-    assert "procurement_search_criteria" in command.update["missing_data"]
-    assert command.update["turn_tool_usage"][0]["tool"] == "purchase_search_tool"
-
-
-def test_purchase_search_tool_returns_validation_error_when_filters_invalid():
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(create_run=lambda: None, get=lambda run_id: None),
-        document_service=SimpleNamespace(),
-        classifier=SimpleNamespace(),
-        purchase_adapter=SimpleNamespace(),
-        counterparty_clients=SimpleNamespace(),
-        open_source_max_concurrency=4,
-    )
-
-    tool = build_sales_lead_tools(deps)[0]
-    command = tool.func(
-        runtime=SimpleNamespace(state={"messages": [], "missing_data": []}),
-        law="invalid-law",
-    )
-
-    assert command.update["turn_validation"]["issues"][0]["code"] == "purchase_search_invalid_filters"
-    assert "procurement_search_filters" in command.update["missing_data"]
-    assert command.update["turn_tool_usage"][0]["validation_error"] == "purchase_search_invalid_filters"
-
-
-def test_purchase_search_tool_raises_programmer_errors_from_classifier(tmp_path: Path):
-    workspace = SimpleNamespace(
-        run_id="run-1",
-        index_id="run-1",
-        downloads_dir=tmp_path / "downloads",
-        artifacts_dir=tmp_path / "artifacts",
-    )
-    workspace.downloads_dir.mkdir(parents=True, exist_ok=True)
-    workspace.artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-    base_response = PurchaseSearchResponse(
-        run_id="",
-        index_id="",
-        status="success",
-        errors=[],
-        items=[
-            PurchaseSearchItem(
-                bundle_id="b1",
-                registry_number="123",
-                law="44-FZ",
-                purchase_title="Insurance services",
-                customer_name="Acme",
-                price_text="100",
-                published_at=None,
-                updated_at=None,
-                submission_deadline=None,
-                detail_url="https://example.test/purchase/123",
-                common_info_url=None,
-                documents_url=None,
-                document_urls=[],
-                downloaded_files=[],
-                prepared_document_ids=[],
-                documents_json=None,
-                common_info_json=None,
-                lots_json=None,
-                crawl_status="success",
-                crawl_error=None,
-                crawl_ts_utc="2026-03-22T00:00:00Z",
-            )
-        ],
-        prepared_documents=[],
-    )
-
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
-        document_service=SimpleNamespace(prepare_files=lambda **kwargs: []),
-        classifier=SimpleNamespace(
-            classify_procurement_hits=lambda **kwargs: (_ for _ in ()).throw(AttributeError("bad classifier wiring"))
-        ),
-        purchase_adapter=SimpleNamespace(
-            search=lambda **kwargs: ("https://example.test/search", base_response),
-            summarize_hits=lambda response: [{"bundle_id": "b1", "registry_number": "123", "purchase_title": "Insurance services"}],
-        ),
-        counterparty_clients=SimpleNamespace(),
-        open_source_max_concurrency=4,
-    )
-
-    tool = build_sales_lead_tools(deps)[0]
-    with pytest.raises(AttributeError, match="bad classifier wiring"):
-        tool.func(
-            runtime=SimpleNamespace(
-                state={
-                    "messages": [],
-                    "missing_data": [],
-                    "current_user_request": "find insurance procurements",
-                    "task_understanding": {"task_kind": "procurement_search"},
-                }
-            ),
-            query_text="insurance",
-        )
-
-
-def test_purchase_search_failed_attempt_records_acquisition_failure_and_does_not_promote_active_run(
-    tmp_path: Path,
-):
-    workspace = SimpleNamespace(
+def _workspace(tmp_path: Path) -> RunWorkspace:
+    root = tmp_path / "run-1"
+    downloads = root / "downloads"
+    web = root / "web"
+    index = root / "index"
+    artifacts = root / "artifacts"
+    for path in (downloads, web, index, artifacts):
+        path.mkdir(parents=True, exist_ok=True)
+    return RunWorkspace(
         run_id="run-1",
         index_id="index-1",
-        downloads_dir=tmp_path / "downloads",
-        artifacts_dir=tmp_path / "artifacts",
-    )
-    workspace.downloads_dir.mkdir(parents=True, exist_ok=True)
-    workspace.artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-    base_response = PurchaseSearchResponse(
-        run_id="",
-        index_id="",
-        status="failed",
-        errors=["crawler down"],
-        items=[],
-        prepared_documents=[],
+        root_dir=root,
+        downloads_dir=downloads,
+        web_dir=web,
+        index_dir=index,
+        artifacts_dir=artifacts,
     )
 
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
-        document_service=SimpleNamespace(prepare_files=lambda **kwargs: []),
-        classifier=SimpleNamespace(classify_procurement_hits=lambda **kwargs: None),
-        purchase_adapter=SimpleNamespace(
-            search=lambda **kwargs: ("https://example.test/search", base_response),
-            summarize_hits=lambda response: [],
-        ),
-        counterparty_clients=SimpleNamespace(),
-        open_source_max_concurrency=4,
+
+def test_query_builder_changes_only_search_string():
+    template = (
+        "https://zakupki.gov.ru/epz/order/extendedsearch/results.html"
+        "?searchString=страхован"
+        "&morphology=on"
+        "&search-filter=Дате+размещения"
+        "&pageNumber=1"
+        "&sortDirection=false"
+        "&recordsPerPage=_2"
+        "&showLotsInfoHidden=false"
+        "&sortBy=UPDATE_DATE"
+        "&fz44=on"
+        "&fz223=on"
+        "&af=on"
+        "&currencyIdGeneral=-1"
+        "&gws=Выберите+тип+закупки"
     )
+    builder = ProcurementQueryBuilder(template)
 
-    tool = build_sales_lead_tools(deps)[0]
-    command = tool.func(
-        runtime=SimpleNamespace(state={"messages": [], "missing_data": [], "turn_tool_usage": []}),
-        query_text="insurance",
+    url = builder.build_url("страх имущества")
+
+    assert "searchString=%D1%81%D1%82%D1%80%D0%B0%D1%85+%D0%B8%D0%BC%D1%83%D1%89%D0%B5%D1%81%D1%82%D0%B2%D0%B0" in url
+    assert "recordsPerPage=_2" in url
+    assert "fz44=on" in url
+    assert "fz223=on" in url
+
+
+def test_query_builder_builds_multiple_urls_for_or_semantics():
+    template = (
+        "https://zakupki.gov.ru/epz/order/extendedsearch/results.html"
+        "?searchString=страхован"
+        "&morphology=on"
+        "&search-filter=Дате+размещения"
+        "&pageNumber=1"
+        "&sortDirection=false"
+        "&recordsPerPage=_2"
+        "&showLotsInfoHidden=false"
+        "&sortBy=UPDATE_DATE"
+        "&fz44=on"
+        "&fz223=on"
+        "&af=on"
+        "&currencyIdGeneral=-1"
+        "&gws=Выберите+тип+закупки"
     )
+    builder = ProcurementQueryBuilder(template)
 
-    update = command.update
-    assert "active_run_id" not in update
-    assert update["acquisition_status"] == "failed"
-    assert update["acquisition_attempts"][0]["tool"] == "purchase_search_tool"
-    assert update["acquisition_attempts"][0]["active_run_ready"] is False
-    assert update["last_acquisition_error"]["error"] == "crawler down"
-    assert update["turn_validation"]["issues"][0]["code"] == "purchase_search_failed"
+    urls = builder.build_urls(["страхован", "страхов"])
+
+    assert len(urls) == 2
+    assert "searchString=%D1%81%D1%82%D1%80%D0%B0%D1%85%D0%BE%D0%B2%D0%B0%D0%BD" in urls[0]
+    assert "searchString=%D1%81%D1%82%D1%80%D0%B0%D1%85%D0%BE%D0%B2" in urls[1]
 
 
-def test_failed_purchase_search_with_searchable_artifacts_still_does_not_promote_active_run(
-    tmp_path: Path,
-):
-    workspace = SimpleNamespace(
-        run_id="run-1",
-        index_id="index-1",
-        downloads_dir=tmp_path / "downloads",
-        artifacts_dir=tmp_path / "artifacts",
-    )
-    workspace.downloads_dir.mkdir(parents=True, exist_ok=True)
-    workspace.artifacts_dir.mkdir(parents=True, exist_ok=True)
+def test_zakupki_crawler_accepts_zero_result_page():
+    class FakeLocator:
+        def __init__(self, count: int):
+            self._count = count
 
-    base_response = PurchaseSearchResponse(
-        run_id="",
-        index_id="",
-        status="failed",
-        errors=["crawler down"],
-        items=[
-            PurchaseSearchItem(
-                bundle_id="b1",
-                registry_number="123",
-                law="44-FZ",
-                purchase_title="Insurance services",
-                customer_name="Acme",
-                price_text="100",
-                published_at=None,
-                updated_at=None,
-                submission_deadline=None,
-                detail_url="https://example.test/purchase/123",
-                common_info_url=None,
-                documents_url=None,
-                document_urls=[],
-                downloaded_files=[],
-                prepared_document_ids=[],
-                documents_json=None,
-                common_info_json=None,
-                lots_json=None,
-                crawl_status="failed",
-                crawl_error="crawler down",
-                crawl_ts_utc="2026-03-22T00:00:00Z",
-            )
-        ],
-        prepared_documents=[],
-    )
+        def count(self) -> int:
+            return self._count
 
-    deps = SimpleNamespace(
+    class FakePage:
+        url = "https://zakupki.gov.ru/epz/order/extendedsearch/results.html?searchString=страхование"
+
+        def __init__(self):
+            self._counts = {
+                'a[href*="common-info"]': 0,
+                "text=Поиск не дал результатов": 1,
+                "text=0 записей": 1,
+                "text=Результаты поиска": 1,
+            }
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(self._counts.get(selector, 0))
+
+    crawler = object.__new__(ZakupkiCrawler)
+    crawler.pacer = SimpleNamespace(sleep_func=lambda _seconds: None)
+
+    crawler._wait_for_search_results(FakePage())
+
+
+def test_purchase_search_tool_returns_run_index_and_prepared_documents(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+
+    deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
         document_service=SimpleNamespace(
             prepare_files=lambda **kwargs: [
                 PreparedDocument(
                     document_id="doc-1",
                     origin="purchase",
-                    bundle_id="b1",
+                    bundle_id="bundle-1",
                     registry_number="123",
                     source_url="https://example.test/purchase/123",
-                    file_path="C:/tmp/doc.txt",
-                    file_name="doc.txt",
-                    file_type="other",
-                    parse_status="success",
-                    index_status="ready",
-                    text_excerpt="insurance",
-                    entities=PreparedDocumentEntities(),
-                    chunks_count=4,
-                    error=None,
+                    file_path="C:/tmp/common_info.json",
+                    file_name="common_info.json",
+                    file_type="json",
+                    text_excerpt="страх имущества",
+                    entities=PreparedDocumentEntities(inn=["7707083893"]),
+                    chunks_count=3,
                 )
             ]
         ),
-        classifier=SimpleNamespace(
-            classify_procurement_hits=lambda **kwargs: SimpleNamespace(
-                decisions=[],
-                model_dump=lambda: {"decisions": []},
-            )
-        ),
         purchase_adapter=SimpleNamespace(
-            search=lambda **kwargs: ("https://example.test/search", base_response),
-            summarize_hits=lambda response: [],
+            search=lambda **kwargs: (
+                ["https://example.test/search"],
+                [
+                    PurchaseSearchItem(
+                        bundle_id="bundle-1",
+                        registry_number="123",
+                        law="44-FZ",
+                        purchase_title="Оказание услуг страхования",
+                        customer_name="Фонд",
+                        price_text="1000",
+                        published_at=None,
+                        updated_at=None,
+                        submission_deadline=None,
+                        detail_url="https://example.test/purchase/123",
+                        common_info_url=None,
+                        documents_url=None,
+                        document_urls=[],
+                        downloaded_files=[],
+                        common_info_json='{"a":1}',
+                        documents_json=None,
+                        lots_json=None,
+                        crawl_status="success",
+                        crawl_error=None,
+                        crawl_ts_utc="2026-03-24T00:00:00Z",
+                    )
+                ],
+            )
         ),
         counterparty_clients=SimpleNamespace(),
         open_source_max_concurrency=4,
     )
 
-    tool = build_sales_lead_tools(deps)[0]
-    command = tool.func(
-        runtime=SimpleNamespace(state={"messages": [], "missing_data": [], "turn_tool_usage": []}),
-        query_text="insurance",
-    )
+    purchase_tool = build_sales_lead_tools(deps)[0]
+    result = purchase_tool.func(query_texts=["страх имущества"])
 
-    update = command.update
-    assert "active_run_id" not in update
-    assert update["acquisition_attempts"][0]["active_run_ready"] is False
-    assert update["turn_tool_usage"][0]["active_run_ready"] is False
+    assert result["run_id"] == "run-1"
+    assert result["index_id"] == "index-1"
+    assert result["search_urls"] == ["https://example.test/search"]
+    assert len(result["items"]) == 1
+    assert result["items"][0]["prepared_document_ids"] == ["doc-1"]
+    assert len(result["prepared_documents"]) == 1
 
 
-def test_open_source_fetch_failed_attempt_records_acquisition_failure_and_does_not_promote_active_run(
-    monkeypatch,
-    tmp_path: Path,
-):
-    workspace = SimpleNamespace(
-        run_id="run-1",
-        index_id="index-1",
-        downloads_dir=tmp_path / "downloads",
-        artifacts_dir=tmp_path / "artifacts",
-        web_dir=tmp_path / "web",
-        index_dir=tmp_path / "index",
-    )
-    workspace.downloads_dir.mkdir(parents=True, exist_ok=True)
-    workspace.artifacts_dir.mkdir(parents=True, exist_ok=True)
-    workspace.web_dir.mkdir(parents=True, exist_ok=True)
-    workspace.index_dir.mkdir(parents=True, exist_ok=True)
-
-    class FailingLoader:
-        def __init__(self, **kwargs):
-            self.last_errors = []
-
-        async def load(self):
-            raise RuntimeError("website down")
-
-    monkeypatch.setattr(sales_tools, "AsyncWebLoader", FailingLoader)
-
-    deps = SimpleNamespace(
+def test_purchase_search_tool_preserves_missing_crawl_timestamp_as_null(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
-        document_service=SimpleNamespace(save_text_artifact=lambda **kwargs: "", prepare_files=lambda **kwargs: []),
-        classifier=SimpleNamespace(),
+        document_service=SimpleNamespace(prepare_files=lambda **kwargs: []),
+        purchase_adapter=SimpleNamespace(
+            search=lambda **kwargs: (
+                ["https://example.test/search"],
+                [
+                    PurchaseSearchItem(
+                        bundle_id="bundle-1",
+                        registry_number="123",
+                        law="44-FZ",
+                        purchase_title="Оказание услуг страхования",
+                        customer_name="Фонд",
+                        detail_url="https://example.test/purchase/123",
+                        crawl_status="success",
+                        crawl_ts_utc=None,
+                    )
+                ],
+            )
+        ),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+    )
+
+    purchase_tool = build_sales_lead_tools(deps)[0]
+    result = purchase_tool.func(query_texts=["страх имущества"])
+
+    assert result["items"][0]["crawl_ts_utc"] is None
+
+
+def test_doc_search_tool_requires_explicit_index_lookup(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    calls: list[str] = []
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(
+            create_run=lambda: workspace,
+            get=lambda run_id: workspace,
+            get_by_index=lambda index_id: calls.append(index_id) or workspace,
+        ),
+        document_service=SimpleNamespace(
+            search=lambda **kwargs: DocSearchResponse(index_id="index-1", matches=[])
+        ),
         purchase_adapter=SimpleNamespace(),
         counterparty_clients=SimpleNamespace(),
         open_source_max_concurrency=4,
     )
 
-    tool = build_sales_lead_tools(deps)[1]
-    command = asyncio.run(
-        tool.coroutine(
-            runtime=SimpleNamespace(state={"messages": [], "missing_data": [], "turn_tool_usage": []}),
-            url="https://example.test",
-        )
+    doc_search_tool = build_sales_lead_tools(deps)[2]
+    result = doc_search_tool.func(index_id="index-1", query="страхование")
+
+    assert calls == ["index-1"]
+    assert result["index_id"] == "index-1"
+    assert result["matches"] == []
+
+
+def test_purchase_search_tool_propagates_adapter_errors(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=SimpleNamespace(prepare_files=lambda **kwargs: []),
+        purchase_adapter=SimpleNamespace(
+            search=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("crawler boom"))
+        ),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
     )
 
-    update = command.update
-    assert "active_run_id" not in update
-    assert update["acquisition_status"] == "failed"
-    assert update["acquisition_attempts"][0]["tool"] == "open_source_fetch_tool"
-    assert update["acquisition_attempts"][0]["active_run_ready"] is False
-    assert update["last_acquisition_error"]["error"] == "website down"
-    assert update["turn_validation"]["issues"][0]["code"] == "open_source_fetch_failed"
+    purchase_tool = build_sales_lead_tools(deps)[0]
+
+    with pytest.raises(RuntimeError, match="crawler boom"):
+        purchase_tool.func(query_texts=["страх имущества"])
 
 
-def test_open_source_fetch_success_prepares_pages_and_attachments_and_promotes_active_run(
-    monkeypatch,
-    tmp_path: Path,
-):
-    workspace = SimpleNamespace(
-        run_id="run-1",
-        index_id="index-1",
-        downloads_dir=tmp_path / "downloads",
-        artifacts_dir=tmp_path / "artifacts",
-        web_dir=tmp_path / "web",
-        index_dir=tmp_path / "index",
+def test_doc_search_tool_propagates_invalid_index_errors(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(
+            create_run=lambda: workspace,
+            get=lambda run_id: workspace,
+            get_by_index=lambda index_id: (_ for _ in ()).throw(ValueError("unknown index")),
+        ),
+        document_service=SimpleNamespace(),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
     )
-    workspace.downloads_dir.mkdir(parents=True, exist_ok=True)
-    workspace.artifacts_dir.mkdir(parents=True, exist_ok=True)
-    workspace.web_dir.mkdir(parents=True, exist_ok=True)
-    workspace.index_dir.mkdir(parents=True, exist_ok=True)
 
-    class SuccessfulLoader:
+    doc_search_tool = build_sales_lead_tools(deps)[2]
+
+    with pytest.raises(ToolUserCorrectableError, match="unknown index"):
+        doc_search_tool.func(index_id="missing", query="страхование")
+
+
+def test_open_source_fetch_tool_prepares_pages_and_attachments(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
+
+    class Loader:
         def __init__(self, **kwargs):
             self.last_errors = []
 
         async def load(self):
             return [
                 SimpleNamespace(
-                    page_content="Main page text about insurance procurement.",
+                    page_content="Публичная страница про страхование.",
                     metadata={
                         "source": "https://example.test/page",
-                        "title": "Insurance page",
+                        "title": "Страница",
                         "content_type": "text/html",
                     },
                 ),
                 SimpleNamespace(
-                    page_content="Attachment text with INN 7707083893 and Acme LLC.",
+                    page_content="Вложение с ИНН 7707083893.",
                     metadata={
                         "source_type": "web_download",
                         "source": "https://example.test/files/spec.pdf",
@@ -535,16 +313,13 @@ def test_open_source_fetch_success_prepares_pages_and_attachments_and_promotes_a
                 ),
             ]
 
-    monkeypatch.setattr(sales_tools, "AsyncWebLoader", SuccessfulLoader)
-
-    saved_artifacts: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(sales_tools, "AsyncWebLoader", Loader)
 
     def save_text_artifact(*, workspace, relative_dir, file_name, content):
         target_dir = workspace.artifacts_dir / relative_dir
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / file_name
         target_path.write_text(content, encoding="utf-8")
-        saved_artifacts.append((relative_dir, file_name, content))
         return str(target_path)
 
     def prepare_files(*, workspace, origin, bundle_id, registry_number, source_url, file_paths, provenance_by_path):
@@ -556,7 +331,6 @@ def test_open_source_fetch_success_prepares_pages_and_attachments_and_promotes_a
                     document_id=f"doc-{Path(file_path).stem}",
                     origin="open_source",
                     bundle_id=bundle_id,
-                    registry_number=None,
                     source_url=source_url,
                     original_source_url=provenance.get("original_source_url"),
                     original_file_name=provenance.get("original_file_name"),
@@ -564,130 +338,287 @@ def test_open_source_fetch_success_prepares_pages_and_attachments_and_promotes_a
                     derived_artifact_path=provenance.get("derived_artifact_path"),
                     file_path=file_path,
                     file_name=Path(file_path).name,
-                    file_type="other",
-                    parse_status="success",
-                    index_status="ready",
-                    text_excerpt="prepared text",
-                    entities=PreparedDocumentEntities(
-                        inn=["7707083893"],
-                        company_names=["Acme LLC"],
-                    ),
+                    file_type="txt",
+                    text_excerpt="prepared",
+                    entities=PreparedDocumentEntities(),
                     chunks_count=2,
-                    error=None,
                 )
             )
         return prepared
 
-    deps = SimpleNamespace(
+    deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
-        document_service=SimpleNamespace(
-            save_text_artifact=save_text_artifact,
-            prepare_files=prepare_files,
-        ),
-        classifier=SimpleNamespace(),
+        document_service=SimpleNamespace(save_text_artifact=save_text_artifact, prepare_files=prepare_files),
         purchase_adapter=SimpleNamespace(),
         counterparty_clients=SimpleNamespace(),
         open_source_max_concurrency=4,
     )
 
-    tool = build_sales_lead_tools(deps)[1]
-    command = asyncio.run(
-        tool.coroutine(
-            runtime=SimpleNamespace(state={"messages": [], "missing_data": [], "turn_tool_usage": []}),
+    open_source_tool = build_sales_lead_tools(deps)[1]
+    result = asyncio.run(
+        open_source_tool.coroutine(url="https://example.test/page", follow_download_links=True)
+    )
+
+    assert result["run_id"] == "run-1"
+    assert result["index_id"] == "index-1"
+    assert len(result["pages"]) == 1
+    assert result["pages"][0]["attachments"] == ["https://example.test/files/spec.pdf"]
+    assert len(result["prepared_documents"]) == 2
+    assert result["prepared_documents"][1]["file_name"].endswith(".txt")
+    assert result["prepared_documents"][1]["original_file_name"] == "spec.pdf"
+
+
+def test_open_source_fetch_tool_preserves_explicit_zero_transport_args(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    captured = {}
+
+    class Loader:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.last_errors = []
+
+        async def load(self):
+            return [
+                SimpleNamespace(
+                    page_content="page",
+                    metadata={"source": "https://example.test/page", "title": "Page"},
+                )
+            ]
+
+    monkeypatch.setattr(sales_tools, "AsyncWebLoader", Loader)
+
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=SimpleNamespace(
+            save_text_artifact=lambda **kwargs: str(workspace.artifacts_dir / "page.txt"),
+            prepare_files=lambda **kwargs: [
+                PreparedDocument(
+                    document_id="doc-1",
+                    origin="open_source",
+                    bundle_id="bundle-1",
+                    source_url="https://example.test/page",
+                    file_path=str(workspace.artifacts_dir / "page.txt"),
+                    file_name="page.txt",
+                    file_type="txt",
+                    text_excerpt="page",
+                    entities=PreparedDocumentEntities(),
+                    chunks_count=1,
+                )
+            ],
+        ),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+    )
+
+    open_source_tool = build_sales_lead_tools(deps)[1]
+    asyncio.run(
+        open_source_tool.coroutine(
             url="https://example.test/page",
-            follow_download_links=True,
+            depth=0,
+            max_concurrency=0,
         )
     )
 
-    update = command.update
-    assert update["active_run_id"] == "run-1"
-    assert update["index_id"] == "index-1"
-    assert update["active_run_ready"] is True
-    assert update["acquisition_status"] == "success"
-    assert update["acquisition_attempts"][0]["tool"] == "open_source_fetch_tool"
-    assert update["acquisition_attempts"][0]["searchable_document_count"] == 2
-    assert update["last_open_source_fetch_result"]["pages"][0]["attachments"] == [
-        "https://example.test/files/spec.pdf"
-    ]
-    assert len(update["prepared_documents"]) == 2
-    assert update["prepared_documents"][0]["original_source_url"] == "https://example.test/page"
-    assert update["prepared_documents"][1]["original_file_name"] == "spec.pdf"
-    assert update["prepared_documents"][1]["original_content_type"] == "application/pdf"
-    assert update["normalized_inns"] == ["7707083893"]
-    assert update["company_names"] == ["Acme LLC"]
-    assert len(saved_artifacts) == 2
+    assert captured["depth"] == 0
+    assert captured["max_concurrency"] == 0
 
 
-def test_counterparty_scoring_guard_failure_records_failed_attempt():
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(),
-        document_service=SimpleNamespace(),
-        classifier=SimpleNamespace(),
+def test_open_source_fetch_tool_propagates_loader_errors(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
+
+    class Loader:
+        def __init__(self, **kwargs):
+            self.last_errors = []
+
+        async def load(self):
+            raise RuntimeError("loader boom")
+
+    monkeypatch.setattr(sales_tools, "AsyncWebLoader", Loader)
+
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=SimpleNamespace(save_text_artifact=lambda **kwargs: "", prepare_files=lambda **kwargs: []),
         purchase_adapter=SimpleNamespace(),
         counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+    )
+
+    open_source_tool = build_sales_lead_tools(deps)[1]
+
+    with pytest.raises(RuntimeError, match="loader boom"):
+        asyncio.run(open_source_tool.coroutine(url="https://example.test/page"))
+
+
+def test_counterparty_tools_propagate_client_errors(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=SimpleNamespace(),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(
+            scoring=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("scoring boom")),
+            fssp=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fssp boom")),
+        ),
         open_source_max_concurrency=4,
     )
 
     scoring_tool = build_sales_lead_tools(deps)[3]
-    command = scoring_tool.func(
-        runtime=SimpleNamespace(state={"messages": [], "missing_data": [], "normalized_inns": []}),
-        inn="7707083893",
+    fssp_tool = build_sales_lead_tools(deps)[4]
+
+    with pytest.raises(RuntimeError, match="scoring boom"):
+        scoring_tool.func(inn="7707083893")
+    with pytest.raises(RuntimeError, match="fssp boom"):
+        fssp_tool.func(inn="7707083893")
+
+
+def test_counterparty_fssp_tool_preserves_explicit_zero_format(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    captured = {}
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=SimpleNamespace(),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(
+            scoring=lambda **kwargs: None,
+            fssp=lambda **kwargs: captured.update(kwargs)
+            or SimpleNamespace(model_dump=lambda: {"source": "damia_fssp", "status": "success", "inn": "7707083893", "grouped": [], "raw_format": kwargs["response_format"]}),
+        ),
+        open_source_max_concurrency=4,
     )
 
-    assert command.update["turn_validation"]["issues"][0]["code"] == "counterparty_scoring_tool_guard_failed"
-    assert command.update["turn_tool_usage"][0]["tool"] == "counterparty_scoring_tool"
-    assert command.update["turn_tool_usage"][0]["status"] == "failed"
+    fssp_tool = build_sales_lead_tools(deps)[4]
+    result = fssp_tool.func(inn="7707083893", format=0)
+
+    assert captured["response_format"] == 0
+    assert result["raw_format"] == 0
 
 
-def test_doc_search_tool_resolves_explicit_index_id_via_index_resolver():
-    workspace = SimpleNamespace(run_id="run-1", index_id="index-1")
-    calls = []
+def test_open_source_fetch_tool_raises_on_empty_fetched_content(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
 
-    deps = SimpleNamespace(
+    class Loader:
+        def __init__(self, **kwargs):
+            self.last_errors = []
+
+        async def load(self):
+            return [
+                SimpleNamespace(
+                    page_content="",
+                    metadata={"source": "https://example.test/page"},
+                )
+            ]
+
+    monkeypatch.setattr(sales_tools, "AsyncWebLoader", Loader)
+
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=SimpleNamespace(save_text_artifact=lambda **kwargs: "", prepare_files=lambda **kwargs: []),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+    )
+
+    open_source_tool = build_sales_lead_tools(deps)[1]
+
+    with pytest.raises(ToolUserCorrectableError, match="Fetched empty content"):
+        asyncio.run(open_source_tool.coroutine(url="https://example.test/page"))
+
+
+def test_document_preparation_unpacks_zip_and_uses_rag_lib_text_loader(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    archive_path = workspace.downloads_dir / "bundle.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("nested/inner.txt", "страхование имущества")
+
+    captured = {}
+
+    class Loader:
+        def __init__(self, file_path):
+            captured["file_path"] = file_path
+
+        def load(self):
+            return [SimpleNamespace(page_content="страхование имущества", metadata={"source": captured["file_path"]})]
+
+    monkeypatch.setattr(sales_tools, "TextLoader", Loader)
+
+    settings = SalesLeadAgentSettings(
+        work_root=tmp_path,
+        procurement_search_template="https://zakupki.gov.ru/epz/order/extendedsearch/results.html?searchString=страхован&recordsPerPage=_2",
+        purchase_headless=True,
+        open_source_max_concurrency=4,
+        embedding_provider="openai",
+        embedding_model="text-embedding-3-small",
+        damia_api_key="",
+        scoring_base_url="https://example.test",
+        fssp_base_url="https://example.test",
+    )
+    service = sales_tools.DocumentPreparationService(settings)
+    monkeypatch.setattr(service, "_index_documents", lambda **kwargs: None)
+
+    prepared = service.prepare_files(
+        workspace=workspace,
+        origin="purchase",
+        bundle_id="bundle-1",
+        registry_number="123",
+        source_url="https://example.test/purchase/123",
+        file_paths=[str(archive_path)],
+    )
+
+    assert captured["file_path"].endswith("inner.txt")
+    assert prepared[0].file_name == "inner.txt"
+    assert prepared[0].chunks_count > 0
+
+
+def test_document_preparation_rejects_zip_path_traversal(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    archive_path = workspace.downloads_dir / "bundle.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("../evil.txt", "boom")
+
+    settings = SalesLeadAgentSettings(
+        work_root=tmp_path,
+        procurement_search_template="https://zakupki.gov.ru/epz/order/extendedsearch/results.html?searchString=страхован&recordsPerPage=_2",
+        purchase_headless=True,
+        open_source_max_concurrency=4,
+        embedding_provider="openai",
+        embedding_model="text-embedding-3-small",
+        damia_api_key="",
+        scoring_base_url="https://example.test",
+        fssp_base_url="https://example.test",
+    )
+    service = sales_tools.DocumentPreparationService(settings)
+    monkeypatch.setattr(service, "_index_documents", lambda **kwargs: None)
+
+    with pytest.raises(ValueError, match="escapes target directory"):
+        service.prepare_files(
+            workspace=workspace,
+            origin="purchase",
+            bundle_id="bundle-1",
+            registry_number="123",
+            source_url="https://example.test/purchase/123",
+            file_paths=[str(archive_path)],
+        )
+
+
+def test_doc_search_tool_preserves_explicit_zero_top_k(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    captured = {}
+    deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(
-            get=lambda run_id: (_ for _ in ()).throw(AssertionError("run resolver should not be used")),
-            get_by_index=lambda index_id: calls.append(index_id) or workspace,
+            create_run=lambda: workspace,
+            get=lambda run_id: workspace,
+            get_by_index=lambda index_id: workspace,
         ),
         document_service=SimpleNamespace(
-            search=lambda **kwargs: DocSearchResponse(index_id="index-1", matches=[])
+            search=lambda **kwargs: captured.update(kwargs) or DocSearchResponse(index_id="index-1", matches=[])
         ),
-        classifier=SimpleNamespace(),
         purchase_adapter=SimpleNamespace(),
         counterparty_clients=SimpleNamespace(),
         open_source_max_concurrency=4,
     )
 
     doc_search_tool = build_sales_lead_tools(deps)[2]
-    command = doc_search_tool.func(
-        runtime=SimpleNamespace(state={"messages": [], "missing_data": []}),
-        index_id="index-1",
-        query="find snippet",
-    )
+    doc_search_tool.func(index_id="index-1", query="страхование", top_k=0)
 
-    assert calls == ["index-1"]
-    assert command.update["last_doc_search_result"]["index_id"] == "index-1"
-
-
-def test_doc_search_tool_degrades_when_explicit_index_id_is_unknown():
-    deps = SimpleNamespace(
-        workspace_manager=SimpleNamespace(
-            get=lambda run_id: (_ for _ in ()).throw(AssertionError("run resolver should not be used")),
-            get_by_index=lambda index_id: (_ for _ in ()).throw(ValueError("Index id index-missing is not registered.")),
-        ),
-        document_service=SimpleNamespace(),
-        classifier=SimpleNamespace(),
-        purchase_adapter=SimpleNamespace(),
-        counterparty_clients=SimpleNamespace(),
-        open_source_max_concurrency=4,
-    )
-
-    doc_search_tool = build_sales_lead_tools(deps)[2]
-    command = doc_search_tool.func(
-        runtime=SimpleNamespace(state={"messages": [], "missing_data": []}),
-        index_id="index-missing",
-        query="find snippet",
-    )
-
-    assert command.update["turn_validation"]["issues"][0]["code"] == "doc_search_index_resolution_failed"
-    assert command.update["turn_tool_usage"][0]["guard"] == "index_resolution_failed"
-    assert "index_id:index-missing" in command.update["missing_data"]
+    assert captured["top_k"] == 0

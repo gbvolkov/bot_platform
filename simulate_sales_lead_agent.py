@@ -17,7 +17,6 @@ except ImportError:  # pragma: no cover - Windows
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.sales_lead_agent.agent import initialize_agent
-from agents.sales_lead_agent.settings import get_settings
 from agents.utils import ModelType, extract_text
 
 
@@ -335,7 +334,7 @@ async def _invoke_agent(graph: Any, config: dict[str, Any], user_text: str | Non
 
 
 def _transcript_path(name: str | None = None) -> Path:
-    root = get_settings().work_root.parent / "simulator_transcripts"
+    root = "./data/simulator_transcripts"
     root.mkdir(parents=True, exist_ok=True)
     stem = name or f"session_{uuid.uuid4().hex}"
     return root / f"{stem}.md"
@@ -590,7 +589,7 @@ def main() -> None:
     parser.add_argument("--provider", default=DEFAULT_PROVIDER)
     parser.add_argument("--scenario", choices=sorted(SCENARIOS.keys()))
     parser.add_argument("--all-scenarios", action="store_true")
-    parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--interactive", default=True, action="store_true")
     args = parser.parse_args()
 
     provider = _parse_provider(args.provider)

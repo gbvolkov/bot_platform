@@ -1,243 +1,1443 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import mimetypes
+import os
 import re
+import uuid
+import zipfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from hashlib import sha1
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import ToolMessage
-from langgraph.types import Command
-from pydantic import ValidationError
+import httpx
+import config
+from langchain.tools import tool
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from pydantic import BaseModel, ConfigDict, Field
+from rag_lib.core.domain import Segment
+from rag_lib.core.indexer import Indexer
+from rag_lib.embeddings.factory import create_embeddings_model
+from rag_lib.loaders.csv_excel import CSVLoader, ExcelLoader
+from rag_lib.loaders.data_loaders import JsonLoader, TextLoader
+from rag_lib.loaders.docx import DocXLoader
+from rag_lib.loaders.html import HTMLLoader
+from rag_lib.loaders.pdf import PDFLoader
+from rag_lib.loaders.pptx import PPTXLoader
 from rag_lib.loaders.web_async import AsyncWebLoader
+from rag_lib.vectors.factory import create_vector_store
 
-from .schemas import (
-    CounterpartyFSSPRequest,
-    CounterpartyScoringRequest,
-    DocSearchRequest,
-    EvidenceItem,
-    OpenSourceFetchRequest,
-    OpenSourceFetchResponse,
-    OpenSourcePage,
-    PurchaseSearchRequest,
-    PurchaseSearchResponse,
-    SearchFilters,
-    TurnValidationIssue,
-    TurnValidationResult,
-)
-from .services import (
-    ClassifierExecutionError,
-    CounterpartyClients,
-    DocumentPreparationService,
-    InternalClassifier,
-    PurchaseAdapter,
-    RunWorkspaceManager,
-)
-from .state import SalesLeadAgentState
 
+ToolStatus = Literal["success"]
+LawType = Literal["44-FZ", "223-FZ"]
+PreparedOrigin = Literal["purchase", "open_source"]
+PreparedFileType = Literal["pdf", "docx", "xlsx", "html", "txt", "json", "other"]
+SourceKind = Literal["purchase", "open_source"]
 
 _SAFE_FILE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_INN_RE = re.compile(r"\b\d{10,12}\b")
+_EMAIL_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
+_PHONE_RE = re.compile(r"\+?\d[\d\-\s()]{8,}\d")
+_DATE_RE = re.compile(r"\b\d{2}[./-]\d{2}[./-]\d{4}\b|\b\d{4}-\d{2}-\d{2}\b")
+_AMOUNT_RE = re.compile(r"\b\d[\d\s.,]{2,}\s?(?:руб\.?|₽|RUB)\b", re.IGNORECASE)
+_COMPANY_RE = re.compile(
+    r'\b(?:ООО|АО|ПАО|ИП|ФГБУ|ФГУП|ГБУ|МУП|ОАО)\s+"?[A-Za-zА-Яа-яЁё0-9 .,-]+"?'
+)
 
 
-class RecoverableToolInputError(ValueError):
-    """Recoverable tool-input validation error caused by model arguments."""
+class ToolUserCorrectableError(Exception):
+    """An explicit tool error that the LLM can fix by changing the next tool call."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        suggestion: str | None = None,
+        input_field: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.suggestion = suggestion
+        self.input_field = input_field
+
+
+class StrictBaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PreparedDocumentEntities(StrictBaseModel):
+    inn: list[str] = Field(default_factory=list)
+    company_names: list[str] = Field(default_factory=list)
+    emails: list[str] = Field(default_factory=list)
+    phones: list[str] = Field(default_factory=list)
+    dates: list[str] = Field(default_factory=list)
+    amounts: list[str] = Field(default_factory=list)
+
+
+class PreparedDocument(StrictBaseModel):
+    document_id: str
+    origin: PreparedOrigin
+    bundle_id: str
+    registry_number: str | None = None
+    source_url: str | None = None
+    original_source_url: str | None = None
+    original_file_name: str | None = None
+    original_content_type: str | None = None
+    derived_artifact_path: str | None = None
+    file_path: str
+    file_name: str
+    file_type: PreparedFileType
+    parse_status: ToolStatus = "success"
+    index_status: Literal["ready"] = "ready"
+    text_excerpt: str
+    entities: PreparedDocumentEntities = Field(default_factory=PreparedDocumentEntities)
+    chunks_count: int
+
+
+class PurchaseSearchItem(StrictBaseModel):
+    bundle_id: str
+    registry_number: str
+    law: LawType | None = None
+    purchase_title: str
+    customer_name: str
+    price_text: str | None = None
+    published_at: str | None = None
+    updated_at: str | None = None
+    submission_deadline: str | None = None
+    detail_url: str
+    common_info_url: str | None = None
+    documents_url: str | None = None
+    document_urls: list[str] = Field(default_factory=list)
+    downloaded_files: list[str] = Field(default_factory=list)
+    prepared_document_ids: list[str] = Field(default_factory=list)
+    documents_json: str | None = None
+    common_info_json: str | None = None
+    lots_json: str | None = None
+    crawl_status: str
+    crawl_error: str | None = None
+    crawl_ts_utc: str | None = None
+
+
+class PurchaseSearchRequest(StrictBaseModel):
+    run_id: str | None = None
+    search_url: str | None = None
+    query_texts: list[str] | None = None
+    max_pages: int | None = None
+    headless: bool | None = None
+
+
+class PurchaseSearchResponse(StrictBaseModel):
+    source: Literal["purchase_adapter"] = "purchase_adapter"
+    run_id: str
+    index_id: str
+    status: ToolStatus = "success"
+    search_urls: list[str] = Field(default_factory=list)
+    items: list[PurchaseSearchItem] = Field(default_factory=list)
+    prepared_documents: list[PreparedDocument] = Field(default_factory=list)
+
+
+class OpenSourceFetchRequest(StrictBaseModel):
+    run_id: str | None = None
+    url: str
+    depth: int | None = None
+    follow_download_links: bool | None = None
+    max_concurrency: int | None = None
+
+
+class OpenSourcePage(StrictBaseModel):
+    bundle_id: str
+    url: str
+    title: str | None = None
+    text: str
+    attachments: list[str] = Field(default_factory=list)
+    prepared_document_ids: list[str] = Field(default_factory=list)
+
+
+class OpenSourceFetchResponse(StrictBaseModel):
+    source: Literal["rag_lib"] = "rag_lib"
+    run_id: str
+    index_id: str
+    status: ToolStatus = "success"
+    pages: list[OpenSourcePage] = Field(default_factory=list)
+    prepared_documents: list[PreparedDocument] = Field(default_factory=list)
+
+
+class DocSearchRequest(StrictBaseModel):
+    index_id: str
+    query: str
+    top_k: int | None = None
+    source_kind: SourceKind | None = None
+    bundle_id: str | None = None
+
+
+class DocSearchMatch(StrictBaseModel):
+    document_id: str
+    bundle_id: str
+    file_path: str
+    page: int | None = None
+    locator: str | None = None
+    snippet: str
+    score: float
+    source_kind: SourceKind
+    source_url: str | None = None
+
+
+class DocSearchResponse(StrictBaseModel):
+    index_id: str
+    matches: list[DocSearchMatch] = Field(default_factory=list)
+
+
+class TopFactor(StrictBaseModel):
+    name: str
+    value: float | None = None
+    nwoe: float | None = None
+
+
+class ScorePayload(StrictBaseModel):
+    risk_value: float | None = None
+    risk_zone: str | None = None
+    score_value: float | None = None
+    score_zone: str | None = None
+    reliability_value: float | None = None
+    reliability_zone: str | None = None
+    top_factors: list[TopFactor] = Field(default_factory=list)
+
+
+class Fincoef(StrictBaseModel):
+    name: str
+    value: float | None = None
+    norm: float | None = None
+    comparison: str | None = None
+
+
+class CounterpartyScoringRequest(StrictBaseModel):
+    inn: str
+    model: str | None = None
+    include_fincoefs: bool | None = None
+
+
+class CounterpartyScoringResponse(StrictBaseModel):
+    source: Literal["damia_scoring"] = "damia_scoring"
+    status: ToolStatus = "success"
+    inn: str
+    score: ScorePayload
+    fincoefs: list[Fincoef] = Field(default_factory=list)
+
+
+class FSSPGroupedRecord(StrictBaseModel):
+    year: int
+    status: str
+    subject: str
+    amount: float | None = None
+    count: int
+    proceeding_ids: list[str] = Field(default_factory=list)
+
+
+class CounterpartyFSSPRequest(StrictBaseModel):
+    inn: str
+    from_date: str | None = None
+    to_date: str | None = None
+    format: Literal[1, 2] | None = None
+
+
+class CounterpartyFSSPResponse(StrictBaseModel):
+    source: Literal["damia_fssp"] = "damia_fssp"
+    status: ToolStatus = "success"
+    inn: str
+    grouped: list[FSSPGroupedRecord] = Field(default_factory=list)
+    raw_format: Literal[1, 2] = 1
+
+
+@dataclass(frozen=True)
+class SalesLeadAgentSettings:
+    work_root: Path
+    procurement_search_template: str
+    purchase_headless: bool
+    open_source_max_concurrency: int
+    embedding_provider: str
+    embedding_model: str
+    damia_api_key: str
+    scoring_base_url: str
+    fssp_base_url: str
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> SalesLeadAgentSettings:
+    work_root = Path(
+        os.environ.get("SALES_LEAD_AGENT_WORK_ROOT", "./data/sales_lead_agent/runs")
+    ).resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    embedding_provider = (
+        os.environ.get("SALES_LEAD_AGENT_EMBEDDING_PROVIDER", "openai").strip().lower()
+    )
+    embedding_model = (
+        os.environ.get("SALES_LEAD_AGENT_EMBEDDING_MODEL", "text-embedding-3-small").strip()
+    )
+    if not embedding_provider:
+        raise RuntimeError("SALES_LEAD_AGENT_EMBEDDING_PROVIDER must not be blank.")
+    if not embedding_model:
+        raise RuntimeError("SALES_LEAD_AGENT_EMBEDDING_MODEL must not be blank.")
+    if embedding_provider == "openai" and not (config.OPENAI_API_KEY or "").strip():
+        raise RuntimeError(
+            "OPENAI_API_KEY must be configured when SALES_LEAD_AGENT_EMBEDDING_PROVIDER=openai."
+        )
+
+    template = os.environ.get(
+        "SALES_LEAD_AGENT_PROCUREMENT_TEMPLATE",
+        "https://zakupki.gov.ru/epz/order/extendedsearch/results.html"
+        "?searchString=страхован"
+        "&morphology=on"
+        "&search-filter=Дате+размещения"
+        "&pageNumber=1"
+        "&sortDirection=false"
+        "&recordsPerPage=_2"
+        "&showLotsInfoHidden=false"
+        "&sortBy=UPDATE_DATE"
+        "&fz44=on"
+        "&fz223=on"
+        "&af=on"
+        "&currencyIdGeneral=-1"
+        "&gws=Выберите+тип+закупки",
+    )
+
+    return SalesLeadAgentSettings(
+        work_root=work_root,
+        procurement_search_template=template,
+        purchase_headless=os.environ.get("SALES_LEAD_AGENT_PURCHASE_HEADLESS", "true").strip().lower()
+        not in {"0", "false", "no", "off"},
+        open_source_max_concurrency=int(
+            os.environ.get("SALES_LEAD_AGENT_OPEN_SOURCE_MAX_CONCURRENCY", "4")
+        ),
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        damia_api_key=os.environ.get("SALES_LEAD_AGENT_DAMIA_API_KEY", "").strip(),
+        scoring_base_url=os.environ.get("SALES_LEAD_AGENT_SCORING_BASE_URL", "").strip().rstrip("/"),
+        fssp_base_url=os.environ.get("SALES_LEAD_AGENT_FSSP_BASE_URL", "").strip().rstrip("/"),
+    )
+
+
+@dataclass(frozen=True)
+class RunWorkspace:
+    run_id: str
+    index_id: str
+    root_dir: Path
+    downloads_dir: Path
+    web_dir: Path
+    index_dir: Path
+    artifacts_dir: Path
+
+
+class RunWorkspaceManager:
+    """Manage persistent run workspaces and the run_id/index_id registry."""
+
+    def __init__(self, settings: SalesLeadAgentSettings) -> None:
+        self._settings = settings
+
+    def _index_registry_dir(self) -> Path:
+        path = self._settings.work_root / "_index_registry"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _metadata_path(self, root: Path) -> Path:
+        return root / "workspace.json"
+
+    def _write_metadata(self, *, root: Path, run_id: str, index_id: str) -> None:
+        self._metadata_path(root).write_text(
+            json.dumps({"run_id": run_id, "index_id": index_id}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self._index_registry_dir() / f"{index_id}.txt").write_text(run_id, encoding="utf-8")
+
+    def _read_metadata(self, root: Path) -> dict[str, str]:
+        payload = json.loads(self._metadata_path(root).read_text(encoding="utf-8"))
+        return {"run_id": str(payload["run_id"]), "index_id": str(payload["index_id"])}
+
+    def create_run(self) -> RunWorkspace:
+        run_id = f"run_{uuid.uuid4().hex}"
+        index_id = f"index_{uuid.uuid4().hex}"
+        root = self._settings.work_root / run_id
+        downloads = root / "downloads"
+        web = root / "web"
+        index = root / "index"
+        artifacts = root / "artifacts"
+        for path in (downloads, web, index, artifacts):
+            path.mkdir(parents=True, exist_ok=True)
+        self._write_metadata(root=root, run_id=run_id, index_id=index_id)
+        return RunWorkspace(
+            run_id=run_id,
+            index_id=index_id,
+            root_dir=root,
+            downloads_dir=downloads,
+            web_dir=web,
+            index_dir=index,
+            artifacts_dir=artifacts,
+        )
+
+    def get(self, run_id: str) -> RunWorkspace:
+        root = self._settings.work_root / run_id
+        metadata = self._read_metadata(root)
+        if metadata["run_id"] != run_id:
+            raise ValueError(
+                f"Workspace metadata mismatch: requested run_id={run_id}, metadata points to {metadata['run_id']}."
+            )
+        return RunWorkspace(
+            run_id=metadata["run_id"],
+            index_id=metadata["index_id"],
+            root_dir=root,
+            downloads_dir=root / "downloads",
+            web_dir=root / "web",
+            index_dir=root / "index",
+            artifacts_dir=root / "artifacts",
+        )
+
+    def get_by_index(self, index_id: str) -> RunWorkspace:
+        registry_path = self._index_registry_dir() / f"{index_id}.txt"
+        run_id = registry_path.read_text(encoding="utf-8").strip()
+        if not run_id:
+            raise ValueError(f"Run id not found for index_id={index_id}.")
+        workspace = self.get(run_id)
+        if workspace.index_id != index_id:
+            raise ValueError(
+                f"Index registry mismatch: requested {index_id}, workspace {run_id} points to {workspace.index_id}."
+            )
+        return workspace
+
+
+class ProcurementQueryBuilder:
+    """Build procurement URLs by replacing only `searchString` in the fixed template.
+
+    Search guidance for `query_texts`:
+    - zakupki already applies morphology, so do not enumerate inflectional forms inside one query;
+    - zakupki matches all words in one `searchString` using AND semantics, not OR;
+    - to simulate OR, pass multiple alternative search strings and let the tool execute each of them;
+    - use short procurement-oriented phrases or stems, not long bags of synonyms;
+    - for example, `страхование`, `страхованию`, `страхования` should first be queried as
+      `страхован`; if that returns no results, retry with a weaker form such as `страхов`.
+    """
+
+    def __init__(self, template: str) -> None:
+        self._template = template
+
+    def build_url(self, query_text: str) -> str:
+        normalized = query_text.strip()
+        if not normalized:
+            raise ToolUserCorrectableError(
+                code="INVALID_QUERY_TEXT",
+                message="purchase_search_tool requires non-empty search strings when search_url is absent.",
+                suggestion="Provide a non-empty procurement-style search string and call the tool again.",
+                input_field="query_texts",
+            )
+        parsed = urlparse(self._template)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        params["searchString"] = normalized
+        new_query = urlencode(params, doseq=True)
+        return urlunparse(parsed._replace(query=new_query))
+
+    def build_urls(self, query_texts: list[str]) -> list[str]:
+        normalized = [query_text.strip() for query_text in query_texts if query_text.strip()]
+        if not normalized:
+            raise ToolUserCorrectableError(
+                code="INVALID_QUERY_TEXTS",
+                message="purchase_search_tool requires at least one non-empty search string when search_url is absent.",
+                suggestion="Provide one or more short procurement-style search strings and call the tool again.",
+                input_field="query_texts",
+            )
+        return [self.build_url(query_text) for query_text in normalized]
+
+
+class PurchaseAdapter:
+    """Thin wrapper around `zakupki_crawler` with no fallback behavior."""
+
+    def __init__(self, settings: SalesLeadAgentSettings, query_builder: ProcurementQueryBuilder) -> None:
+        self._settings = settings
+        self._query_builder = query_builder
+
+    def _import_scraper(self):
+        from zakupki_crawler.api import scrape_purchases
+
+        return scrape_purchases
+
+    def resolve_search_urls(
+        self,
+        *,
+        search_url: str | None,
+        query_texts: list[str] | None,
+    ) -> list[str]:
+        if search_url:
+            return [search_url]
+        if query_texts is None:
+            raise ToolUserCorrectableError(
+                code="MISSING_SEARCH_INPUT",
+                message="purchase_search_tool requires either search_url or query_texts.",
+                suggestion="Provide a direct search_url or one or more procurement-style search strings and call the tool again.",
+                input_field="query_texts",
+            )
+        return self._query_builder.build_urls(query_texts)
+
+    def search(
+        self,
+        *,
+        search_url: str | None,
+        query_texts: list[str] | None,
+        downloads_dir: str,
+        max_pages: int | None,
+        headless: bool | None,
+    ) -> tuple[list[str], list[PurchaseSearchItem]]:
+        resolved_search_urls = self.resolve_search_urls(search_url=search_url, query_texts=query_texts)
+        scrape_purchases = self._import_scraper()
+        items: list[PurchaseSearchItem] = []
+        seen_registry_numbers: set[str] = set()
+        for resolved_search_url in resolved_search_urls:
+            raw_items = self._run_scraper(
+                scrape_purchases,
+                resolved_search_url=resolved_search_url,
+                downloads_dir=downloads_dir,
+                max_pages=max_pages,
+                headless=self._settings.purchase_headless if headless is None else headless,
+            )
+
+            for raw in raw_items:
+                registry_number = str(raw.registry_number)
+                if registry_number in seen_registry_numbers:
+                    continue
+                seen_registry_numbers.add(registry_number)
+                items.append(
+                    PurchaseSearchItem(
+                        bundle_id=registry_number,
+                        registry_number=registry_number,
+                        law=raw.law if raw.law in {"44-FZ", "223-FZ"} else None,
+                        purchase_title=str(raw.purchase_title or ""),
+                        customer_name=str(raw.customer_name or ""),
+                        price_text=str(raw.price_text) if raw.price_text is not None else None,
+                        published_at=str(raw.published_at) if raw.published_at else None,
+                        updated_at=str(raw.updated_at) if raw.updated_at else None,
+                        submission_deadline=str(raw.submission_deadline)
+                        if raw.submission_deadline
+                        else None,
+                        detail_url=str(raw.detail_url),
+                        common_info_url=str(raw.common_info_url) if raw.common_info_url else None,
+                        documents_url=str(raw.documents_url) if raw.documents_url else None,
+                        document_urls=_normalize_list_field(raw.document_urls),
+                        downloaded_files=_normalize_list_field(raw.downloaded_files),
+                        documents_json=str(raw.documents_json) if raw.documents_json else None,
+                        common_info_json=str(raw.common_info_json) if raw.common_info_json else None,
+                        lots_json=str(raw.lots_json) if raw.lots_json else None,
+                        crawl_status=str(raw.crawl_status),
+                        crawl_error=str(raw.crawl_error) if raw.crawl_error else None,
+                        crawl_ts_utc=str(raw.crawl_ts_utc) if raw.crawl_ts_utc else None,
+                    )
+                )
+        return resolved_search_urls, items
+
+    def _run_scraper(
+        self,
+        scrape_purchases,
+        *,
+        resolved_search_url: str,
+        downloads_dir: str,
+        max_pages: int | None,
+        headless: bool,
+    ):
+        kwargs = {
+            "downloads_dir": downloads_dir,
+            "max_pages": max_pages,
+            "headless": headless,
+        }
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return scrape_purchases(resolved_search_url, **kwargs)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(scrape_purchases, resolved_search_url, **kwargs)
+            return future.result()
+
+
+class DocumentPreparationService:
+    """Parse files, build embeddings, and search the prepared run index."""
+
+    def __init__(self, settings: SalesLeadAgentSettings) -> None:
+        self._settings = settings
+        self._splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1200,
+            chunk_overlap=150,
+            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+        )
+
+    def _create_embeddings(self):
+        if self._settings.embedding_provider == "openai" and not (config.OPENAI_API_KEY or "").strip():
+            raise RuntimeError(
+                "OPENAI_API_KEY must be configured when SALES_LEAD_AGENT_EMBEDDING_PROVIDER=openai."
+            )
+        return create_embeddings_model(
+            provider=self._settings.embedding_provider,
+            model_name=self._settings.embedding_model,
+        )
+
+    def _vector_env(self, workspace: RunWorkspace):
+        previous = os.environ.get("VECTOR_PATH")
+        os.environ["VECTOR_PATH"] = str(workspace.index_dir)
+
+        class _Context:
+            def __enter__(self_nonlocal):
+                return None
+
+            def __exit__(self_nonlocal, exc_type, exc, tb):
+                if previous is None:
+                    os.environ.pop("VECTOR_PATH", None)
+                else:
+                    os.environ["VECTOR_PATH"] = previous
+                return False
+
+        return _Context()
+
+    def _extract_entities(self, text: str) -> PreparedDocumentEntities:
+        company_names: list[str] = []
+        seen_names: set[str] = set()
+        for match in _COMPANY_RE.finditer(text):
+            value = match.group(0).strip()
+            if value not in seen_names:
+                seen_names.add(value)
+                company_names.append(value)
+        return PreparedDocumentEntities(
+            inn=list(dict.fromkeys(_INN_RE.findall(text)))[:20],
+            company_names=company_names[:20],
+            emails=list(dict.fromkeys(_EMAIL_RE.findall(text)))[:20],
+            phones=list(dict.fromkeys(_PHONE_RE.findall(text)))[:20],
+            dates=list(dict.fromkeys(_DATE_RE.findall(text)))[:20],
+            amounts=list(dict.fromkeys(_AMOUNT_RE.findall(text)))[:20],
+        )
+
+    def _detect_file_type(self, file_path: Path) -> PreparedFileType:
+        suffix = file_path.suffix.lower()
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix == ".docx":
+            return "docx"
+        if suffix in {".xlsx", ".xls"}:
+            return "xlsx"
+        if suffix in {".html", ".htm"}:
+            return "html"
+        if suffix == ".txt":
+            return "txt"
+        if suffix == ".json":
+            return "json"
+        return "other"
+
+    def _guess_content_type(self, file_path: Path, explicit: str | None) -> str | None:
+        if explicit:
+            return explicit
+        guessed, _ = mimetypes.guess_type(file_path.name)
+        return guessed
+
+    def _convert_loaded_documents(self, docs: list[Any]) -> list[Document]:
+        return [
+            Document(
+                page_content=str(getattr(doc, "page_content", "") or ""),
+                metadata=dict(getattr(doc, "metadata", {}) or {}),
+            )
+            for doc in docs
+        ]
+
+    def _load_docs(self, file_path: Path) -> list[Document]:
+        suffix = file_path.suffix.lower()
+        if suffix == ".txt":
+            return self._convert_loaded_documents(TextLoader(str(file_path)).load())
+        if suffix == ".json":
+            return self._convert_loaded_documents(
+                JsonLoader(str(file_path), output_format="markdown").load()
+            )
+        if suffix == ".csv":
+            return self._convert_loaded_documents(CSVLoader(str(file_path)).load())
+        if suffix in {".xlsx", ".xls"}:
+            return self._convert_loaded_documents(ExcelLoader(str(file_path)).load())
+        if suffix == ".docx" or suffix == ".doc":
+            return self._convert_loaded_documents(DocXLoader(str(file_path)).load())
+        if suffix == ".pdf":
+            return self._convert_loaded_documents(PDFLoader(str(file_path), parse_mode="text").load())
+        if suffix in {".html", ".htm"}:
+            return self._convert_loaded_documents(HTMLLoader(str(file_path), output_format="markdown").load())
+        if suffix == ".pptx":
+            return self._convert_loaded_documents(PPTXLoader(str(file_path)).load())
+        raise ValueError(f"Unsupported file type for preparation: {file_path.suffix}")
+
+    def _extract_archive(
+        self,
+        *,
+        workspace: RunWorkspace,
+        bundle_id: str,
+        archive_path: Path,
+    ) -> list[Path]:
+        target_dir = workspace.artifacts_dir / bundle_id / f"archive_{archive_path.stem}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            target_root = target_dir.resolve()
+            for member in archive.infolist():
+                member_path = Path(member.filename)
+                destination = (target_dir / member_path).resolve()
+                if target_root not in destination.parents and destination != target_root:
+                    raise ValueError(
+                        f"Archive member escapes target directory: {member.filename}"
+                    )
+                if member.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member, "r") as source, destination.open("wb") as target_file:
+                    target_file.write(source.read())
+        extracted_files = [path for path in target_dir.rglob("*") if path.is_file()]
+        if not extracted_files:
+            raise ValueError(f"Archive {archive_path} did not contain any files.")
+        return extracted_files
+
+    def _doc_page(self, metadata: dict[str, Any]) -> int | None:
+        for key in ("page", "page_number", "page_num"):
+            value = metadata.get(key)
+            if value in (None, ""):
+                continue
+            return int(value)
+        return None
+
+    def _doc_locator(self, metadata: dict[str, Any], *, chunk_index: int) -> str:
+        for key in ("locator", "anchor", "xpath", "section", "heading", "relative_path"):
+            value = metadata.get(key)
+            if value:
+                return str(value)
+        return f"chunk:{chunk_index}"
+
+    def _segment_id(self, document_id: str, chunk_index: int) -> str:
+        return f"{document_id}:{chunk_index}"
+
+    def _build_segments(
+        self,
+        *,
+        document_id: str,
+        origin: SourceKind,
+        bundle_id: str,
+        registry_number: str | None,
+        source_url: str | None,
+        docs: list[Document],
+    ) -> list[Segment]:
+        segments: list[Segment] = []
+        chunk_counter = 0
+        for doc in docs:
+            metadata = dict(doc.metadata or {})
+            raw_text = str(doc.page_content or "")
+            if not raw_text.strip():
+                continue
+            page = self._doc_page(metadata)
+            for text in self._splitter.split_text(raw_text):
+                segment_metadata = dict(metadata)
+                segment_metadata.update(
+                    {
+                        "source_kind": origin,
+                        "source_url": source_url or metadata.get("source"),
+                        "bundle_id": bundle_id,
+                        "document_id": document_id,
+                        "registry_number": registry_number or "",
+                        "page": page if page is not None else "",
+                        "locator": self._doc_locator(metadata, chunk_index=chunk_counter),
+                    }
+                )
+                segments.append(
+                    Segment(
+                        content=text,
+                        metadata=segment_metadata,
+                        segment_id=self._segment_id(document_id, chunk_counter),
+                        original_format=metadata.get("source") or "text",
+                    )
+                )
+                chunk_counter += 1
+        return segments
+
+    def _index_documents(self, *, workspace: RunWorkspace, segments: list[Segment]) -> None:
+        if not segments:
+            return
+        embeddings = self._create_embeddings()
+        with self._vector_env(workspace):
+            vector_store = create_vector_store(
+                provider="chroma",
+                embeddings=embeddings,
+                collection_name=f"sales_lead_{workspace.index_id}",
+                cleanup=False,
+            )
+            Indexer(vector_store=vector_store, embeddings=embeddings).index(segments, batch_size=32)
+
+    def save_text_artifact(
+        self,
+        *,
+        workspace: RunWorkspace,
+        relative_dir: str,
+        file_name: str,
+        content: str,
+    ) -> str:
+        target_dir = workspace.artifacts_dir / relative_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / file_name
+        target_path.write_text(content, encoding="utf-8")
+        return str(target_path)
+
+    def prepare_files(
+        self,
+        *,
+        workspace: RunWorkspace,
+        origin: SourceKind,
+        bundle_id: str,
+        registry_number: str | None,
+        source_url: str | None,
+        file_paths: list[str],
+        provenance_by_path: dict[str, dict[str, Any]] | None = None,
+    ) -> list[PreparedDocument]:
+        prepared: list[PreparedDocument] = []
+        all_segments: list[Segment] = []
+        expanded_file_paths: list[str] = []
+        expanded_provenance: dict[str, dict[str, Any]] = {}
+        for raw_path in file_paths:
+            file_path = Path(raw_path)
+            provenance = dict((provenance_by_path or {}).get(str(file_path), {}))
+            if file_path.suffix.lower() == ".zip":
+                extracted_files = self._extract_archive(
+                    workspace=workspace,
+                    bundle_id=bundle_id,
+                    archive_path=file_path,
+                )
+                for extracted_file in extracted_files:
+                    extracted_path = str(extracted_file)
+                    expanded_file_paths.append(extracted_path)
+                    expanded_provenance[extracted_path] = {
+                        **provenance,
+                        "original_file_name": extracted_file.name,
+                        "derived_artifact_path": extracted_path,
+                    }
+                continue
+            expanded_file_paths.append(str(file_path))
+            expanded_provenance[str(file_path)] = provenance
+
+        for raw_path in expanded_file_paths:
+            file_path = Path(raw_path)
+            docs = self._load_docs(file_path)
+            combined_text = "\n\n".join(str(doc.page_content or "") for doc in docs if doc.page_content)
+            document_id = f"doc_{hashlib.sha1(str(file_path).encode('utf-8')).hexdigest()[:16]}"
+            segments = self._build_segments(
+                document_id=document_id,
+                origin=origin,
+                bundle_id=bundle_id,
+                registry_number=registry_number,
+                source_url=source_url,
+                docs=docs,
+            )
+            if not segments:
+                raise ValueError(f"No indexable content extracted from {file_path}.")
+            provenance = dict(expanded_provenance.get(str(file_path), {}))
+            prepared.append(
+                PreparedDocument(
+                    document_id=document_id,
+                    origin=origin,
+                    bundle_id=bundle_id,
+                    registry_number=registry_number,
+                    source_url=source_url,
+                    original_source_url=provenance.get("original_source_url") or source_url,
+                    original_file_name=provenance.get("original_file_name") or file_path.name,
+                    original_content_type=self._guess_content_type(
+                        Path(str(provenance.get("original_file_name") or file_path.name)),
+                        provenance.get("original_content_type"),
+                    ),
+                    derived_artifact_path=provenance.get("derived_artifact_path") or str(file_path),
+                    file_path=str(file_path),
+                    file_name=file_path.name,
+                    file_type=self._detect_file_type(file_path),
+                    text_excerpt=combined_text[:400],
+                    entities=self._extract_entities(combined_text),
+                    chunks_count=len(segments),
+                )
+            )
+            all_segments.extend(segments)
+        self._index_documents(workspace=workspace, segments=all_segments)
+        return prepared
+
+    def search(
+        self,
+        *,
+        workspace: RunWorkspace,
+        query: str,
+        top_k: int = 5,
+        source_kind: SourceKind | None = None,
+        bundle_id: str | None = None,
+    ) -> DocSearchResponse:
+        embeddings = self._create_embeddings()
+        metadata_clauses: list[dict[str, Any]] = []
+        if source_kind:
+            metadata_clauses.append({"source_kind": source_kind})
+        if bundle_id:
+            metadata_clauses.append({"bundle_id": bundle_id})
+        with self._vector_env(workspace):
+            vector_store = create_vector_store(
+                provider="chroma",
+                embeddings=embeddings,
+                collection_name=f"sales_lead_{workspace.index_id}",
+                cleanup=False,
+            )
+            kwargs: dict[str, Any] = {"k": top_k}
+            if len(metadata_clauses) == 1:
+                kwargs["filter"] = metadata_clauses[0]
+            elif metadata_clauses:
+                kwargs["filter"] = {"$and": metadata_clauses}
+            results = vector_store.similarity_search_with_relevance_scores(query, **kwargs)
+        matches: list[DocSearchMatch] = []
+        for doc, score in results:
+            metadata = dict(doc.metadata or {})
+            page_value = metadata.get("page")
+            page = None
+            if page_value not in (None, ""):
+                page = int(page_value)
+            matches.append(
+                DocSearchMatch(
+                    document_id=str(metadata.get("document_id") or ""),
+                    bundle_id=str(metadata.get("bundle_id") or ""),
+                    file_path=str(metadata.get("source") or metadata.get("file_path") or ""),
+                    page=page,
+                    locator=str(metadata.get("locator") or "") or None,
+                    snippet=str(doc.page_content or "")[:500],
+                    score=float(score),
+                    source_kind=str(metadata.get("source_kind") or "purchase"),
+                    source_url=str(metadata.get("source_url") or "") or None,
+                )
+            )
+        return DocSearchResponse(index_id=workspace.index_id, matches=matches)
+
+
+class CounterpartyClients:
+    """HTTP clients for scoring and FSSP with explicit error propagation."""
+
+    def __init__(self, settings: SalesLeadAgentSettings) -> None:
+        self._settings = settings
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        if self._settings.damia_api_key:
+            headers["Authorization"] = f"Bearer {self._settings.damia_api_key}"
+        return headers
+
+    def _client(self) -> httpx.Client:
+        return httpx.Client(headers=self._headers(), timeout=20.0)
+
+    def scoring(self, *, inn: str, model: str | None, include_fincoefs: bool) -> CounterpartyScoringResponse:
+        if not self._settings.scoring_base_url:
+            raise RuntimeError("SALES_LEAD_AGENT_SCORING_BASE_URL is not configured.")
+        with self._client() as client:
+            score_response = client.get(
+                f"{self._settings.scoring_base_url}/scoring/score",
+                params={"inn": inn, "model": model} if model else {"inn": inn},
+            )
+            score_response.raise_for_status()
+            score_payload = score_response.json() if score_response.content else {}
+            if not isinstance(score_payload, dict):
+                raise TypeError("Scoring API returned a non-object payload.")
+            fincoefs_payload: list[dict[str, Any]] = []
+            if include_fincoefs:
+                fincoefs_response = client.get(
+                    f"{self._settings.scoring_base_url}/scoring/fincoefs",
+                    params={"inn": inn},
+                )
+                fincoefs_response.raise_for_status()
+                raw_fincoefs = fincoefs_response.json() if fincoefs_response.content else []
+                if not isinstance(raw_fincoefs, list):
+                    raise TypeError("Fincoefs API returned a non-list payload.")
+                fincoefs_payload = raw_fincoefs
+        return CounterpartyScoringResponse(
+            inn=inn,
+            score=ScorePayload(
+                risk_value=_optional_float(score_payload.get("risk_value")),
+                risk_zone=_optional_string(score_payload.get("risk_zone")),
+                score_value=_optional_float(score_payload.get("score_value")),
+                score_zone=_optional_string(score_payload.get("score_zone")),
+                reliability_value=_optional_float(score_payload.get("reliability_value")),
+                reliability_zone=_optional_string(score_payload.get("reliability_zone")),
+                top_factors=[
+                    TopFactor(
+                        name=str(item["name"]),
+                        value=_optional_float(item.get("value")),
+                        nwoe=_optional_float(item.get("nwoe")),
+                    )
+                    for item in score_payload.get("top_factors") or []
+                    if isinstance(item, dict)
+                ],
+            ),
+            fincoefs=[
+                Fincoef(
+                    name=str(item["name"]),
+                    value=_optional_float(item.get("value")),
+                    norm=_optional_float(item.get("norm")),
+                    comparison=_optional_string(item.get("comparison")),
+                )
+                for item in fincoefs_payload
+                if isinstance(item, dict)
+            ],
+        )
+
+    def fssp(
+        self,
+        *,
+        inn: str,
+        from_date: str | None,
+        to_date: str | None,
+        response_format: int,
+    ) -> CounterpartyFSSPResponse:
+        if not self._settings.fssp_base_url:
+            raise RuntimeError("SALES_LEAD_AGENT_FSSP_BASE_URL is not configured.")
+        params: dict[str, Any] = {"inn": inn, "format": response_format}
+        if from_date:
+            params["from_date"] = from_date
+        if to_date:
+            params["to_date"] = to_date
+        with self._client() as client:
+            response = client.get(f"{self._settings.fssp_base_url}/fssp/isps", params=params)
+            response.raise_for_status()
+            payload = response.json() if response.content else []
+            if not isinstance(payload, list):
+                raise TypeError("FSSP API returned a non-list payload.")
+        return CounterpartyFSSPResponse(
+            inn=inn,
+            grouped=[
+                FSSPGroupedRecord(
+                    year=int(item["year"]),
+                    status=str(item["status"]),
+                    subject=str(item["subject"]),
+                    amount=_optional_float(item.get("amount")),
+                    count=int(item["count"]),
+                    proceeding_ids=[str(value) for value in item.get("proceeding_ids") or []],
+                )
+                for item in payload
+                if isinstance(item, dict)
+            ],
+            raw_format=response_format,
+        )
 
 
 @dataclass(frozen=True)
 class SalesLeadAgentDependencies:
     workspace_manager: RunWorkspaceManager
     document_service: DocumentPreparationService
-    classifier: InternalClassifier
     purchase_adapter: PurchaseAdapter
     counterparty_clients: CounterpartyClients
     open_source_max_concurrency: int
 
+    @classmethod
+    def from_settings(cls, settings: SalesLeadAgentSettings) -> "SalesLeadAgentDependencies":
+        return cls(
+            workspace_manager=RunWorkspaceManager(settings),
+            document_service=DocumentPreparationService(settings),
+            purchase_adapter=PurchaseAdapter(
+                settings=settings,
+                query_builder=ProcurementQueryBuilder(settings.procurement_search_template),
+            ),
+            counterparty_clients=CounterpartyClients(settings),
+            open_source_max_concurrency=settings.open_source_max_concurrency,
+        )
 
-def _tool_message(runtime: ToolRuntime | None, payload: Any, *, status: str = "success") -> ToolMessage:
-    return ToolMessage(
-        content=json.dumps(payload, ensure_ascii=False, indent=2),
-        tool_call_id=getattr(runtime, "tool_call_id", None) or "",
-        status=status,
+
+def build_sales_lead_tools(
+    dependencies: SalesLeadAgentDependencies | None = None,
+) -> list[Any]:
+    deps = dependencies or SalesLeadAgentDependencies.from_settings(get_settings())
+
+    @tool(
+        "purchase_search_tool",
+        args_schema=PurchaseSearchRequest,
+        description=(
+            "Search EIS procurements, download procurement artifacts, prepare searchable documents, "
+            "and return run_id/index_id for follow-up tool calls. Zakupki already applies morphology "
+            "and matches all words in one query using AND semantics. To simulate OR, pass multiple "
+            "alternative search strings in query_texts. Example fallback sequence: страхован -> страхов."
+        ),
     )
+    def purchase_search_tool(
+        *,
+        run_id: str | None = None,
+        search_url: str | None = None,
+        query_texts: list[str] | None = None,
+        max_pages: int | None = None,
+        headless: bool | None = None,
+    ) -> dict[str, Any]:
+        """Search procurements and prepare procurement artifacts for later document search.
+
+        Args:
+            run_id: Optional existing run identifier. If omitted, a new run is created.
+            search_url: Optional direct EIS extended-search URL. If present, it is used as-is.
+            query_texts: Optional list of contextual search phrases for the `searchString` URL
+                parameter. Zakupki already applies morphology and matches all words in one query
+                with AND semantics. To simulate OR, pass multiple alternative search strings.
+                Recommended strategy: use short procurement-style phrases or stems, not long bags
+                of synonyms. For example, `страхование`, `страхованию`, `страхования` should first
+                be searched as `страхован`; if that returns no results, call the tool again with a
+                weaker query such as `страхов`.
+            max_pages: Optional crawler page limit.
+            headless: Optional crawler headless-mode override.
+
+        Returns:
+            A dictionary with the resolved `run_id`, `index_id`, `search_urls`, raw procurement `items`,
+            and `prepared_documents` ready for `doc_search_tool`.
+        """
+        workspace = deps.workspace_manager.get(run_id) if run_id else deps.workspace_manager.create_run()
+        resolved_urls, items = deps.purchase_adapter.search(
+            search_url=search_url,
+            query_texts=query_texts,
+            downloads_dir=str(workspace.downloads_dir),
+            max_pages=max_pages,
+            headless=headless,
+        )
+        prepared_documents: list[PreparedDocument] = []
+        final_items: list[PurchaseSearchItem] = []
+        for item in items:
+            artifact_paths = _ensure_purchase_artifacts(workspace=workspace, item=item.model_dump())
+            if artifact_paths:
+                provenance_by_path = {
+                    path: {
+                        "original_source_url": item.detail_url,
+                        "original_file_name": Path(path).name,
+                        "derived_artifact_path": path,
+                    }
+                    for path in artifact_paths
+                }
+                prepared = deps.document_service.prepare_files(
+                    workspace=workspace,
+                    origin="purchase",
+                    bundle_id=item.bundle_id,
+                    registry_number=item.registry_number,
+                    source_url=item.detail_url,
+                    file_paths=artifact_paths,
+                    provenance_by_path=provenance_by_path,
+                )
+                item.prepared_document_ids = [doc.document_id for doc in prepared]
+                prepared_documents.extend(prepared)
+            final_items.append(item)
+        response = PurchaseSearchResponse(
+            run_id=workspace.run_id,
+            index_id=workspace.index_id,
+            search_urls=resolved_urls,
+            items=final_items,
+            prepared_documents=prepared_documents,
+        )
+        return response.model_dump()
+
+    @tool(
+        "open_source_fetch_tool",
+        args_schema=OpenSourceFetchRequest,
+        description="Fetch public web pages and downloadable attachments, prepare searchable documents, and return run_id/index_id for follow-up tool calls.",
+    )
+    async def open_source_fetch_tool(
+        *,
+        run_id: str | None = None,
+        url: str,
+        depth: int | None = None,
+        follow_download_links: bool | None = None,
+        max_concurrency: int | None = None,
+    ) -> dict[str, Any]:
+        """Fetch open-source pages and attachments into a searchable run.
+
+        Args:
+            run_id: Optional existing run identifier. If omitted, a new run is created.
+            url: Start URL for web retrieval.
+            depth: Optional recursive crawl depth.
+            follow_download_links: Whether download links should also be fetched.
+            max_concurrency: Optional crawler concurrency override.
+
+        Returns:
+            A dictionary with `run_id`, `index_id`, fetched `pages`, and `prepared_documents`
+            that can be searched with `doc_search_tool`.
+        """
+        workspace = deps.workspace_manager.get(run_id) if run_id else deps.workspace_manager.create_run()
+        loader = AsyncWebLoader(
+            url=url,
+            depth=0 if depth is None else depth,
+            fetch_mode="playwright",
+            follow_download_links=bool(follow_download_links),
+            max_concurrency=deps.open_source_max_concurrency
+            if max_concurrency is None
+            else max_concurrency,
+            continue_on_error=False,
+        )
+        docs = await loader.load()
+        last_errors = getattr(loader, "last_errors", None) or []
+        if last_errors:
+            raise ToolUserCorrectableError(
+                code="FETCH_FAILED",
+                message="; ".join(str(item.get("error") or item) for item in last_errors),
+                suggestion="Retry the call with a different URL or a smaller crawl scope.",
+                input_field="url",
+            )
+        if not docs:
+            raise ToolUserCorrectableError(
+                code="NO_CONTENT_FETCHED",
+                message=f"No content fetched from {url}.",
+                suggestion="Check the URL and retry with a different page or a less restrictive source.",
+                input_field="url",
+            )
+
+        pages: list[OpenSourcePage] = []
+        prepared_documents: list[PreparedDocument] = []
+        attachments_by_parent: dict[str, list[str]] = defaultdict(list)
+
+        for doc in docs:
+            metadata = dict(doc.metadata or {})
+            source_url = str(metadata.get("source") or metadata.get("url") or "").strip()
+            if not source_url:
+                raise ToolUserCorrectableError(
+                    code="MISSING_SOURCE_URL",
+                    message="Open-source loader returned content without a source URL.",
+                    suggestion="Retry the call with a different URL.",
+                    input_field="url",
+                )
+            parent_url = str(metadata.get("parent_url") or source_url).strip()
+            content = str(doc.page_content or "")
+            if not content.strip():
+                raise ToolUserCorrectableError(
+                    code="EMPTY_FETCHED_CONTENT",
+                    message=f"Fetched empty content for {source_url}.",
+                    suggestion="Retry the call with a different URL or a smaller crawl scope.",
+                    input_field="url",
+                )
+            if metadata.get("source_type") == "web_download" or metadata.get("download_filename"):
+                bundle_id = f"download_{hashlib.sha1(source_url.encode('utf-8')).hexdigest()[:12]}"
+                original_name = str(
+                    metadata.get("download_filename")
+                    or Path(urlparse(source_url).path).name
+                    or "download.txt"
+                )
+                artifact_path = deps.document_service.save_text_artifact(
+                    workspace=workspace,
+                    relative_dir=bundle_id,
+                    file_name=_text_artifact_name(original_name, default_stem="download"),
+                    content=content,
+                )
+                prepared = deps.document_service.prepare_files(
+                    workspace=workspace,
+                    origin="open_source",
+                    bundle_id=bundle_id,
+                    registry_number=None,
+                    source_url=source_url,
+                    file_paths=[artifact_path],
+                    provenance_by_path={
+                        artifact_path: {
+                            "original_source_url": source_url,
+                            "original_file_name": original_name,
+                            "original_content_type": metadata.get("content_type")
+                            or metadata.get("mime_type"),
+                            "derived_artifact_path": artifact_path,
+                        }
+                    },
+                )
+                prepared_documents.extend(prepared)
+                attachments_by_parent[parent_url].append(source_url)
+                continue
+
+            bundle_id = f"page_{hashlib.sha1(source_url.encode('utf-8')).hexdigest()[:12]}"
+            original_name = Path(urlparse(source_url).path).name or "page.txt"
+            artifact_path = deps.document_service.save_text_artifact(
+                workspace=workspace,
+                relative_dir=bundle_id,
+                file_name=_text_artifact_name(original_name, default_stem="page"),
+                content=content,
+            )
+            prepared = deps.document_service.prepare_files(
+                workspace=workspace,
+                origin="open_source",
+                bundle_id=bundle_id,
+                registry_number=None,
+                source_url=source_url,
+                file_paths=[artifact_path],
+                provenance_by_path={
+                    artifact_path: {
+                        "original_source_url": source_url,
+                        "original_file_name": original_name,
+                        "original_content_type": metadata.get("content_type")
+                        or metadata.get("mime_type"),
+                        "derived_artifact_path": artifact_path,
+                    }
+                },
+            )
+            prepared_documents.extend(prepared)
+            pages.append(
+                OpenSourcePage(
+                    bundle_id=bundle_id,
+                    url=source_url,
+                    title=str(metadata.get("title")) if metadata.get("title") else None,
+                    text=content,
+                    prepared_document_ids=[doc_item.document_id for doc_item in prepared],
+                )
+            )
+
+        if not pages and not prepared_documents:
+            raise ToolUserCorrectableError(
+                code="NO_SEARCHABLE_ARTIFACTS",
+                message=f"No searchable artifacts were prepared from {url}.",
+                suggestion="Retry with a different URL or enable follow_download_links when attachments are expected.",
+                input_field="url",
+            )
+        for page in pages:
+            page.attachments = attachments_by_parent.get(page.url, [])
+        response = OpenSourceFetchResponse(
+            run_id=workspace.run_id,
+            index_id=workspace.index_id,
+            pages=pages,
+            prepared_documents=prepared_documents,
+        )
+        return response.model_dump()
+
+    @tool(
+        "doc_search_tool",
+        args_schema=DocSearchRequest,
+        description="Search a prepared document index by explicit index_id and return exact snippets with provenance.",
+    )
+    def doc_search_tool(
+        *,
+        index_id: str,
+        query: str,
+        top_k: int | None = None,
+        source_kind: str | None = None,
+        bundle_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Search a prepared document index.
+
+        Args:
+            index_id: Explicit prepared index identifier returned by a previous acquisition tool.
+            query: Semantic document question.
+            top_k: Optional match count limit.
+            source_kind: Optional narrowing to `purchase` or `open_source`.
+            bundle_id: Optional narrowing to a specific bundle inside the run.
+
+        Returns:
+            A dictionary with `index_id` and exact `matches`, including file path, page/locator,
+            score, source kind, and source URL.
+        """
+        try:
+            workspace = deps.workspace_manager.get_by_index(index_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ToolUserCorrectableError(
+                code="INVALID_INDEX_ID",
+                message=str(exc),
+                suggestion="Reuse a valid index_id returned by purchase_search_tool or open_source_fetch_tool.",
+                input_field="index_id",
+            ) from exc
+        response = deps.document_service.search(
+            workspace=workspace,
+            query=query,
+            top_k=5 if top_k is None else top_k,
+            source_kind=source_kind,  # type: ignore[arg-type]
+            bundle_id=bundle_id,
+        )
+        return response.model_dump()
+
+    @tool(
+        "counterparty_scoring_tool",
+        args_schema=CounterpartyScoringRequest,
+        description="Fetch scoring data and optional financial coefficients for a supplied INN.",
+    )
+    def counterparty_scoring_tool(
+        *,
+        inn: str,
+        model: str | None = None,
+        include_fincoefs: bool | None = None,
+    ) -> dict[str, Any]:
+        """Fetch counterparty scoring data.
+
+        Args:
+            inn: Company INN to analyze.
+            model: Optional external scoring model identifier.
+            include_fincoefs: Whether financial coefficients should also be requested.
+
+        Returns:
+            A dictionary with the normalized scoring payload for the supplied INN.
+        """
+        return deps.counterparty_clients.scoring(
+            inn=inn,
+            model=model,
+            include_fincoefs=bool(include_fincoefs),
+        ).model_dump()
+
+    @tool(
+        "counterparty_fssp_tool",
+        args_schema=CounterpartyFSSPRequest,
+        description="Fetch grouped enforcement proceedings from FSSP for a supplied INN.",
+    )
+    def counterparty_fssp_tool(
+        *,
+        inn: str,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        format: int | None = None,
+    ) -> dict[str, Any]:
+        """Fetch grouped FSSP enforcement data.
+
+        Args:
+            inn: Company INN to analyze.
+            from_date: Optional lower bound for retrieval.
+            to_date: Optional upper bound for retrieval.
+            format: Optional external response format.
+
+        Returns:
+            A dictionary with grouped FSSP proceedings for the supplied INN.
+        """
+        return deps.counterparty_clients.fssp(
+            inn=inn,
+            from_date=from_date,
+            to_date=to_date,
+            response_format=1 if format is None else format,
+        ).model_dump()
+
+    return [
+        purchase_search_tool,
+        open_source_fetch_tool,
+        doc_search_tool,
+        counterparty_scoring_tool,
+        counterparty_fssp_tool,
+    ]
 
 
-def _merge_dict_list(existing: list[dict[str, Any]] | None, additions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged = list(existing or [])
-    seen = {json.dumps(item, ensure_ascii=False, sort_keys=True, default=str) for item in merged}
-    for item in additions:
-        key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(item)
-    return merged
+def _normalize_list_field(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return [line for line in str(value).splitlines() if line.strip()]
 
 
-def _merge_strings(existing: list[str] | None, additions: list[str]) -> list[str]:
-    merged = list(existing or [])
-    for item in additions:
-        if item and item not in merged:
-            merged.append(item)
-    return merged
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
 
 
-def _append_tool_usage(
-    existing: list[dict[str, Any]] | None,
-    entry: dict[str, Any],
-) -> list[dict[str, Any]]:
-    return [*(existing or []), entry]
-
-
-def _append_acquisition_attempt(
-    existing: list[dict[str, Any]] | None,
-    entry: dict[str, Any],
-) -> list[dict[str, Any]]:
-    return [*(existing or []), entry]
-
-
-def _searchable_document_count(documents: list[Any]) -> int:
-    count = 0
-    for document in documents:
-        if isinstance(document, dict):
-            index_status = document.get("index_status")
-            chunks_count = int(document.get("chunks_count") or 0)
-        else:
-            index_status = getattr(document, "index_status", None)
-            chunks_count = int(getattr(document, "chunks_count", 0) or 0)
-        if index_status == "ready" and chunks_count > 0:
-            count += 1
-    return count
-
-
-def _active_context_ready(state: SalesLeadAgentState) -> bool:
-    return bool(state.get("active_run_id") and state.get("active_run_ready"))
-
-
-def _has_ready_active_context(state: SalesLeadAgentState) -> bool:
-    if not _active_context_ready(state):
-        return False
-    return _searchable_document_count(state.get("prepared_documents") or []) > 0
-
-
-def _acquisition_error_payload(
-    *,
-    tool: str,
-    status: str,
-    error: str,
-    run_id: str | None = None,
-    index_id: str | None = None,
-    context: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "tool": tool,
-        "status": status,
-        "error": error,
-        "run_id": run_id,
-        "index_id": index_id,
-    }
-    if context:
-        payload.update(context)
-    return payload
-
-
-def _active_context_update(
-    state: SalesLeadAgentState,
-    *,
-    workspace: Any,
-    current_query_signature: str | None,
-    active_run_ready: bool,
-    acquisition_status: str | None,
-) -> dict[str, Any]:
-    if active_run_ready and acquisition_status in {"success", "partial"}:
-        return {
-            "active_run_id": workspace.run_id,
-            "active_run_query_signature": current_query_signature,
-            "current_run_id": workspace.run_id,
-            "index_id": workspace.index_id,
-            "active_run_ready": True,
-        }
-    return {
-        "current_run_id": workspace.run_id,
-        "active_run_ready": _active_context_ready(state),
-    }
-
-
-def _with_issue(
-    current: dict[str, Any] | None,
-    issue: TurnValidationIssue,
-) -> dict[str, Any]:
-    validation = TurnValidationResult.model_validate(current or {})
-    issues = list(validation.issues)
-    issues.append(issue)
-    status = "failed_verification" if any(item.severity == "error" for item in issues) else "partial"
-    return TurnValidationResult(
-        status=status,
-        issues=issues,
-        manual_review_required=True,
-    ).model_dump()
+def _optional_string(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 def _safe_artifact_name(name: str, *, default_stem: str) -> str:
     base = _SAFE_FILE_RE.sub("_", name.strip()) or default_stem
-    if not base.lower().endswith(".txt"):
+    if "." not in base:
         base = f"{base}.txt"
     return base
 
 
-def _search_filters_from_args(**kwargs: Any) -> SearchFilters | None:
-    payload = {
-        "query_text": kwargs.get("query_text"),
-        "law": kwargs.get("law"),
-        "region": kwargs.get("region"),
-        "min_price": kwargs.get("min_price"),
-        "max_price": kwargs.get("max_price"),
-        "published_from": kwargs.get("published_from"),
-        "published_to": kwargs.get("published_to"),
-        "submission_deadline_from": kwargs.get("submission_deadline_from"),
-        "submission_deadline_to": kwargs.get("submission_deadline_to"),
-        "customer_name": kwargs.get("customer_name"),
-        "customer_inn": kwargs.get("customer_inn"),
-        "supplier_hint": kwargs.get("supplier_hint"),
-    }
-    compact = {key: value for key, value in payload.items() if value not in (None, "", [])}
-    if not compact:
-        return None
-    try:
-        return SearchFilters.model_validate(compact)
-    except ValidationError as exc:
-        raise RecoverableToolInputError("Invalid procurement search filters.") from exc
+def _text_artifact_name(name: str, *, default_stem: str) -> str:
+    base_name = Path(name).stem or default_stem
+    base = _SAFE_FILE_RE.sub("_", base_name.strip()) or default_stem
+    return f"{base}.txt"
 
 
-def _search_filters_payload(filters: SearchFilters | None) -> dict[str, Any] | None:
-    if filters is None:
-        return None
-    return filters.model_dump(exclude_none=True)
-
-
-def _evidence_from_doc_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    evidence: list[dict[str, Any]] = []
-    for match in matches:
-        evidence.append(
-            {
-                "source": "document",
-                "source_url": match.get("source_url"),
-                "file_path": match.get("file_path"),
-                "page": match.get("page"),
-                "locator": match.get("locator"),
-                "snippet": match.get("snippet") or "",
-                "document_id": match.get("document_id"),
-                "bundle_id": match.get("bundle_id"),
-            }
-        )
-    return evidence
-
-
-def _ensure_purchase_artifacts(*, workspace, item: dict[str, Any]) -> list[str]:
+def _ensure_purchase_artifacts(*, workspace: RunWorkspace, item: dict[str, Any]) -> list[str]:
     artifact_paths: list[str] = list(item.get("downloaded_files") or [])
-    bundle_dir = workspace.artifacts_dir / item["bundle_id"]
+    bundle_dir = workspace.artifacts_dir / str(item["bundle_id"])
     bundle_dir.mkdir(parents=True, exist_ok=True)
     json_fields = {
         "common_info_json": item.get("common_info_json"),
@@ -251,1068 +1451,3 @@ def _ensure_purchase_artifacts(*, workspace, item: dict[str, Any]) -> list[str]:
         path.write_text(str(payload), encoding="utf-8")
         artifact_paths.append(str(path))
     return artifact_paths
-
-
-def _resolve_purchase_run_id(
-    state: SalesLeadAgentState,
-    explicit_run_id: str | None,
-    *,
-    current_search_url: str | None = None,
-    current_search_filters: SearchFilters | dict[str, Any] | None = None,
-) -> str | None:
-    if explicit_run_id:
-        return explicit_run_id
-    active_run_id = state.get("active_run_id")
-    if not active_run_id:
-        return None
-    current_signature = state.get("current_query_signature")
-    active_signature = state.get("active_run_query_signature")
-    if current_signature and current_signature == active_signature:
-        return active_run_id
-
-    understanding = state.get("task_understanding") or {}
-    task_kind = understanding.get("task_kind")
-    has_new_acquisition_context = bool(
-        current_search_url
-        or current_search_filters
-        or state.get("search_url")
-        or state.get("search_filters")
-    )
-    if (
-        task_kind in {"fact_lookup", "procurement_analysis"}
-        and _has_ready_active_context(state)
-        and not has_new_acquisition_context
-    ):
-        return active_run_id
-    return None
-
-
-def _inn_guard_failure(
-    *,
-    runtime: ToolRuntime[None, SalesLeadAgentState],
-    inn: str,
-    tool_name: str,
-    source: str,
-) -> Command:
-    payload = {
-        "source": source,
-        "status": "failed",
-        "error": f"INN {inn} is not available in normalized state. Acquire or classify it first.",
-        "inn": inn,
-    }
-    return Command(
-        update={
-            "turn_validation": _with_issue(
-                runtime.state.get("turn_validation"),
-                TurnValidationIssue(
-                    stage=tool_name,
-                    code=f"{tool_name}_guard_failed",
-                    message=f"INN {inn} is not available in normalized state. Acquire or classify it first.",
-                    metadata={"inn": inn},
-                ),
-            ),
-            "missing_data": _merge_strings(runtime.state.get("missing_data"), [f"normalized_inn:{inn}"]),
-            "turn_tool_usage": _append_tool_usage(
-                runtime.state.get("turn_tool_usage"),
-                {
-                    "tool": tool_name,
-                    "status": "failed",
-                    "inn": inn,
-                    "guard": "normalized_inn_missing",
-                },
-            ),
-            "messages": [_tool_message(runtime, payload, status="error")],
-        }
-    )
-
-
-def _tool_validation_failure(
-    *,
-    runtime: ToolRuntime[None, SalesLeadAgentState],
-    source: str,
-    code: str,
-    message: str,
-    missing_data: list[str],
-    recommended_next_step: str,
-    acquisition_context: dict[str, Any] | None = None,
-) -> Command:
-    payload = {
-        "source": source,
-        "status": "failed",
-        "error": message,
-    }
-    update: dict[str, Any] = {
-        "turn_validation": _with_issue(
-            runtime.state.get("turn_validation"),
-            TurnValidationIssue(
-                stage=source,
-                code=code,
-                message=message,
-                metadata={},
-            ),
-        ),
-        "missing_data": _merge_strings(runtime.state.get("missing_data"), missing_data),
-        "recommended_next_step": recommended_next_step,
-        "turn_tool_usage": _append_tool_usage(
-            runtime.state.get("turn_tool_usage"),
-            {
-                "tool": source,
-                "status": "failed",
-                "validation_error": code,
-            },
-        ),
-        "messages": [_tool_message(runtime, payload, status="error")],
-    }
-    if acquisition_context is not None:
-        attempt = {
-            "tool": source,
-            "status": "failed",
-            "active_run_ready": False,
-            **acquisition_context,
-        }
-        update.update(
-            {
-                "acquisition_status": "failed",
-                "acquisition_attempts": _append_acquisition_attempt(
-                    runtime.state.get("acquisition_attempts"),
-                    attempt,
-                ),
-                "last_acquisition_error": _acquisition_error_payload(
-                    tool=source,
-                    status="failed",
-                    error=message,
-                    run_id=acquisition_context.get("run_id"),
-                    index_id=acquisition_context.get("index_id"),
-                    context={key: value for key, value in acquisition_context.items() if key not in {"run_id", "index_id"}},
-                ),
-            }
-        )
-    return Command(update=update)
-
-
-def build_sales_lead_tools(deps: SalesLeadAgentDependencies) -> list[Any]:
-    @tool(
-        "purchase_search_tool",
-        args_schema=PurchaseSearchRequest,
-        description="Search procurement opportunities, classify relevance, download documents, and prepare them for indexed search.",
-    )
-    def purchase_search_tool(
-        *,
-        runtime: ToolRuntime[None, SalesLeadAgentState],
-        run_id: str | None = None,
-        search_url: str | None = None,
-        query_text: str | None = None,
-        law: str | None = None,
-        region: str | None = None,
-        min_price: float | None = None,
-        max_price: float | None = None,
-        published_from: str | None = None,
-        published_to: str | None = None,
-        submission_deadline_from: str | None = None,
-        submission_deadline_to: str | None = None,
-        customer_name: str | None = None,
-        customer_inn: str | None = None,
-        supplier_hint: str | None = None,
-        max_pages: int | None = None,
-        headless: bool | None = None,
-    ) -> Command:
-        """Search procurement opportunities, filter them for semantic relevance, and prepare supporting documents.
-
-        Args:
-            run_id: Optional explicit run identifier. When omitted, the tool may reuse the current active run
-                for the same acquisition context or create a new run.
-            search_url: Optional direct EIS extended-search URL. If provided, it is used as-is.
-            query_text: Contextualized procurement search phrase assembled for the EIS search string.
-            law: Optional procurement law filter, for example `44-FZ` or `223-FZ`.
-            region: Optional region hint used for search narrowing.
-            min_price: Optional lower price boundary.
-            max_price: Optional upper price boundary.
-            published_from: Optional publication start date.
-            published_to: Optional publication end date.
-            submission_deadline_from: Optional submission deadline start date.
-            submission_deadline_to: Optional submission deadline end date.
-            customer_name: Optional customer name hint.
-            customer_inn: Optional customer INN hint.
-            supplier_hint: Optional supplier/service specialization hint.
-            max_pages: Optional maximum number of crawler result pages to traverse.
-            headless: Optional crawler headless-mode override.
-
-        Returns:
-            A `Command` that updates state with raw procurement hits, relevance-classified hits, dropped hits,
-            prepared documents, normalized entities, active run metadata, and a tool transcript message.
-        """
-        try:
-            filters_model = _search_filters_from_args(
-                query_text=query_text,
-                law=law,
-                region=region,
-                min_price=min_price,
-                max_price=max_price,
-                published_from=published_from,
-                published_to=published_to,
-                submission_deadline_from=submission_deadline_from,
-                submission_deadline_to=submission_deadline_to,
-                customer_name=customer_name,
-                customer_inn=customer_inn,
-                supplier_hint=supplier_hint,
-            )
-        except RecoverableToolInputError as exc:
-            return _tool_validation_failure(
-                runtime=runtime,
-                source="purchase_search_tool",
-                code="purchase_search_invalid_filters",
-                message=str(exc),
-                missing_data=["procurement_search_filters"],
-                recommended_next_step=(
-                    "Provide procurement search criteria in the expected format or retry with a direct search URL."
-                ),
-                acquisition_context={
-                    "search_url": search_url,
-                    "query_text": query_text,
-                },
-            )
-        if not search_url and filters_model is None:
-            return _tool_validation_failure(
-                runtime=runtime,
-                source="purchase_search_tool",
-                code="purchase_search_missing_criteria",
-                message="purchase_search_tool requires either search_url or at least one search filter.",
-                missing_data=["procurement_search_criteria"],
-                recommended_next_step=(
-                    "Provide a direct procurement search URL or at least one procurement search filter."
-                ),
-                acquisition_context={
-                    "search_url": search_url,
-                    "query_text": query_text,
-                },
-            )
-
-        resolved_run_id = _resolve_purchase_run_id(
-            runtime.state,
-            run_id,
-            current_search_url=search_url,
-            current_search_filters=filters_model,
-        )
-        workspace = deps.workspace_manager.get(resolved_run_id) if resolved_run_id else deps.workspace_manager.create_run()
-        filters_payload = _search_filters_payload(filters_model)
-        resolved_url, base_response = deps.purchase_adapter.search(
-            search_url=search_url,
-            search_filters=filters_model,
-            downloads_dir=str(workspace.downloads_dir),
-            max_pages=max_pages,
-            headless=headless,
-        )
-        base_response.run_id = workspace.run_id
-        base_response.index_id = workspace.index_id
-
-        hits_summary = deps.purchase_adapter.summarize_hits(base_response)
-        relevant_items = list(base_response.items)
-        dropped_items: list[dict[str, Any]] = []
-        unclassified_items: list[dict[str, Any]] = []
-        relevance_artifact = {"decisions": []}
-        turn_validation = runtime.state.get("turn_validation")
-        missing_data = list(runtime.state.get("missing_data") or [])
-        recommended_next_step = runtime.state.get("recommended_next_step")
-        if base_response.status == "failed":
-            failure_message = "; ".join(error for error in base_response.errors if error) or (
-                "purchase_search_tool failed without a structured error message."
-            )
-            turn_validation = _with_issue(
-                turn_validation,
-                TurnValidationIssue(
-                    stage="purchase_search_tool",
-                    code="purchase_search_failed",
-                    message=failure_message,
-                    metadata={"search_url": resolved_url},
-                ),
-            )
-            missing_data = _merge_strings(missing_data, ["procurement_search_source_availability"])
-            recommended_next_step = (
-                "Retry the procurement search or provide a direct EIS search URL after the source/crawler issue is resolved."
-            )
-        if hits_summary:
-            classifier_summary = json.dumps(
-                {
-                    "search_url": resolved_url,
-                    "search_filters": filters_payload,
-                    "current_request": runtime.state.get("current_user_request"),
-                    "task_understanding": runtime.state.get("task_understanding"),
-                },
-                ensure_ascii=False,
-            )
-            try:
-                relevance = deps.classifier.classify_procurement_hits(
-                    summary=classifier_summary,
-                    hits=hits_summary,
-                )
-            except ClassifierExecutionError as exc:
-                relevant_items = []
-                unclassified_items = [item.model_dump() for item in base_response.items]
-                relevance_artifact = {
-                    "status": "unclassified",
-                    "error": str(exc),
-                    "raw_hit_count": len(unclassified_items),
-                }
-                base_response.status = "partial"
-                base_response.errors = list(base_response.errors) + [f"relevance_classifier_failed:{exc}"]
-                missing_data = _merge_strings(missing_data, ["procurement_relevance_verification"])
-                recommended_next_step = (
-                    "Review the procurement candidates manually or retry the search after the relevance classifier recovers."
-                )
-                turn_validation = _with_issue(
-                    turn_validation,
-                    TurnValidationIssue(
-                        stage="procurement_relevance",
-                        code="procurement_relevance_classifier_failed",
-                        message=str(exc),
-                        metadata={"search_url": resolved_url},
-                    ),
-                )
-            else:
-                decisions = {decision.bundle_id: decision for decision in relevance.decisions}
-                selected = []
-                for item in base_response.items:
-                    decision = decisions.get(item.bundle_id)
-                    if decision is None or decision.is_relevant:
-                        selected.append(item)
-                        continue
-                    dropped_items.append(
-                        {
-                            "bundle_id": item.bundle_id,
-                            "registry_number": item.registry_number,
-                            "purchase_title": item.purchase_title,
-                            "reason": decision.reason,
-                        }
-                    )
-                relevant_items = selected
-                relevance_artifact = relevance.model_dump()
-
-        prepared_documents = []
-        updated_items = []
-        normalized_inns = list(runtime.state.get("normalized_inns") or [])
-        company_names = list(runtime.state.get("company_names") or [])
-        for item in relevant_items:
-            artifact_paths = _ensure_purchase_artifacts(
-                workspace=workspace,
-                item=item.model_dump(),
-            )
-            provenance_by_path = {
-                path: {
-                    "original_source_url": item.detail_url,
-                    "original_file_name": Path(path).name,
-                    "derived_artifact_path": path,
-                }
-                for path in artifact_paths
-            }
-            prepared = deps.document_service.prepare_files(
-                workspace=workspace,
-                origin="purchase",
-                bundle_id=item.bundle_id,
-                registry_number=item.registry_number,
-                source_url=item.detail_url,
-                file_paths=artifact_paths,
-                provenance_by_path=provenance_by_path,
-            )
-            item.prepared_document_ids = [doc.document_id for doc in prepared]
-            for doc in prepared:
-                normalized_inns = _merge_strings(normalized_inns, doc.entities.inn)
-                company_names = _merge_strings(company_names, doc.entities.company_names)
-            prepared_documents.extend(prepared)
-            updated_items.append(item)
-
-        searchable_document_count = _searchable_document_count(prepared_documents)
-        response_status = base_response.status
-        response_errors = list(base_response.errors)
-        if updated_items and searchable_document_count == 0 and response_status != "failed":
-            response_status = "partial"
-            no_context_error = "Acquisition finished without producing a searchable prepared procurement corpus."
-            if no_context_error not in response_errors:
-                response_errors.append(no_context_error)
-            turn_validation = _with_issue(
-                turn_validation,
-                TurnValidationIssue(
-                    stage="purchase_search_tool",
-                    code="purchase_search_context_unready",
-                    message=no_context_error,
-                    metadata={"run_id": workspace.run_id},
-                ),
-            )
-            missing_data = _merge_strings(missing_data, ["prepared_procurement_corpus"])
-            recommended_next_step = recommended_next_step or (
-                "Retry the procurement acquisition after document preparation/indexing is available."
-            )
-        active_run_ready = response_status in {"success", "partial"} and searchable_document_count > 0
-        response = PurchaseSearchResponse(
-            run_id=workspace.run_id,
-            index_id=workspace.index_id,
-            status=response_status,  # type: ignore[arg-type]
-            errors=response_errors,
-            items=updated_items,
-            prepared_documents=prepared_documents,
-        )
-        acquisition_error = None
-        if response.status != "success":
-            acquisition_error = _acquisition_error_payload(
-                tool="purchase_search_tool",
-                status=response.status,
-                error="; ".join(error for error in response.errors if error)
-                or "purchase_search_tool failed without a structured error message.",
-                run_id=workspace.run_id,
-                index_id=workspace.index_id,
-                context={
-                    "search_url": resolved_url,
-                    "relevant_hits": len(updated_items),
-                    "unclassified_hits": len(unclassified_items),
-                },
-            )
-        update = {
-            **_active_context_update(
-                runtime.state,
-                workspace=workspace,
-                current_query_signature=runtime.state.get("current_query_signature"),
-                active_run_ready=active_run_ready,
-                acquisition_status=response.status,
-            ),
-            "acquisition_status": response.status,
-            "acquisition_attempts": _append_acquisition_attempt(
-                runtime.state.get("acquisition_attempts"),
-                {
-                    "tool": "purchase_search_tool",
-                    "status": response.status,
-                    "run_id": workspace.run_id,
-                    "index_id": workspace.index_id,
-                    "active_run_ready": active_run_ready,
-                    "prepared_document_count": len(prepared_documents),
-                    "searchable_document_count": searchable_document_count,
-                    "relevant_hits": len(updated_items),
-                    "unclassified_hits": len(unclassified_items),
-                    "search_url": resolved_url,
-                },
-            ),
-            "last_acquisition_error": acquisition_error,
-            "last_purchase_search_result": response.model_dump(),
-            "search_url": resolved_url,
-            "search_filters": filters_payload,
-            "raw_procurement_hits": [item.model_dump() for item in base_response.items],
-            "procurement_hits": [item.model_dump() for item in updated_items],
-            "dropped_procurement_hits": dropped_items,
-            "unclassified_procurement_hits": unclassified_items,
-            "prepared_documents": _merge_dict_list(
-                runtime.state.get("prepared_documents"),
-                [doc.model_dump() for doc in prepared_documents],
-            ),
-            "normalized_inns": normalized_inns,
-            "company_names": company_names,
-            "procurement_relevance": relevance_artifact,
-            "turn_validation": turn_validation,
-            "turn_tool_usage": _append_tool_usage(
-                runtime.state.get("turn_tool_usage"),
-                {
-                    "tool": "purchase_search_tool",
-                    "status": response.status,
-                    "run_id": workspace.run_id,
-                    "index_id": workspace.index_id,
-                    "search_url": resolved_url,
-                    "relevant_hits": len(updated_items),
-                    "unclassified_hits": len(unclassified_items),
-                    "searchable_document_count": searchable_document_count,
-                    "active_run_ready": active_run_ready,
-                },
-            ),
-            "missing_data": missing_data,
-            "recommended_next_step": recommended_next_step,
-            "semantic_dirty": True,
-            "messages": [
-                _tool_message(
-                    runtime,
-                    response.model_dump(),
-                    status="error" if response.status == "failed" else "success",
-                )
-            ],
-        }
-        return Command(update=update)
-
-    @tool(
-        "open_source_fetch_tool",
-        args_schema=OpenSourceFetchRequest,
-        description="Fetch public web pages and attachments, prepare them, and add them to the active run index.",
-    )
-    async def open_source_fetch_tool(
-        *,
-        runtime: ToolRuntime[None, SalesLeadAgentState],
-        run_id: str | None = None,
-        url: str,
-        depth: int | None = None,
-        follow_download_links: bool | None = None,
-        max_concurrency: int | None = None,
-    ) -> Command:
-        """Fetch open-source pages and downloadable attachments, then prepare them for indexed search.
-
-        Args:
-            run_id: Optional explicit run identifier. When omitted, the current active run is reused if present.
-            url: Start URL for web retrieval.
-            depth: Optional recursive crawl depth.
-            follow_download_links: Whether downloadable attachments should also be fetched and parsed.
-            max_concurrency: Optional override for concurrent crawling workers.
-
-        Returns:
-            A `Command` that updates state with fetched open-source bundles, prepared documents, normalized
-            entities, active run metadata, and a tool transcript message.
-        """
-        current_run = run_id or runtime.state.get("active_run_id")
-        workspace = deps.workspace_manager.get(current_run) if current_run else deps.workspace_manager.create_run()
-        turn_validation = runtime.state.get("turn_validation")
-        missing_data = list(runtime.state.get("missing_data") or [])
-        recommended_next_step = runtime.state.get("recommended_next_step")
-        loader = AsyncWebLoader(
-            url=url,
-            depth=depth or 0,
-            fetch_mode="requests_fallback_playwright",
-            follow_download_links=bool(follow_download_links),
-            max_concurrency=max_concurrency or deps.open_source_max_concurrency,
-            continue_on_error=True,
-        )
-
-        errors: list[str] = []
-        status = "success"
-        try:
-            docs = await loader.load()
-            errors = [str(item.get("error") or item) for item in loader.last_errors if item.get("error")]
-            if errors:
-                status = "partial"
-        except Exception as exc:
-            docs = []
-            errors = [str(exc)]
-            status = "failed"
-        if status == "failed":
-            failure_message = "; ".join(error for error in errors if error) or (
-                "open_source_fetch_tool failed without a structured error message."
-            )
-            turn_validation = _with_issue(
-                turn_validation,
-                TurnValidationIssue(
-                    stage="open_source_fetch_tool",
-                    code="open_source_fetch_failed",
-                    message=failure_message,
-                    metadata={"url": url},
-                ),
-            )
-            missing_data = _merge_strings(missing_data, ["open_source_fetch_source_availability"])
-            recommended_next_step = (
-                "Retry the public-source fetch or provide a more specific URL after the source issue is resolved."
-            )
-
-        page_docs: list[tuple[int, Any]] = []
-        attachment_groups: dict[tuple[str, str, str], list[Any]] = defaultdict(list)
-        for index, doc in enumerate(docs, start=1):
-            metadata = dict(doc.metadata or {})
-            if str(metadata.get("source_type") or "") == "web_download":
-                attachment_url = str(metadata.get("source") or url)
-                parent_url = str(metadata.get("parent_url") or url)
-                filename = str(metadata.get("download_filename") or f"download_{index:03d}")
-                attachment_groups[(parent_url, attachment_url, filename)].append(doc)
-                continue
-            page_docs.append((index, doc))
-
-        pages: list[OpenSourcePage] = []
-        prepared_documents = []
-        attachments_by_parent: dict[str, list[str]] = defaultdict(list)
-        normalized_inns = list(runtime.state.get("normalized_inns") or [])
-        company_names = list(runtime.state.get("company_names") or [])
-
-        for index, doc in page_docs:
-            metadata = dict(doc.metadata or {})
-            source_url = str(metadata.get("source") or metadata.get("url") or url)
-            bundle_id = f"web_{sha1(source_url.encode('utf-8')).hexdigest()[:12]}"
-            file_path = deps.document_service.save_text_artifact(
-                workspace=workspace,
-                relative_dir=bundle_id,
-                file_name=f"page_{index:03d}.txt",
-                content=doc.page_content or "",
-            )
-            prepared = deps.document_service.prepare_files(
-                workspace=workspace,
-                origin="open_source",
-                bundle_id=bundle_id,
-                registry_number=None,
-                source_url=source_url,
-                file_paths=[file_path],
-                provenance_by_path={
-                    file_path: {
-                        "original_source_url": source_url,
-                        "original_file_name": f"page_{index:03d}.html",
-                        "original_content_type": str(metadata.get("content_type") or "text/html"),
-                        "derived_artifact_path": file_path,
-                    }
-                },
-            )
-            prepared_documents.extend(prepared)
-            for item in prepared:
-                normalized_inns = _merge_strings(normalized_inns, item.entities.inn)
-                company_names = _merge_strings(company_names, item.entities.company_names)
-            pages.append(
-                OpenSourcePage(
-                    bundle_id=bundle_id,
-                    url=source_url,
-                    title=str(metadata.get("title") or "") or None,
-                    text=(doc.page_content or "")[:4000],
-                    attachments=[],
-                    prepared_document_ids=[item.document_id for item in prepared],
-                )
-            )
-
-        for (parent_url, attachment_url, filename), grouped_docs in attachment_groups.items():
-            content = "\n\n".join(doc.page_content for doc in grouped_docs if doc.page_content)
-            if not content.strip():
-                errors.append(f"Attachment {attachment_url} returned no parsed text.")
-                status = "partial"
-                continue
-            bundle_id = f"download_{sha1(attachment_url.encode('utf-8')).hexdigest()[:12]}"
-            file_path = deps.document_service.save_text_artifact(
-                workspace=workspace,
-                relative_dir=bundle_id,
-                file_name=_safe_artifact_name(filename, default_stem="download"),
-                content=content,
-            )
-            declared_content_type = next(
-                (
-                    str((doc.metadata or {}).get("content_type") or (doc.metadata or {}).get("mime_type"))
-                    for doc in grouped_docs
-                    if (doc.metadata or {}).get("content_type") or (doc.metadata or {}).get("mime_type")
-                ),
-                None,
-            )
-            prepared = deps.document_service.prepare_files(
-                workspace=workspace,
-                origin="open_source",
-                bundle_id=bundle_id,
-                registry_number=None,
-                source_url=attachment_url,
-                file_paths=[file_path],
-                provenance_by_path={
-                    file_path: {
-                        "original_source_url": attachment_url,
-                        "original_file_name": filename,
-                        "original_content_type": declared_content_type,
-                        "derived_artifact_path": file_path,
-                    }
-                },
-            )
-            prepared_documents.extend(prepared)
-            attachments_by_parent[parent_url].append(attachment_url)
-            for item in prepared:
-                normalized_inns = _merge_strings(normalized_inns, item.entities.inn)
-                company_names = _merge_strings(company_names, item.entities.company_names)
-
-        for page in pages:
-            page.attachments = attachments_by_parent.get(page.url, [])
-
-        searchable_document_count = _searchable_document_count(prepared_documents)
-        if prepared_documents and searchable_document_count == 0 and status != "failed":
-            status = "partial"
-            no_context_error = "Open-source acquisition finished without producing a searchable prepared corpus."
-            if no_context_error not in errors:
-                errors.append(no_context_error)
-            turn_validation = _with_issue(
-                turn_validation,
-                TurnValidationIssue(
-                    stage="open_source_fetch_tool",
-                    code="open_source_fetch_context_unready",
-                    message=no_context_error,
-                    metadata={"run_id": workspace.run_id, "url": url},
-                ),
-            )
-            missing_data = _merge_strings(missing_data, ["prepared_open_source_corpus"])
-            recommended_next_step = recommended_next_step or (
-                "Retry the public-source fetch after document preparation/indexing is available."
-            )
-        active_run_ready = status in {"success", "partial"} and searchable_document_count > 0
-        response = OpenSourceFetchResponse(
-            run_id=workspace.run_id,
-            index_id=workspace.index_id,
-            status=status,  # type: ignore[arg-type]
-            errors=errors,
-            pages=pages,
-            prepared_documents=prepared_documents,
-        )
-        acquisition_error = None
-        if response.status != "success":
-            acquisition_error = _acquisition_error_payload(
-                tool="open_source_fetch_tool",
-                status=response.status,
-                error="; ".join(error for error in response.errors if error)
-                or "open_source_fetch_tool failed without a structured error message.",
-                run_id=workspace.run_id,
-                index_id=workspace.index_id,
-                context={"url": url},
-            )
-        update = {
-            **_active_context_update(
-                runtime.state,
-                workspace=workspace,
-                current_query_signature=runtime.state.get("current_query_signature"),
-                active_run_ready=active_run_ready,
-                acquisition_status=response.status,
-            ),
-            "acquisition_status": response.status,
-            "acquisition_attempts": _append_acquisition_attempt(
-                runtime.state.get("acquisition_attempts"),
-                {
-                    "tool": "open_source_fetch_tool",
-                    "status": response.status,
-                    "run_id": workspace.run_id,
-                    "index_id": workspace.index_id,
-                    "active_run_ready": active_run_ready,
-                    "prepared_document_count": len(prepared_documents),
-                    "searchable_document_count": searchable_document_count,
-                    "url": url,
-                },
-            ),
-            "last_acquisition_error": acquisition_error,
-            "last_open_source_fetch_result": response.model_dump(),
-            "open_source_hits": _merge_dict_list(
-                runtime.state.get("open_source_hits"),
-                [page.model_dump() for page in pages],
-            ),
-            "prepared_documents": _merge_dict_list(
-                runtime.state.get("prepared_documents"),
-                [doc.model_dump() for doc in prepared_documents],
-            ),
-            "normalized_inns": normalized_inns,
-            "company_names": company_names,
-            "turn_validation": turn_validation,
-            "missing_data": missing_data,
-            "recommended_next_step": recommended_next_step,
-            "turn_tool_usage": _append_tool_usage(
-                runtime.state.get("turn_tool_usage"),
-                {
-                    "tool": "open_source_fetch_tool",
-                    "status": status,
-                    "run_id": workspace.run_id,
-                    "index_id": workspace.index_id,
-                    "url": url,
-                    "searchable_document_count": searchable_document_count,
-                    "active_run_ready": active_run_ready,
-                },
-            ),
-            "semantic_dirty": True,
-            "messages": [
-                _tool_message(
-                    runtime,
-                    response.model_dump(),
-                    status="error" if status == "failed" else "success",
-                )
-            ],
-        }
-        return Command(update=update)
-
-    @tool(
-        "doc_search_tool",
-        args_schema=DocSearchRequest,
-        description="Search the active prepared document index and return exact snippets with file and page/locator.",
-    )
-    def doc_search_tool(
-        *,
-        runtime: ToolRuntime[None, SalesLeadAgentState],
-        index_id: str | None = None,
-        query: str,
-        top_k: int | None = None,
-        source_kind: str | None = None,
-        bundle_id: str | None = None,
-    ) -> Command:
-        """Search the prepared document index and return exact evidence snippets with provenance.
-
-        Args:
-            index_id: Optional explicit index identifier. When omitted, the tool uses the active run index.
-            query: Semantic query to search in the prepared corpus.
-            top_k: Optional maximum number of matches to return.
-            source_kind: Optional source narrowing, for example `purchase` or `open_source`.
-            bundle_id: Optional bundle narrowing for a specific procurement/web bundle.
-
-        Returns:
-            A `Command` that updates state with the latest search result, extracted evidence records,
-            and a tool transcript message.
-        """
-        resolved_index_id = index_id or runtime.state.get("index_id")
-        if not resolved_index_id:
-            payload = {"index_id": "", "matches": [], "error": "No active run index is available."}
-            return Command(
-                update={
-                    "turn_validation": _with_issue(
-                        runtime.state.get("turn_validation"),
-                        TurnValidationIssue(
-                            stage="doc_search_tool",
-                            code="doc_search_active_run_missing",
-                            message="No active run index is available for doc_search_tool.",
-                            metadata={},
-                        ),
-                    ),
-                    "missing_data": _merge_strings(runtime.state.get("missing_data"), ["active_run_index"]),
-                    "turn_tool_usage": _append_tool_usage(
-                        runtime.state.get("turn_tool_usage"),
-                        {
-                            "tool": "doc_search_tool",
-                            "status": "failed",
-                            "index_id": index_id,
-                            "query": query,
-                            "source_kind": source_kind,
-                            "bundle_id": bundle_id,
-                            "guard": "active_run_index_missing",
-                        },
-                    ),
-                    "messages": [_tool_message(runtime, payload, status="error")],
-                }
-            )
-        active_run_id = runtime.state.get("active_run_id")
-        try:
-            workspace = (
-                deps.workspace_manager.get_by_index(resolved_index_id)
-                if index_id or not active_run_id
-                else deps.workspace_manager.get(active_run_id)
-            )
-        except ValueError as exc:
-            payload = {
-                "index_id": resolved_index_id,
-                "matches": [],
-                "error": str(exc),
-            }
-            return Command(
-                update={
-                    "turn_validation": _with_issue(
-                        runtime.state.get("turn_validation"),
-                        TurnValidationIssue(
-                            stage="doc_search_tool",
-                            code="doc_search_index_resolution_failed",
-                            message=str(exc),
-                            metadata={"index_id": resolved_index_id},
-                        ),
-                    ),
-                    "missing_data": _merge_strings(
-                        runtime.state.get("missing_data"),
-                        [f"index_id:{resolved_index_id}"],
-                    ),
-                    "turn_tool_usage": _append_tool_usage(
-                        runtime.state.get("turn_tool_usage"),
-                        {
-                            "tool": "doc_search_tool",
-                            "status": "failed",
-                            "index_id": resolved_index_id,
-                            "query": query,
-                            "source_kind": source_kind,
-                            "bundle_id": bundle_id,
-                            "guard": "index_resolution_failed",
-                        },
-                    ),
-                    "messages": [_tool_message(runtime, payload, status="error")],
-                }
-            )
-        response = deps.document_service.search(
-            workspace=workspace,
-            query=query,
-            top_k=top_k or 5,
-            source_kind=source_kind,  # type: ignore[arg-type]
-            bundle_id=bundle_id,
-        )
-        evidence = _evidence_from_doc_matches([match.model_dump() for match in response.matches])
-        return Command(
-            update={
-                "last_doc_search_result": response.model_dump(),
-                "evidence": _merge_dict_list(runtime.state.get("evidence"), evidence),
-                "turn_tool_usage": _append_tool_usage(
-                    runtime.state.get("turn_tool_usage"),
-                    {
-                        "tool": "doc_search_tool",
-                        "status": "success",
-                        "index_id": response.index_id,
-                        "query": query,
-                        "source_kind": source_kind,
-                        "bundle_id": bundle_id,
-                        "match_count": len(response.matches),
-                    },
-                ),
-                "semantic_dirty": True,
-                "messages": [_tool_message(runtime, response.model_dump())],
-            }
-        )
-
-    @tool(
-        "counterparty_scoring_tool",
-        args_schema=CounterpartyScoringRequest,
-        description="Fetch counterparty scoring and optional financial coefficients by normalized INN.",
-    )
-    def counterparty_scoring_tool(
-        *,
-        runtime: ToolRuntime[None, SalesLeadAgentState],
-        inn: str,
-        model: str | None = None,
-        include_fincoefs: bool | None = None,
-    ) -> Command:
-        """Fetch counterparty scoring data for a normalized INN.
-
-        Args:
-            inn: Normalized company INN that must already exist in agent state.
-            model: Optional external scoring model identifier.
-            include_fincoefs: Whether financial coefficients should also be requested.
-
-        Returns:
-            A `Command` that updates state with normalized scoring payloads, evidence artifacts,
-            and a tool transcript message. If the INN is not already normalized in state, the command
-            records an explicit failure instead of calling the external API.
-        """
-        known_inns = set(runtime.state.get("normalized_inns") or [])
-        if inn not in known_inns:
-            return _inn_guard_failure(
-                runtime=runtime,
-                inn=inn,
-                tool_name="counterparty_scoring_tool",
-                source="damia_scoring",
-            )
-
-        response = deps.counterparty_clients.scoring(
-            inn=inn,
-            model=model,
-            include_fincoefs=bool(include_fincoefs),
-        )
-        scoring_results = dict(runtime.state.get("scoring_results") or {})
-        scoring_results[inn] = response.model_dump()
-        evidence = []
-        if response.status == "success":
-            evidence = [
-                {
-                    "source": "scoring",
-                    "source_url": None,
-                    "file_path": None,
-                    "page": None,
-                    "locator": None,
-                    "snippet": (
-                        f"risk_zone={response.score.risk_zone}; "
-                        f"score_zone={response.score.score_zone}; "
-                        f"reliability_zone={response.score.reliability_zone}"
-                    ),
-                    "inn": inn,
-                }
-            ]
-        return Command(
-            update={
-                "scoring_results": scoring_results,
-                "evidence": _merge_dict_list(runtime.state.get("evidence"), evidence),
-                "turn_validation": (
-                    _with_issue(
-                        runtime.state.get("turn_validation"),
-                        TurnValidationIssue(
-                            stage="counterparty_scoring_tool",
-                            code="counterparty_scoring_failed",
-                            message=response.error or f"counterparty_scoring_tool failed for INN {inn}.",
-                            metadata={"inn": inn},
-                        ),
-                    )
-                    if response.status == "failed"
-                    else runtime.state.get("turn_validation")
-                ),
-                "turn_tool_usage": _append_tool_usage(
-                    runtime.state.get("turn_tool_usage"),
-                    {
-                        "tool": "counterparty_scoring_tool",
-                        "status": response.status,
-                        "inn": inn,
-                    },
-                ),
-                "semantic_dirty": True,
-                "messages": [_tool_message(runtime, response.model_dump(), status="error" if response.status == "failed" else "success")],
-            }
-        )
-
-    @tool(
-        "counterparty_fssp_tool",
-        args_schema=CounterpartyFSSPRequest,
-        description="Fetch grouped enforcement proceedings by normalized INN.",
-    )
-    def counterparty_fssp_tool(
-        *,
-        runtime: ToolRuntime[None, SalesLeadAgentState],
-        inn: str,
-        from_date: str | None = None,
-        to_date: str | None = None,
-        format: int | None = None,
-    ) -> Command:
-        """Fetch grouped FSSP enforcement data for a normalized INN.
-
-        Args:
-            inn: Normalized company INN that must already exist in agent state.
-            from_date: Optional lower bound for proceedings retrieval.
-            to_date: Optional upper bound for proceedings retrieval.
-            format: Optional response format expected by the external API.
-
-        Returns:
-            A `Command` that updates state with normalized FSSP payloads, evidence artifacts,
-            and a tool transcript message. If the INN is not already normalized in state, the command
-            records an explicit failure instead of calling the external API.
-        """
-        known_inns = set(runtime.state.get("normalized_inns") or [])
-        if inn not in known_inns:
-            return _inn_guard_failure(
-                runtime=runtime,
-                inn=inn,
-                tool_name="counterparty_fssp_tool",
-                source="damia_fssp",
-            )
-
-        response = deps.counterparty_clients.fssp(
-            inn=inn,
-            from_date=from_date,
-            to_date=to_date,
-            response_format=format or 1,
-        )
-        fssp_results = dict(runtime.state.get("fssp_results") or {})
-        fssp_results[inn] = response.model_dump()
-        evidence = []
-        if response.status == "success":
-            total_count = sum(item.count for item in response.grouped)
-            evidence = [
-                {
-                    "source": "fssp",
-                    "source_url": None,
-                    "file_path": None,
-                    "page": None,
-                    "locator": None,
-                    "snippet": f"total_grouped_proceedings={total_count}",
-                    "inn": inn,
-                }
-            ]
-        return Command(
-            update={
-                "fssp_results": fssp_results,
-                "evidence": _merge_dict_list(runtime.state.get("evidence"), evidence),
-                "turn_validation": (
-                    _with_issue(
-                        runtime.state.get("turn_validation"),
-                        TurnValidationIssue(
-                            stage="counterparty_fssp_tool",
-                            code="counterparty_fssp_failed",
-                            message=response.error or f"counterparty_fssp_tool failed for INN {inn}.",
-                            metadata={"inn": inn},
-                        ),
-                    )
-                    if response.status == "failed"
-                    else runtime.state.get("turn_validation")
-                ),
-                "turn_tool_usage": _append_tool_usage(
-                    runtime.state.get("turn_tool_usage"),
-                    {
-                        "tool": "counterparty_fssp_tool",
-                        "status": response.status,
-                        "inn": inn,
-                    },
-                ),
-                "semantic_dirty": True,
-                "messages": [_tool_message(runtime, response.model_dump(), status="error" if response.status == "failed" else "success")],
-            }
-        )
-
-    return [
-        purchase_search_tool,
-        open_source_fetch_tool,
-        doc_search_tool,
-        counterparty_scoring_tool,
-        counterparty_fssp_tool,
-    ]
