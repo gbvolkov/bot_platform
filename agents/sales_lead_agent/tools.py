@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -11,6 +12,7 @@ import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +42,8 @@ LawType = Literal["44-FZ", "223-FZ"]
 PreparedOrigin = Literal["purchase", "open_source"]
 PreparedFileType = Literal["pdf", "docx", "xlsx", "html", "txt", "json", "other"]
 SourceKind = Literal["purchase", "open_source"]
+
+logger = logging.getLogger(__name__)
 
 _SAFE_FILE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _INN_RE = re.compile(r"\b\d{10,12}\b")
@@ -86,6 +90,9 @@ class PreparedDocument(StrictBaseModel):
     document_id: str
     origin: PreparedOrigin
     bundle_id: str
+    purchase_id: str | None = None
+    source_id: str | None = None
+    parsed_at_utc: str | None = None
     registry_number: str | None = None
     source_url: str | None = None
     original_source_url: str | None = None
@@ -176,11 +183,16 @@ class DocSearchRequest(StrictBaseModel):
     top_k: int | None = None
     source_kind: SourceKind | None = None
     bundle_id: str | None = None
+    purchase_id: str | None = None
+    source_id: str | None = None
 
 
 class DocSearchMatch(StrictBaseModel):
     document_id: str
     bundle_id: str
+    purchase_id: str | None = None
+    source_id: str | None = None
+    parsed_at_utc: str | None = None
     file_path: str
     page: int | None = None
     locator: str | None = None
@@ -259,6 +271,8 @@ class CounterpartyFSSPResponse(StrictBaseModel):
 @dataclass(frozen=True)
 class SalesLeadAgentSettings:
     work_root: Path
+    permanent_index_root: Path
+    shared_index_id: str
     procurement_search_template: str
     purchase_headless: bool
     open_source_max_concurrency: int
@@ -275,6 +289,19 @@ def get_settings() -> SalesLeadAgentSettings:
         os.environ.get("SALES_LEAD_AGENT_WORK_ROOT", "./data/sales_lead_agent/runs")
     ).resolve()
     work_root.mkdir(parents=True, exist_ok=True)
+    permanent_index_root = Path(
+        os.environ.get(
+            "SALES_LEAD_AGENT_PERMANENT_INDEX_ROOT",
+            "./data/sales_lead_agent/permanent_index",
+        )
+    ).resolve()
+    permanent_index_root.mkdir(parents=True, exist_ok=True)
+    shared_index_id = os.environ.get(
+        "SALES_LEAD_AGENT_SHARED_INDEX_ID",
+        "sales_lead_permanent",
+    ).strip()
+    if not shared_index_id:
+        raise RuntimeError("SALES_LEAD_AGENT_SHARED_INDEX_ID must not be blank.")
 
     embedding_provider = (
         os.environ.get("SALES_LEAD_AGENT_EMBEDDING_PROVIDER", "openai").strip().lower()
@@ -311,6 +338,8 @@ def get_settings() -> SalesLeadAgentSettings:
 
     return SalesLeadAgentSettings(
         work_root=work_root,
+        permanent_index_root=permanent_index_root,
+        shared_index_id=shared_index_id,
         procurement_search_template=template,
         purchase_headless=os.environ.get("SALES_LEAD_AGENT_PURCHASE_HEADLESS", "true").strip().lower()
         not in {"0", "false", "no", "off"},
@@ -363,7 +392,7 @@ class RunWorkspaceManager:
 
     def create_run(self) -> RunWorkspace:
         run_id = f"run_{uuid.uuid4().hex}"
-        index_id = f"index_{uuid.uuid4().hex}"
+        index_id = self._settings.shared_index_id
         root = self._settings.work_root / run_id
         downloads = root / "downloads"
         web = root / "web"
@@ -466,6 +495,12 @@ class PurchaseAdapter:
 
         return scrape_purchases
 
+    @property
+    def downloads_root(self) -> Path:
+        path = self._settings.permanent_index_root / "purchase_downloads"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def resolve_search_urls(
         self,
         *,
@@ -496,11 +531,12 @@ class PurchaseAdapter:
         scrape_purchases = self._import_scraper()
         items: list[PurchaseSearchItem] = []
         seen_registry_numbers: set[str] = set()
+        resolved_downloads_dir = str(self.downloads_root)
         for resolved_search_url in resolved_search_urls:
             raw_items = self._run_scraper(
                 scrape_purchases,
                 resolved_search_url=resolved_search_url,
-                downloads_dir=downloads_dir,
+                downloads_dir=resolved_downloads_dir,
                 max_pages=max_pages,
                 headless=self._settings.purchase_headless if headless is None else headless,
             )
@@ -562,7 +598,7 @@ class PurchaseAdapter:
 
 
 class DocumentPreparationService:
-    """Parse files, build embeddings, and search the prepared run index."""
+    """Parse files, build embeddings, and search the shared permanent index."""
 
     def __init__(self, settings: SalesLeadAgentSettings) -> None:
         self._settings = settings
@@ -582,9 +618,25 @@ class DocumentPreparationService:
             model_name=self._settings.embedding_model,
         )
 
-    def _vector_env(self, workspace: RunWorkspace):
+    @property
+    def shared_index_id(self) -> str:
+        return self._settings.shared_index_id
+
+    def _validate_index_id(self, index_id: str) -> None:
+        if index_id != self.shared_index_id:
+            raise ToolUserCorrectableError(
+                code="INVALID_INDEX_ID",
+                message=(
+                    f"Unknown index_id={index_id}. Use the shared index_id returned by "
+                    "purchase_search_tool or open_source_fetch_tool."
+                ),
+                suggestion="Reuse the shared index_id returned by a previous acquisition tool call.",
+                input_field="index_id",
+            )
+
+    def _vector_env(self):
         previous = os.environ.get("VECTOR_PATH")
-        os.environ["VECTOR_PATH"] = str(workspace.index_dir)
+        os.environ["VECTOR_PATH"] = str(self._settings.permanent_index_root)
 
         class _Context:
             def __enter__(self_nonlocal):
@@ -598,6 +650,30 @@ class DocumentPreparationService:
                 return False
 
         return _Context()
+
+    def _vector_store(self):
+        embeddings = self._create_embeddings()
+        with self._vector_env():
+            vector_store = create_vector_store(
+                provider="chroma",
+                embeddings=embeddings,
+                collection_name=self.shared_index_id,
+                cleanup=False,
+            )
+        return embeddings, vector_store
+
+    def _collection_get(self, *, where: dict[str, Any], limit: int = 1) -> dict[str, Any]:
+        _embeddings, vector_store = self._vector_store()
+        collection = vector_store._collection
+        return collection.get(where=where, limit=limit)
+
+    def purchase_exists(self, purchase_id: str) -> bool:
+        result = self._collection_get(where={"purchase_id": purchase_id}, limit=1)
+        return bool(result.get("ids"))
+
+    def source_exists(self, source_id: str) -> bool:
+        result = self._collection_get(where={"source_id": source_id}, limit=1)
+        return bool(result.get("ids"))
 
     def _extract_entities(self, text: str) -> PreparedDocumentEntities:
         company_names: list[str] = []
@@ -724,10 +800,14 @@ class DocumentPreparationService:
         bundle_id: str,
         registry_number: str | None,
         source_url: str | None,
+        source_id: str | None,
+        file_path: str,
+        parsed_at_utc: str,
         docs: list[Document],
     ) -> list[Segment]:
         segments: list[Segment] = []
         chunk_counter = 0
+        purchase_id = registry_number or ""
         for doc in docs:
             metadata = dict(doc.metadata or {})
             raw_text = str(doc.page_content or "")
@@ -742,7 +822,11 @@ class DocumentPreparationService:
                         "source_url": source_url or metadata.get("source"),
                         "bundle_id": bundle_id,
                         "document_id": document_id,
+                        "purchase_id": purchase_id,
+                        "source_id": source_id or "",
+                        "parsed_at_utc": parsed_at_utc,
                         "registry_number": registry_number or "",
+                        "file_path": file_path,
                         "page": page if page is not None else "",
                         "locator": self._doc_locator(metadata, chunk_index=chunk_counter),
                     }
@@ -758,18 +842,11 @@ class DocumentPreparationService:
                 chunk_counter += 1
         return segments
 
-    def _index_documents(self, *, workspace: RunWorkspace, segments: list[Segment]) -> None:
+    def _index_documents(self, *, segments: list[Segment]) -> None:
         if not segments:
             return
-        embeddings = self._create_embeddings()
-        with self._vector_env(workspace):
-            vector_store = create_vector_store(
-                provider="chroma",
-                embeddings=embeddings,
-                collection_name=f"sales_lead_{workspace.index_id}",
-                cleanup=False,
-            )
-            Indexer(vector_store=vector_store, embeddings=embeddings).index(segments, batch_size=32)
+        embeddings, vector_store = self._vector_store()
+        Indexer(vector_store=vector_store, embeddings=embeddings).index(segments, batch_size=32)
 
     def save_text_artifact(
         self,
@@ -826,12 +903,19 @@ class DocumentPreparationService:
             docs = self._load_docs(file_path)
             combined_text = "\n\n".join(str(doc.page_content or "") for doc in docs if doc.page_content)
             document_id = f"doc_{hashlib.sha1(str(file_path).encode('utf-8')).hexdigest()[:16]}"
+            parsed_at_utc = _utc_now_iso()
+            source_id = None
+            if origin == "open_source":
+                source_id = _source_id_from_url(source_url)
             segments = self._build_segments(
                 document_id=document_id,
                 origin=origin,
                 bundle_id=bundle_id,
                 registry_number=registry_number,
                 source_url=source_url,
+                source_id=source_id,
+                file_path=str(file_path),
+                parsed_at_utc=parsed_at_utc,
                 docs=docs,
             )
             if not segments:
@@ -842,6 +926,9 @@ class DocumentPreparationService:
                     document_id=document_id,
                     origin=origin,
                     bundle_id=bundle_id,
+                    purchase_id=registry_number,
+                    source_id=source_id,
+                    parsed_at_utc=parsed_at_utc,
                     registry_number=registry_number,
                     source_url=source_url,
                     original_source_url=provenance.get("original_source_url") or source_url,
@@ -860,37 +947,37 @@ class DocumentPreparationService:
                 )
             )
             all_segments.extend(segments)
-        self._index_documents(workspace=workspace, segments=all_segments)
+        self._index_documents(segments=all_segments)
         return prepared
 
     def search(
         self,
         *,
-        workspace: RunWorkspace,
+        index_id: str,
         query: str,
         top_k: int = 5,
         source_kind: SourceKind | None = None,
         bundle_id: str | None = None,
+        purchase_id: str | None = None,
+        source_id: str | None = None,
     ) -> DocSearchResponse:
-        embeddings = self._create_embeddings()
+        self._validate_index_id(index_id)
         metadata_clauses: list[dict[str, Any]] = []
         if source_kind:
             metadata_clauses.append({"source_kind": source_kind})
         if bundle_id:
             metadata_clauses.append({"bundle_id": bundle_id})
-        with self._vector_env(workspace):
-            vector_store = create_vector_store(
-                provider="chroma",
-                embeddings=embeddings,
-                collection_name=f"sales_lead_{workspace.index_id}",
-                cleanup=False,
-            )
-            kwargs: dict[str, Any] = {"k": top_k}
-            if len(metadata_clauses) == 1:
-                kwargs["filter"] = metadata_clauses[0]
-            elif metadata_clauses:
-                kwargs["filter"] = {"$and": metadata_clauses}
-            results = vector_store.similarity_search_with_relevance_scores(query, **kwargs)
+        if purchase_id:
+            metadata_clauses.append({"purchase_id": purchase_id})
+        if source_id:
+            metadata_clauses.append({"source_id": source_id})
+        _embeddings, vector_store = self._vector_store()
+        kwargs: dict[str, Any] = {"k": top_k}
+        if len(metadata_clauses) == 1:
+            kwargs["filter"] = metadata_clauses[0]
+        elif metadata_clauses:
+            kwargs["filter"] = {"$and": metadata_clauses}
+        results = vector_store.similarity_search_with_relevance_scores(query, **kwargs)
         matches: list[DocSearchMatch] = []
         for doc, score in results:
             metadata = dict(doc.metadata or {})
@@ -902,7 +989,10 @@ class DocumentPreparationService:
                 DocSearchMatch(
                     document_id=str(metadata.get("document_id") or ""),
                     bundle_id=str(metadata.get("bundle_id") or ""),
-                    file_path=str(metadata.get("source") or metadata.get("file_path") or ""),
+                    purchase_id=_optional_string(metadata.get("purchase_id")),
+                    source_id=_optional_string(metadata.get("source_id")),
+                    parsed_at_utc=_optional_string(metadata.get("parsed_at_utc")),
+                    file_path=str(metadata.get("file_path") or metadata.get("source") or ""),
                     page=page,
                     locator=str(metadata.get("locator") or "") or None,
                     snippet=str(doc.page_content or "")[:500],
@@ -911,7 +1001,7 @@ class DocumentPreparationService:
                     source_url=str(metadata.get("source_url") or "") or None,
                 )
             )
-        return DocSearchResponse(index_id=workspace.index_id, matches=matches)
+        return DocSearchResponse(index_id=self.shared_index_id, matches=matches)
 
 
 class CounterpartyClients:
@@ -1097,6 +1187,10 @@ def build_sales_lead_tools(
         prepared_documents: list[PreparedDocument] = []
         final_items: list[PurchaseSearchItem] = []
         for item in items:
+            if deps.document_service.purchase_exists(item.registry_number):
+                logger.info("purchase skipped: already indexed purchase_id=%s", item.registry_number)
+                final_items.append(item)
+                continue
             artifact_paths = _ensure_purchase_artifacts(workspace=workspace, item=item.model_dump())
             if artifact_paths:
                 provenance_by_path = {
@@ -1121,7 +1215,7 @@ def build_sales_lead_tools(
             final_items.append(item)
         response = PurchaseSearchResponse(
             run_id=workspace.run_id,
-            index_id=workspace.index_id,
+            index_id=deps.document_service.shared_index_id,
             search_urls=resolved_urls,
             items=final_items,
             prepared_documents=prepared_documents,
@@ -1205,8 +1299,13 @@ def build_sales_lead_tools(
                     suggestion="Retry the call with a different URL or a smaller crawl scope.",
                     input_field="url",
                 )
+            source_id = _source_id_from_url(source_url)
             if metadata.get("source_type") == "web_download" or metadata.get("download_filename"):
                 bundle_id = f"download_{hashlib.sha1(source_url.encode('utf-8')).hexdigest()[:12]}"
+                attachments_by_parent[parent_url].append(source_url)
+                if source_id and deps.document_service.source_exists(source_id):
+                    logger.info("source skipped: already indexed source_id=%s", source_id)
+                    continue
                 original_name = str(
                     metadata.get("download_filename")
                     or Path(urlparse(source_url).path).name
@@ -1236,10 +1335,21 @@ def build_sales_lead_tools(
                     },
                 )
                 prepared_documents.extend(prepared)
-                attachments_by_parent[parent_url].append(source_url)
                 continue
 
             bundle_id = f"page_{hashlib.sha1(source_url.encode('utf-8')).hexdigest()[:12]}"
+            if source_id and deps.document_service.source_exists(source_id):
+                logger.info("source skipped: already indexed source_id=%s", source_id)
+                pages.append(
+                    OpenSourcePage(
+                        bundle_id=bundle_id,
+                        url=source_url,
+                        title=str(metadata.get("title")) if metadata.get("title") else None,
+                        text=content,
+                        prepared_document_ids=[],
+                    )
+                )
+                continue
             original_name = Path(urlparse(source_url).path).name or "page.txt"
             artifact_path = deps.document_service.save_text_artifact(
                 workspace=workspace,
@@ -1286,7 +1396,7 @@ def build_sales_lead_tools(
             page.attachments = attachments_by_parent.get(page.url, [])
         response = OpenSourceFetchResponse(
             run_id=workspace.run_id,
-            index_id=workspace.index_id,
+            index_id=deps.document_service.shared_index_id,
             pages=pages,
             prepared_documents=prepared_documents,
         )
@@ -1304,35 +1414,32 @@ def build_sales_lead_tools(
         top_k: int | None = None,
         source_kind: str | None = None,
         bundle_id: str | None = None,
+        purchase_id: str | None = None,
+        source_id: str | None = None,
     ) -> dict[str, Any]:
         """Search a prepared document index.
 
         Args:
-            index_id: Explicit prepared index identifier returned by a previous acquisition tool.
+            index_id: Explicit shared index identifier returned by a previous acquisition tool.
             query: Semantic document question.
             top_k: Optional match count limit.
             source_kind: Optional narrowing to `purchase` or `open_source`.
-            bundle_id: Optional narrowing to a specific bundle inside the run.
+            bundle_id: Optional narrowing to a specific bundle.
+            purchase_id: Optional narrowing to a specific procurement registry number.
+            source_id: Optional narrowing to a specific open-source identifier.
 
         Returns:
             A dictionary with `index_id` and exact `matches`, including file path, page/locator,
             score, source kind, and source URL.
         """
-        try:
-            workspace = deps.workspace_manager.get_by_index(index_id)
-        except (FileNotFoundError, ValueError) as exc:
-            raise ToolUserCorrectableError(
-                code="INVALID_INDEX_ID",
-                message=str(exc),
-                suggestion="Reuse a valid index_id returned by purchase_search_tool or open_source_fetch_tool.",
-                input_field="index_id",
-            ) from exc
         response = deps.document_service.search(
-            workspace=workspace,
+            index_id=index_id,
             query=query,
             top_k=5 if top_k is None else top_k,
             source_kind=source_kind,  # type: ignore[arg-type]
             bundle_id=bundle_id,
+            purchase_id=purchase_id,
+            source_id=source_id,
         )
         return response.model_dump()
 
@@ -1420,6 +1527,33 @@ def _optional_string(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_url_for_source_id(raw_url: str) -> str:
+    parsed = urlparse(raw_url.strip())
+    query_pairs = sorted(parse_qsl(parsed.query, keep_blank_values=True))
+    normalized_query = urlencode(query_pairs, doseq=True)
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            parsed.params,
+            normalized_query,
+            "",
+        )
+    )
+
+
+def _source_id_from_url(raw_url: str | None) -> str | None:
+    if not raw_url:
+        return None
+    normalized = _normalize_url_for_source_id(raw_url)
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
 
 
 def _safe_artifact_name(name: str, *, default_stem: str) -> str:
