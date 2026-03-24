@@ -79,7 +79,6 @@ def build_index(args: argparse.Namespace) -> Dict[str, Any]:
     service = GazRuntimeService(
         docs_root=docs_root,
         cache_root=cache_root,
-        default_collection_id=args.collection_id,
     )
     rebuild_result = service.rebuild_collection(collection_id=args.collection_id, force=args.force)
     status = service.collection_status(args.collection_id)
