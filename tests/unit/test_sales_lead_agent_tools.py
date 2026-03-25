@@ -808,6 +808,41 @@ def test_document_preparation_unpacks_zip_and_uses_rag_lib_text_loader(monkeypat
     service = sales_tools.DocumentPreparationService(settings)
     monkeypatch.setattr(service, "_index_documents", lambda **kwargs: None)
 
+    class FakeSemanticSplitter:
+        def split_documents(self, documents):
+            return [
+                sales_tools.Segment(
+                    content=str(doc.page_content),
+                    metadata=dict(doc.metadata or {}),
+                    segment_id=f"semantic-{index}",
+                )
+                for index, doc in enumerate(documents)
+                if str(doc.page_content or "").strip()
+            ]
+
+    class FakeSentenceSplitter:
+        def split_documents(self, documents):
+            return [
+                sales_tools.Segment(
+                    content=str(doc.page_content),
+                    metadata=dict(doc.metadata or {}),
+                    segment_id=f"seg-{index}",
+                )
+                for index, doc in enumerate(documents)
+                if str(doc.page_content or "").strip()
+            ]
+
+    monkeypatch.setattr(
+        service,
+        "_build_sentence_splitter",
+        lambda **kwargs: FakeSentenceSplitter(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_build_semantic_splitter",
+        lambda: FakeSemanticSplitter(),
+    )
+
     prepared = service.prepare_files(
         workspace=workspace,
         origin="purchase",
@@ -820,6 +855,47 @@ def test_document_preparation_unpacks_zip_and_uses_rag_lib_text_loader(monkeypat
     assert captured["file_path"].endswith("inner.txt")
     assert prepared[0].file_name == "inner.txt"
     assert prepared[0].chunks_count > 0
+
+
+def test_document_preparation_raises_when_rag_lib_loader_returns_no_documents(monkeypatch, tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    file_path = workspace.downloads_dir / "broken.txt"
+    file_path.write_text("boom", encoding="utf-8")
+
+    class Loader:
+        def __init__(self, file_path):
+            self.file_path = file_path
+
+        def load(self):
+            return []
+
+    monkeypatch.setattr(sales_tools, "TextLoader", Loader)
+
+    settings = SalesLeadAgentSettings(
+        work_root=tmp_path,
+        permanent_index_root=tmp_path / "permanent_index",
+        shared_index_id=SHARED_INDEX_ID,
+        procurement_search_template="https://zakupki.gov.ru/epz/order/extendedsearch/results.html?searchString=test&recordsPerPage=_2",
+        purchase_headless=True,
+        open_source_max_concurrency=4,
+        embedding_provider="openai",
+        embedding_model="text-embedding-3-small",
+        damia_api_key="",
+        scoring_base_url="https://example.test",
+        fssp_base_url="https://example.test",
+    )
+    service = sales_tools.DocumentPreparationService(settings)
+    monkeypatch.setattr(service, "_index_documents", lambda **kwargs: None)
+
+    with pytest.raises(ValueError, match="No indexable content extracted"):
+        service.prepare_files(
+            workspace=workspace,
+            origin="purchase",
+            bundle_id="bundle-1",
+            registry_number="123",
+            source_url="https://example.test/purchase/123",
+            file_paths=[str(file_path)],
+        )
 
 
 def test_document_preparation_rejects_zip_path_traversal(monkeypatch, tmp_path: Path):

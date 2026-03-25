@@ -29,3 +29,7 @@ class ConfigSchema(TypedDict):
     model: Optional[str]
     thread_id: Optional[str]
     attachments: Optional[List[dict]]
+    database_url: Optional[str]
+    database_prompt_context: Optional[str]
+    return_files: Optional[bool]
+    return_images: Optional[bool]

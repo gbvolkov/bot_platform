@@ -21,19 +21,28 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 import config
 from langchain.tools import tool
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, ConfigDict, Field
-from rag_lib.core.domain import Segment
+from rag_lib.chunkers.csv_table import CSVTableSplitter
+from rag_lib.chunkers.html import HTMLSplitter
+from rag_lib.chunkers.json import JsonSplitter
+from rag_lib.chunkers.markdown_table import MarkdownTableSplitter
+from rag_lib.chunkers.recursive import RecursiveCharacterTextSplitter
+from rag_lib.chunkers.regex import RegexSplitter
+from rag_lib.chunkers.semantic import SemanticChunker
+from rag_lib.core.domain import Document, Segment, SegmentType
 from rag_lib.core.indexer import Indexer
+from rag_lib.config import Settings
 from rag_lib.embeddings.factory import create_embeddings_model
+from rag_lib.llm.factory import create_llm
 from rag_lib.loaders.csv_excel import CSVLoader, ExcelLoader
 from rag_lib.loaders.data_loaders import JsonLoader, TextLoader
 from rag_lib.loaders.docx import DocXLoader
 from rag_lib.loaders.html import HTMLLoader
+from rag_lib.loaders.image import ImageLoader
 from rag_lib.loaders.pdf import PDFLoader
 from rag_lib.loaders.pptx import PPTXLoader
 from rag_lib.loaders.web_async import AsyncWebLoader
+from rag_lib.summarizers.table_llm import LLMTableSummarizer
 from rag_lib.vectors.factory import create_vector_store
 
 
@@ -45,6 +54,12 @@ SourceKind = Literal["purchase", "open_source"]
 
 logger = logging.getLogger(__name__)
 
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+_TEXT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"} | _IMAGE_EXTENSIONS
+_SENTENCE_PASS1_CHUNK_SIZE = 2400
+_SENTENCE_PASS1_OVERLAP = 240
+_SENTENCE_PASS2_CHUNK_SIZE = 1200
+_SENTENCE_PASS2_OVERLAP = 120
 _SAFE_FILE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _INN_RE = re.compile(r"\b\d{10,12}\b")
 _EMAIL_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -602,11 +617,8 @@ class DocumentPreparationService:
 
     def __init__(self, settings: SalesLeadAgentSettings) -> None:
         self._settings = settings
-        self._splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1200,
-            chunk_overlap=150,
-            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
-        )
+        self._table_summarizer = None
+        self._rag_settings = Settings()
 
     def _create_embeddings(self):
         if self._settings.embedding_provider == "openai" and not (config.OPENAI_API_KEY or "").strip():
@@ -723,27 +735,55 @@ class DocumentPreparationService:
             for doc in docs
         ]
 
-    def _load_docs(self, file_path: Path) -> list[Document]:
+    def _build_loader(self, file_path: Path) -> Any:
         suffix = file_path.suffix.lower()
-        if suffix == ".txt":
-            return self._convert_loaded_documents(TextLoader(str(file_path)).load())
-        if suffix == ".json":
-            return self._convert_loaded_documents(
-                JsonLoader(str(file_path), output_format="markdown").load()
-            )
         if suffix == ".csv":
-            return self._convert_loaded_documents(CSVLoader(str(file_path)).load())
+            return CSVLoader(str(file_path), output_format="csv")
         if suffix in {".xlsx", ".xls"}:
-            return self._convert_loaded_documents(ExcelLoader(str(file_path)).load())
-        if suffix == ".docx" or suffix == ".doc":
-            return self._convert_loaded_documents(DocXLoader(str(file_path)).load())
+            return ExcelLoader(str(file_path), output_format="markdown")
         if suffix == ".pdf":
-            return self._convert_loaded_documents(PDFLoader(str(file_path), parse_mode="text").load())
-        if suffix in {".html", ".htm"}:
-            return self._convert_loaded_documents(HTMLLoader(str(file_path), output_format="markdown").load())
+            return PDFLoader(str(file_path), parse_mode="text")
+        if suffix == ".docx":
+            return DocXLoader(str(file_path))
+        if suffix in {".txt", ".md"}:
+            return TextLoader(str(file_path))
+        if suffix == ".html":
+            return HTMLLoader(str(file_path), output_format="html")
+        if suffix == ".json":
+            return JsonLoader(
+                str(file_path),
+                output_format="json",
+                schema=".",
+                ensure_ascii=False,
+            )
         if suffix == ".pptx":
-            return self._convert_loaded_documents(PPTXLoader(str(file_path)).load())
+            return PPTXLoader(str(file_path))
+        if suffix in _IMAGE_EXTENSIONS:
+            return ImageLoader(str(file_path), ocr_lang="rus+eng")
         raise ValueError(f"Unsupported file type for preparation: {file_path.suffix}")
+
+    def _load_docs(self, file_path: Path) -> list[Document]:
+        loader = self._build_loader(file_path)
+        docs = self._convert_loaded_documents(list(loader.load()))
+        suffix = file_path.suffix.lower()
+        enriched: list[Document] = []
+        file_key = hashlib.sha1(str(file_path).encode("utf-8")).hexdigest()[:16]
+        for index, doc in enumerate(docs):
+            if not _clean_text(doc.page_content):
+                continue
+            metadata = dict(doc.metadata or {})
+            metadata.setdefault("source", str(file_path))
+            metadata.setdefault("document_index", index)
+            metadata.setdefault("source_type", "image" if suffix in _IMAGE_EXTENSIONS else "file")
+            metadata.setdefault("output_format", "text")
+            enriched.append(
+                Document(
+                    id=f"{file_key}:doc:{index}",
+                    page_content=doc.page_content,
+                    metadata=metadata,
+                )
+            )
+        return enriched
 
     def _extract_archive(
         self,
@@ -783,16 +823,172 @@ class DocumentPreparationService:
         return None
 
     def _doc_locator(self, metadata: dict[str, Any], *, chunk_index: int) -> str:
-        for key in ("locator", "anchor", "xpath", "section", "heading", "relative_path"):
+        for key in (
+            "locator",
+            "anchor",
+            "xpath",
+            "section",
+            "heading",
+            "title",
+            "sheet_name",
+            "relative_path",
+        ):
             value = metadata.get(key)
             if value:
                 return str(value)
+        if metadata.get("json_index") not in (None, ""):
+            return f"json:{metadata['json_index']}"
+        if metadata.get("table_chunk_index") not in (None, ""):
+            return f"table:{metadata['table_chunk_index']}"
         return f"chunk:{chunk_index}"
 
     def _segment_id(self, document_id: str, chunk_index: int) -> str:
         return f"{document_id}:{chunk_index}"
 
-    def _build_segments(
+    def _get_table_summarizer(self) -> LLMTableSummarizer:
+        if self._table_summarizer is None:
+            self._table_summarizer = LLMTableSummarizer(
+                create_llm(model_name="mini", streaming=False)
+            )
+        return self._table_summarizer
+
+    def _build_sentence_splitter(self, *, chunk_size: int, chunk_overlap: int) -> Any:
+        from rag_lib.chunkers.sentence import SentenceSplitter
+
+        return SentenceSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            language="auto",
+        )
+
+    def _build_semantic_splitter(self) -> Any:
+        return SemanticChunker(
+            embeddings=self._create_embeddings(),
+            language="auto",
+            threshold=0.8,
+            window_size=4,
+        )
+
+    def _ensure_segments(
+        self,
+        segments: list[Segment],
+        fallback_documents: list[Document],
+    ) -> list[Segment]:
+        if segments:
+            return list(segments)
+        fallback: list[Segment] = []
+        for document in fallback_documents:
+            text = _clean_text(document.page_content)
+            if not text:
+                continue
+            fallback.append(
+                Segment(
+                    content=text,
+                    metadata=dict(document.metadata or {}),
+                    segment_id=document.id,
+                    type=SegmentType.TEXT,
+                    original_format=str((document.metadata or {}).get("output_format") or "text"),
+                )
+            )
+        return fallback
+
+    def _segments_to_documents(self, segments: list[Segment]) -> list[Document]:
+        return [segment.to_langchain() for segment in segments]
+
+    def _split_docs(self, *, file_path: Path, docs: list[Document]) -> list[Segment]:
+        suffix = file_path.suffix.lower()
+        if not docs:
+            return []
+        if suffix == ".csv":
+            return self._ensure_segments(
+                CSVTableSplitter(
+                    max_rows_per_chunk=self._rag_settings.ingestion.chunk_size,
+                    summarizer=self._get_table_summarizer(),
+                    summarize_table=True,
+                    summarize_chunks=False,
+                    inject_summaries_into_content=True,
+                ).split_documents(docs),
+                docs,
+            )
+        if suffix in {".xlsx", ".xls"}:
+            return self._ensure_segments(
+                MarkdownTableSplitter(
+                    split_table_rows=True,
+                    max_rows_per_chunk=self._rag_settings.ingestion.chunk_size,
+                    summarizer=self._get_table_summarizer(),
+                    summarize_table=True,
+                    summarize_chunks=False,
+                    inject_summaries_into_content=True,
+                ).split_documents(docs),
+                docs,
+            )
+        if suffix in _TEXT_EXTENSIONS:
+            semantic = self._build_semantic_splitter()
+            sentence = self._build_sentence_splitter(
+                chunk_size=_SENTENCE_PASS2_CHUNK_SIZE,
+                chunk_overlap=_SENTENCE_PASS2_OVERLAP,
+            )
+            semantic_segments = self._ensure_segments(semantic.split_documents(docs), docs)
+            sentence_docs = self._segments_to_documents(semantic_segments)
+            return self._ensure_segments(sentence.split_documents(sentence_docs), sentence_docs)
+        if suffix == ".html":
+            html_segments = self._ensure_segments(
+                HTMLSplitter(
+                    output_format="markdown",
+                    split_table_rows=True,
+                    summarizer=self._get_table_summarizer(),
+                    summarize_table=True,
+                    summarize_chunks=False,
+                    inject_summaries_into_content=True,
+                ).split_documents(docs),
+                docs,
+            )
+            sentence_splitter = self._build_sentence_splitter(
+                chunk_size=_SENTENCE_PASS2_CHUNK_SIZE,
+                chunk_overlap=_SENTENCE_PASS2_OVERLAP,
+            )
+            final_segments: list[Segment] = []
+            for segment in html_segments:
+                if segment.type != SegmentType.TEXT:
+                    final_segments.append(segment)
+                    continue
+                split_text = sentence_splitter.split_documents([segment.to_langchain()])
+                final_segments.extend(
+                    self._ensure_segments(split_text, [segment.to_langchain()])
+                )
+            return final_segments
+        if suffix == ".json":
+            return self._ensure_segments(
+                JsonSplitter(
+                    schema=".",
+                    ensure_ascii=False,
+                    metadata_value_max_len=256,
+                ).split_documents(docs),
+                docs,
+            )
+        if suffix == ".pptx":
+            parent_segments = self._ensure_segments(
+                RegexSplitter(
+                    pattern=r"(?m)(?=^# Slide \d+: .+$)",
+                    chunk_size=4000,
+                    chunk_overlap=0,
+                ).split_documents(docs),
+                docs,
+            )
+            recursive = RecursiveCharacterTextSplitter(
+                chunk_size=700,
+                chunk_overlap=100,
+            )
+            final_segments: list[Segment] = []
+            for segment in parent_segments:
+                split_children = recursive.split_documents([segment.to_langchain()])
+                final_segments.extend(
+                    self._ensure_segments(split_children, [segment.to_langchain()])
+                )
+            return final_segments
+        raise ValueError(f"Unsupported splitter strategy for extension: {suffix}")
+
+    def _finalize_segments(
         self,
         *,
         document_id: str,
@@ -803,44 +999,54 @@ class DocumentPreparationService:
         source_id: str | None,
         file_path: str,
         parsed_at_utc: str,
-        docs: list[Document],
+        segments: list[Segment],
     ) -> list[Segment]:
-        segments: list[Segment] = []
-        chunk_counter = 0
+        final_segments: list[Segment] = []
+        raw_to_final_id: dict[str, str] = {}
         purchase_id = registry_number or ""
-        for doc in docs:
-            metadata = dict(doc.metadata or {})
-            raw_text = str(doc.page_content or "")
-            if not raw_text.strip():
-                continue
+        non_empty_segments = [
+            segment for segment in segments if str(segment.content or "").strip()
+        ]
+        for chunk_index, raw_segment in enumerate(non_empty_segments):
+            metadata = dict(raw_segment.metadata or {})
             page = self._doc_page(metadata)
-            for text in self._splitter.split_text(raw_text):
-                segment_metadata = dict(metadata)
-                segment_metadata.update(
-                    {
-                        "source_kind": origin,
-                        "source_url": source_url or metadata.get("source"),
-                        "bundle_id": bundle_id,
-                        "document_id": document_id,
-                        "purchase_id": purchase_id,
-                        "source_id": source_id or "",
-                        "parsed_at_utc": parsed_at_utc,
-                        "registry_number": registry_number or "",
-                        "file_path": file_path,
-                        "page": page if page is not None else "",
-                        "locator": self._doc_locator(metadata, chunk_index=chunk_counter),
-                    }
+            final_id = self._segment_id(document_id, chunk_index)
+            if raw_segment.segment_id:
+                raw_to_final_id[raw_segment.segment_id] = final_id
+            metadata.update(
+                {
+                    "source_kind": origin,
+                    "source_url": source_url or metadata.get("source"),
+                    "bundle_id": bundle_id,
+                    "document_id": document_id,
+                    "purchase_id": purchase_id,
+                    "source_id": source_id or "",
+                    "parsed_at_utc": parsed_at_utc,
+                    "registry_number": registry_number or "",
+                    "file_path": file_path,
+                    "page": page if page is not None else "",
+                    "locator": self._doc_locator(metadata, chunk_index=chunk_index),
+                    "chunk_index": chunk_index,
+                    "chunk_total": len(non_empty_segments),
+                }
+            )
+            final_segments.append(
+                Segment(
+                    content=str(raw_segment.content).strip(),
+                    metadata=metadata,
+                    segment_id=final_id,
+                    parent_id=raw_segment.parent_id,
+                    level=raw_segment.level,
+                    path=list(raw_segment.path or []),
+                    type=raw_segment.type or SegmentType.TEXT,
+                    original_format=raw_segment.original_format
+                    or str(metadata.get("output_format") or "text"),
                 )
-                segments.append(
-                    Segment(
-                        content=text,
-                        metadata=segment_metadata,
-                        segment_id=self._segment_id(document_id, chunk_counter),
-                        original_format=metadata.get("source") or "text",
-                    )
-                )
-                chunk_counter += 1
-        return segments
+            )
+        for segment in final_segments:
+            if segment.parent_id:
+                segment.parent_id = raw_to_final_id.get(segment.parent_id)
+        return final_segments
 
     def _index_documents(self, *, segments: list[Segment]) -> None:
         if not segments:
@@ -900,14 +1106,18 @@ class DocumentPreparationService:
 
         for raw_path in expanded_file_paths:
             file_path = Path(raw_path)
+            logger.info(f"...processing {file_path}")
             docs = self._load_docs(file_path)
-            combined_text = "\n\n".join(str(doc.page_content or "") for doc in docs if doc.page_content)
+            if not docs:
+                logger.error(f"No documents extracted from {file_path}.")
+                continue
             document_id = f"doc_{hashlib.sha1(str(file_path).encode('utf-8')).hexdigest()[:16]}"
             parsed_at_utc = _utc_now_iso()
             source_id = None
             if origin == "open_source":
                 source_id = _source_id_from_url(source_url)
-            segments = self._build_segments(
+            split_segments = self._split_docs(file_path=file_path, docs=docs)
+            segments = self._finalize_segments(
                 document_id=document_id,
                 origin=origin,
                 bundle_id=bundle_id,
@@ -916,10 +1126,13 @@ class DocumentPreparationService:
                 source_id=source_id,
                 file_path=str(file_path),
                 parsed_at_utc=parsed_at_utc,
-                docs=docs,
+                segments=split_segments,
             )
             if not segments:
-                raise ValueError(f"No indexable content extracted from {file_path}.")
+                logger.error(f"No indexable content extracted from {file_path}.")
+                continue
+                #raise ValueError(f"No indexable content extracted from {file_path}.")
+            combined_text = "\n\n".join(segment.content for segment in segments)
             provenance = dict(expanded_provenance.get(str(file_path), {}))
             prepared.append(
                 PreparedDocument(
@@ -1515,6 +1728,12 @@ def _normalize_list_field(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if str(item).strip()]
     return [line for line in str(value).splitlines() if line.strip()]
+
+
+def _clean_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
 
 
 def _optional_float(value: Any) -> float | None:

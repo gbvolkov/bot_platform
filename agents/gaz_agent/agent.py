@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain.agents import create_agent
@@ -66,6 +67,7 @@ from .tools import (
     build_collect_product_snapshot_tool,
     build_compare_product_directions_tool,
     build_followup_pack_tool,
+    build_query_pricing_bi_tool,
     build_read_material_tool,
     build_sales_catalog_overview_tool,
     build_sales_landscape_tool,
@@ -77,6 +79,10 @@ LOG = logging.getLogger(__name__)
 StructuredOutputStrategy = Literal["auto", "provider", "tool", "provider_then_tool"]
 _DEPTH_ORDER = {"broad": 0, "bounded": 1, "justified": 2, "deep_research": 3}
 _TEMPERATURE_ORDER = {"neutral": 0, "impatient": 1, "irritated": 2, "competitor_risk": 3}
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_GAZ_PRICING_DB_URL = f"sqlite:///{(_REPO_ROOT / 'data' / 'gaz-pricing' / 'gaz_pricing.sqlite').as_posix()}"
+_DEFAULT_GAZ_PRICING_PROMPT_CONTEXT_PATH = _REPO_ROOT / "agents" / "gaz_agent" / "pricing_bi_prompt_context.txt"
+_PRICING_BI_THREAD_SUFFIX = ":pricing_bi"
 _VALID_BRANCH_HINTS = {
     "tco",
     "configuration",
@@ -99,6 +105,7 @@ _TOOL_PROMPT_KEYS = {
     "get_branch_pack": "tool_branch_pack",
     "build_solution_shortlist": "tool_shortlist",
     "build_followup_pack": "tool_followup",
+    "query_pricing_bi": "tool_pricing_bi",
 }
 
 
@@ -125,9 +132,10 @@ class StreamWriterCallbackHandler(BaseCallbackHandler):
 
 
 class SalesToolSelectionMiddleware(AgentMiddleware):
-    def __init__(self, tool_registry: Dict[str, Any]) -> None:
+    def __init__(self, tool_registry: Dict[str, Any], always_available_tool_names: Optional[List[str]] = None) -> None:
         super().__init__()
         self._tool_registry = dict(tool_registry)
+        self._always_available_tool_names = tuple(always_available_tool_names or [])
 
     def wrap_model_call(self, request, handler):
         state = request.state
@@ -149,6 +157,14 @@ class SalesToolSelectionMiddleware(AgentMiddleware):
             has_followup=bool((state.get("followup_pack") or {}).get("documents")),
         )
         selected = [self._tool_registry[name] for name in active_tool_names if name in self._tool_registry]
+        selected_names = {name for name in active_tool_names if name in self._tool_registry}
+        for tool_name in self._always_available_tool_names:
+            if tool_name in selected_names:
+                continue
+            tool_obj = self._tool_registry.get(tool_name)
+            if tool_obj is not None:
+                selected.append(tool_obj)
+                selected_names.add(tool_name)
         if not selected:
             return handler(request)
         return handler(request.override(tools=selected))
@@ -646,10 +662,17 @@ def _invoke_agent_with_retry(
 
 def _tool_contract_sections(locale: str, state: GazAgentState) -> List[str]:
     sections = [get_prompt(locale, "tool_rules")]
+    prompt_keys: List[str] = ["tool_pricing_bi"]
     for tool_name in state.get("allowed_tool_names") or []:
         key = _TOOL_PROMPT_KEYS.get(tool_name)
         if key:
-            sections.append(get_prompt(locale, key))
+            prompt_keys.append(key)
+    seen: set[str] = set()
+    for key in prompt_keys:
+        if key in seen:
+            continue
+        sections.append(get_prompt(locale, key))
+        seen.add(key)
     return sections
 
 
@@ -718,7 +741,7 @@ def _build_sales_response_agent(model: BaseChatModel, summary_model: BaseChatMod
             ToolCallLimitMiddleware(tool_name="search_sales_materials", run_limit=3, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name="read_material", run_limit=4, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name="get_branch_pack", run_limit=1, exit_behavior="continue"),
-            SalesToolSelectionMiddleware(tool_registry),
+            SalesToolSelectionMiddleware(tool_registry, always_available_tool_names=["query_pricing_bi"]),
             prompt,
         ],
         state_schema=GazAgentState,
@@ -1406,10 +1429,31 @@ def initialize_agent(
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     base_url = os.environ.get("GAZ_DOCUMENTS_SERVICE_URL", "http://127.0.0.1:8081")
     docs_client = GazDocumentsClient(base_url=base_url, collection_id=docs_collection)
+    pricing_db_url = os.environ.get("GAZ_PRICING_BI_DATABASE_URL", _DEFAULT_GAZ_PRICING_DB_URL)
+    pricing_prompt_context_path = Path(
+        os.environ.get("GAZ_PRICING_BI_PROMPT_CONTEXT_PATH") or str(_DEFAULT_GAZ_PRICING_PROMPT_CONTEXT_PATH)
+    )
+    if not pricing_prompt_context_path.is_absolute():
+        pricing_prompt_context_path = (_REPO_ROOT / pricing_prompt_context_path).resolve()
+    pricing_prompt_context = pricing_prompt_context_path.read_text(encoding="utf-8")
+    pricing_bi_init_context = {
+        "database_url": pricing_db_url,
+        "database_prompt_context": pricing_prompt_context,
+        "return_files": False,
+        "return_images": False,
+    }
+
+    from agents.bi_agent.bi_agent import initialize_agent as initialize_bi_agent
 
     mini_llm = get_llm(model="mini", provider=provider.value, temperature=0.0, streaming=streaming)
     base_llm = get_llm(model="base", provider=provider.value, temperature=0.2, streaming=streaming, reasoning="medium")
     summary_llm = get_llm(model="mini", provider=provider.value, temperature=0.0, streaming=False)
+    pricing_bi_agent = initialize_bi_agent(
+        provider=provider,
+        use_platform_store=False,
+        notify_on_reload=False,
+        init_context=pricing_bi_init_context,
+    )
 
     turn_intent_extractor = _build_turn_intent_extractor(mini_llm, summary_llm, locale_key, structured_output_strategy)
     answer_planner = _build_answer_planner(mini_llm, summary_llm, locale_key, structured_output_strategy)
@@ -1428,6 +1472,11 @@ def initialize_agent(
         "get_branch_pack": build_branch_pack_tool(docs_client),
         "build_solution_shortlist": build_solution_shortlist_tool(),
         "build_followup_pack": build_followup_pack_tool(),
+        "query_pricing_bi": build_query_pricing_bi_tool(
+            pricing_bi_agent,
+            dict(pricing_bi_init_context),
+            _PRICING_BI_THREAD_SUFFIX,
+        ),
     }
     sales_response_agent = _build_sales_response_agent(
         base_llm,

@@ -59,6 +59,16 @@ DEFAULT_DATA_SOURCES = [str(Path("data") / "data.csv")]
 _GRAPHIC_TYPES: set[str] = {"bar_chart", "line_chart", "scatter_plot", "pie"}
 
 
+def _coerce_optional_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _is_reset_requested(state: BiAgentState) -> bool:
     messages = state.get("messages") or []
     if not messages:
@@ -195,43 +205,78 @@ def _normalise_graph_type(value: Any) -> Optional[GraphicType]:
     return None
 
 
-def generate_report(state: BiAgentState, config: Optional[RunnableConfig] = None) -> BiAgentState:
-    question = _extract_question(state.get("messages", []))
-    if not question:
-        return {
-            "question": "",
-            "answer": "Укажите вопрос, чтобы я мог построить отчёт и подготовить данные.",
-            "data_attachment": None,
-            "image_attachment": None,
-            "graphic_type": None,
-        }
+def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
+    defaults = dict(init_context or {})
+    default_database_url = defaults.get("database_url")
+    default_database_prompt_context = defaults.get("database_prompt_context")
+    default_return_files = _coerce_optional_bool(defaults.get("return_files"), True)
+    default_return_images = _coerce_optional_bool(defaults.get("return_images"), True)
 
-    try:
-        raw_response = get_response(question=question, data_paths=DEFAULT_DATA_SOURCES)
-    except Exception as exc:  # noqa: BLE001
-        logging.exception("BI agent failed to build report: %s", exc)
+    def generate_report(state: BiAgentState, config: Optional[RunnableConfig] = None) -> BiAgentState:
+        question = _extract_question(state.get("messages", []))
+        if not question:
+            return {
+                "question": "",
+                "answer": "Укажите вопрос, чтобы я мог построить отчёт и подготовить данные.",
+                "data_attachment": None,
+                "image_attachment": None,
+                "graphic_type": None,
+            }
+
+        configuration = (config or {}).get("configurable", {})
+        database_url = configuration.get("database_url")
+        if database_url is None:
+            database_url = default_database_url
+        database_prompt_context = configuration.get("database_prompt_context")
+        if database_prompt_context is None:
+            database_prompt_context = default_database_prompt_context
+        return_files = _coerce_optional_bool(configuration.get("return_files"), default_return_files)
+        return_images = _coerce_optional_bool(configuration.get("return_images"), default_return_images)
+        data_paths = None if database_url else DEFAULT_DATA_SOURCES
+
+        try:
+            raw_response = get_response(
+                question=question,
+                data_paths=data_paths,
+                database_url=database_url,
+                database_prompt_context=database_prompt_context,
+                return_files=return_files,
+                return_images=return_images,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("BI agent failed to build report: %s", exc)
+            return {
+                "question": question,
+                "answer": f"Не удалось построить отчёт: {exc}",
+                "data_attachment": None,
+                "image_attachment": None,
+                "graphic_type": None,
+                "notes": str(exc),
+            }
+
+        data_attachment = _encode_tabular_file(raw_response.get("data")) if return_files else None
+        image_attachment = _encode_image_file(raw_response.get("image")) if return_images else None
+        if not return_files:
+            data_path = raw_response.get("data")
+            if data_path:
+                _safe_remove(Path(data_path))
+        if not return_images:
+            image_path = raw_response.get("image")
+            if image_path:
+                _safe_remove(Path(image_path))
+        graphic_type = _normalise_graph_type(raw_response.get("graph_type")) if image_attachment else None
+        answer_text = raw_response.get("answer") or "Мне не удалось сформировать текстовый ответ."
+        notes = raw_response.get("notes", "")
         return {
             "question": question,
-            "answer": f"Не удалось построить отчёт: {exc}",
-            "data_attachment": None,
-            "image_attachment": None,
-            "graphic_type": None,
-            "notes": exc,
+            "answer": answer_text,
+            "data_attachment": data_attachment,
+            "image_attachment": image_attachment,
+            "graphic_type": graphic_type,
+            "notes": notes,
         }
 
-    data_attachment = _encode_tabular_file(raw_response.get("data"))
-    image_attachment = _encode_image_file(raw_response.get("image"))
-    graphic_type = _normalise_graph_type(raw_response.get("graph_type"))
-    answer_text = raw_response.get("answer") or "Мне не удалось сформировать текстовый ответ."
-    notes = raw_response.get("notes", "")
-    return {
-        "question": question,
-        "answer": answer_text,
-        "data_attachment": data_attachment,
-        "image_attachment": image_attachment,
-        "graphic_type": graphic_type,
-        "notes": notes,
-    }
+    return generate_report
 
 
 def respond_with_report(state: BiAgentState, config: Optional[RunnableConfig] = None) -> Dict[str, List[AIMessage]]:
@@ -282,6 +327,8 @@ def initialize_agent(
     use_platform_store: bool = False,
     notify_on_reload: bool = True,
     checkpoint_saver=None,
+    *,
+    init_context: Optional[Dict[str, Any]] = None,
 ):
     log_name = f"bi_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
@@ -306,7 +353,7 @@ def initialize_agent(
     builder = StateGraph(BiAgentState, config_schema=ConfigSchema)
     builder.add_node("fetch_user_info", user_info)
     builder.add_node("reset_memory", reset_memory)
-    builder.add_node("generate_report", generate_report)
+    builder.add_node("generate_report", create_generate_report_node(init_context))
     builder.add_node("respond", respond_with_report)
 
     builder.add_edge(START, "fetch_user_info")

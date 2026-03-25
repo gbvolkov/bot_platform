@@ -28,10 +28,6 @@ import numpy as np
 import math
 from pandas.api.types import is_datetime64_any_dtype
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
 UNIVERSAL_SYSTEM_MESSAGE_LIMITED = """
 Given an input question, create a syntactically correct {dialect} query to
 run to help find the answer. Unless the user specifies in his question a
@@ -48,6 +44,8 @@ Rules:
 - Return only the SQL, with no commentary or formatting fences.
 
 {return_condition}
+
+{database_prompt_context_block}
 
 Schema:
 {table_info}
@@ -66,6 +64,8 @@ Rules:
 - Return only the SQL, with no commentary or formatting fences.
 
 {return_condition}
+
+{database_prompt_context_block}
 
 Schema:
 {table_info}
@@ -104,8 +104,8 @@ class AnswerOutput(TypedDict):
     ]
 
 
-agent_llm = ChatOpenAI(model="gpt-4.1-nano", temperature=0.0).with_structured_output(AnswerOutput)
-llm_query_gen = ChatOpenAI(model="gpt-4.1", temperature=0.0).with_structured_output(QueryOutput)
+agent_llm = ChatOpenAI(model="gpt-5.4-nano", temperature=0.0).with_structured_output(AnswerOutput)
+llm_query_gen = ChatOpenAI(model="gpt-5.4", temperature=0.0).with_structured_output(QueryOutput)
 
 
 query_prompt_template = ChatPromptTemplate(
@@ -121,7 +121,6 @@ def _sanitize_table_name(path: Path) -> str:
 
 def _attach_csvs_as_views_sqlalchemy_engine(sqlalchemy_engine, csv_paths: Sequence[str]) -> None:
     """Expose each CSV as a SQL VIEW using DuckDB's read_csv_auto."""
-    from sqlalchemy import text
     with sqlalchemy_engine.begin() as conn:
         for p in map(Path, csv_paths):
             tbl = _sanitize_table_name(p)
@@ -133,11 +132,24 @@ def _attach_csvs_as_views_sqlalchemy_engine(sqlalchemy_engine, csv_paths: Sequen
                 """
             )
 
-def build_sql_database_from_csvs(csv_paths: Sequence[str]) -> SQLDatabase:
-    """Create a SQLDatabase backed by DuckDB, with CSVs mounted as views."""
+def build_sql_database(
+    *,
+    csv_paths: Optional[Sequence[str]] = None,
+    database_url: Optional[str] = None,
+) -> SQLDatabase:
+    """Create a SQLDatabase from either a database URL or CSV-backed DuckDB views."""
     from sqlalchemy import create_engine
-    import os, tempfile
+    import os
     import duckdb_engine  # ensure the "duckdb" dialect is registered
+
+    if database_url:
+        engine = create_engine(database_url)
+        db = SQLDatabase(engine, view_support=True)
+        db.name = database_url
+        return db
+
+    if not csv_paths:
+        raise ValueError("Either csv_paths or database_url must be provided.")
 
     # Use a file-backed DB so the reflection connection sees the same catalog
     db_file = os.path.join(tempfile.gettempdir(), "csv2sql.duckdb")
@@ -149,6 +161,13 @@ def build_sql_database_from_csvs(csv_paths: Sequence[str]) -> SQLDatabase:
     db = SQLDatabase(engine, view_support=True)
     db.name = "csv_duckdb"
     return db
+
+
+def _format_database_prompt_context_block(database_prompt_context: Optional[str]) -> str:
+    context = (database_prompt_context or "").strip()
+    if not context:
+        return ""
+    return f"Additional database context:\n{context}\n"
 
 
 def coerce_rows(
@@ -360,7 +379,11 @@ def _filter_numeric_columns(
     return numeric_columns
 
 
-def write_query(question : str, db: SQLDatabase)-> str:
+def write_query(
+    question: str,
+    db: SQLDatabase,
+    database_prompt_context: Optional[str] = None,
+) -> str:
     """Generate SQL query to fetch information (read-only)."""
     #top_k = 50
     return_condition = (
@@ -373,6 +396,7 @@ def write_query(question : str, db: SQLDatabase)-> str:
         {
             "dialect": db.dialect,
             #"top_k": top_k,
+            "database_prompt_context_block": _format_database_prompt_context_block(database_prompt_context),
             "table_info": db.get_table_info(),
             "input": question,
             "return_condition": return_condition,
@@ -432,6 +456,11 @@ def create_visualization_image(
     output_path: Optional[Union[str, Path]] = None,
 ) -> Path:
     """Render the requested chart and persist it as an image."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     label_columns = list(dict.fromkeys(label_columns))
     measure_columns = list(dict.fromkeys(measure_columns))
     if not label_columns:
@@ -569,10 +598,17 @@ def create_visualization_image(
     plt.close(fig)
     return output_path
 
-def get_response(question: str, data_paths: List[str])-> dict:
-    db = build_sql_database_from_csvs(["data/data.csv"])
+def get_response(
+    question: str,
+    data_paths: Optional[Sequence[str]] = None,
+    database_url: Optional[str] = None,
+    database_prompt_context: Optional[str] = None,
+    return_files: bool = True,
+    return_images: bool = True,
+) -> dict:
+    db = build_sql_database(csv_paths=data_paths, database_url=database_url)
     notes = ""
-    query = write_query(question, db)
+    query = write_query(question, db, database_prompt_context=database_prompt_context)
     for attempt in range(3):
         result = execute_query(query, db)
         if result.get("error") is None:
@@ -588,7 +624,9 @@ def get_response(question: str, data_paths: List[str])-> dict:
     if row_count > top_k:
         notes = f"Only showing top {top_k} rows of {row_count}."
 
-    export_path = _export_dataframe(df, f"data/data_{uuid4().hex}.xlsx")
+    export_path = ""
+    if return_files:
+        export_path = str(_export_dataframe(df, f"data/data_{uuid4().hex}.xlsx"))
     top_rows = df.head(top_k)
     answer = generate_answer(
         question,
@@ -600,13 +638,15 @@ def get_response(question: str, data_paths: List[str])-> dict:
     measure_columns = answer.get("measure_columns") or []
     label_columns = answer.get("label_columns") or []
     image_path = ""
-    if viz_methods and measure_columns and label_columns:
+    if return_images and viz_methods and measure_columns and label_columns:
         try:
-            image_path = create_visualization_image(
+            image_path = str(
+                create_visualization_image(
                 top_rows,
                 viz_methods[0],
                 label_columns,
                 measure_columns,
+            )
             )
             print(f"Visualization image saved to: {image_path}")
         except Exception as viz_error:
@@ -626,7 +666,7 @@ if __name__ == "__main__":
     #question = "Как связаны сумма страховой выплаты и длительность поездки по всем договорам за 2024 год?"
     #question = "Как менялась суммарная страховая премия по месяцу в 2024 году"
     question = "Какие самые крупные выплаты были?"
-    db = build_sql_database_from_csvs(["data/data.csv"])
+    db = build_sql_database(csv_paths=["data/data.csv"])
     query = write_query(question, db)
     for _ in range(3):
         result = execute_query(query, db)

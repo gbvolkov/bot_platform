@@ -22,6 +22,7 @@ from .schemas import AgentInfo, ContentType
 
 
 LOG = logging.getLogger(__name__)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class AgentDefinition:
     stream_subgraphs: bool = False
     is_active: bool = True
     init_params: Dict[str, Any] = field(default_factory=dict)
+    init_context: Dict[str, Any] = field(default_factory=dict)
     checkpoint_saver: Any = None
     param_names: frozenset[str] = field(default_factory=frozenset)
     accepts_kwargs: bool = False
@@ -46,13 +48,12 @@ _SKIP_CHECKPOINTER = object()
 
 
 def _resolve_config_path(raw_path: str | None) -> Path:
-    base_dir = Path(__file__).resolve().parent.parent
     if not raw_path:
         raw_path = "data/load.json"
     path = Path(raw_path)
     if path.is_absolute():
         return path
-    return (base_dir / path).resolve()
+    return (_REPO_ROOT / path).resolve()
 
 
 def _load_agent_config(path: Path) -> dict[str, Any]:
@@ -165,6 +166,46 @@ def _get_signature_info(init_fn: Callable[..., Any]) -> tuple[frozenset[str], bo
     return param_names, accepts_kwargs
 
 
+def _parse_init_context(value: Any, *, agent_id: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Agent '{agent_id}' init_context must be a mapping.")
+
+    init_context = dict(value)
+    resolved: Dict[str, Any] = {}
+    for raw_key, raw_value in init_context.items():
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            raise ValueError(f"Agent '{agent_id}' init_context keys must be non-empty strings.")
+        key = raw_key.strip()
+        if key.endswith("_path"):
+            resolved_key = key[:-5]
+            if not resolved_key:
+                raise ValueError(f"Agent '{agent_id}' init_context key '{key}' is invalid.")
+            if resolved_key in init_context or resolved_key in resolved:
+                raise ValueError(
+                    f"Agent '{agent_id}' init_context cannot contain both '{resolved_key}' and '{key}'."
+                )
+            path_value = _require_str(raw_value, f"init_context.{key}")
+            path = Path(path_value)
+            if not path.is_absolute():
+                path = (_REPO_ROOT / path).resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"Agent '{agent_id}' init_context path does not exist: {path}")
+            if not path.is_file():
+                raise ValueError(f"Agent '{agent_id}' init_context path is not a file: {path}")
+            try:
+                resolved[resolved_key] = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"Agent '{agent_id}' init_context path could not be read: {path}") from exc
+            continue
+
+        if key in resolved:
+            raise ValueError(f"Agent '{agent_id}' init_context contains duplicate key '{key}'.")
+        resolved[key] = raw_value
+    return resolved
+
+
 def _build_definitions_from_config(
     config: dict[str, Any],
     default_provider: ModelType,
@@ -205,6 +246,7 @@ def _build_definitions_from_config(
         if not isinstance(params, dict):
             raise ValueError(f"Agent '{agent_id}' params must be a mapping.")
         params = dict(params)
+        init_context = _parse_init_context(entry.get("init_context"), agent_id=agent_id)
         provider = _coerce_provider(params.pop("provider", None), default_provider)
         checkpoint_saver = params.pop("checkpoint_saver", None)
         init_fn = _import_initialize_agent(module_path)
@@ -221,6 +263,7 @@ def _build_definitions_from_config(
             stream_subgraphs=stream_subgraphs,
             is_active=is_active,
             init_params=params,
+            init_context=init_context,
             checkpoint_saver=checkpoint_saver,
             param_names=param_names,
             accepts_kwargs=accepts_kwargs,
@@ -335,6 +378,15 @@ class AgentRegistry:
 
             if checkpoint_saver is not _SKIP_CHECKPOINTER:
                 params["checkpoint_saver"] = checkpoint_saver
+
+            if definition.init_context:
+                if "init_context" in definition.param_names or definition.accepts_kwargs:
+                    params["init_context"] = dict(definition.init_context)
+                else:
+                    LOG.warning(
+                        "Agent '%s' init_context configured but initialize_agent() does not accept init_context; skipping.",
+                        agent_id,
+                    )
 
             if not definition.accepts_kwargs:
                 params = {key: value for key, value in params.items() if key in definition.param_names}

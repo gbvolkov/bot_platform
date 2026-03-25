@@ -40,7 +40,13 @@ def _install_fake_rag_stack(monkeypatch):
     vector_registry = {}
 
     def fake_create_embeddings_model(*args, **kwargs):
-        return SimpleNamespace(name="fake-embeddings")
+        class FakeEmbeddings:
+            name = "fake-embeddings"
+
+            def embed_documents(self, texts):
+                return [[float(len(text or "")), 1.0] for text in texts]
+
+        return FakeEmbeddings()
 
     def fake_create_vector_store(provider="chroma", embeddings=None, collection_name="rag_collection", connection_uri=None, cleanup=True):
         vector_path = Path(os.environ["VECTOR_PATH"])
@@ -275,8 +281,17 @@ def test_splitter_strategy_registry_uses_expected_chain(tmp_path, monkeypatch):
             log.append(("sentence", self.kwargs))
             return [Segment(content=documents[0].page_content, metadata=dict(documents[0].metadata), type=SegmentType.TEXT)]
 
+    class FakeSemanticFactory:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def split_documents(self, documents):
+            log.append(("semantic", self.kwargs))
+            return [Segment(content=documents[0].page_content, metadata=dict(documents[0].metadata), type=SegmentType.TEXT)]
+
     monkeypatch.setattr(gaz_runtime, "CSVTableSplitter", make_factory("csv", log))
     monkeypatch.setattr(gaz_runtime, "MarkdownTableSplitter", make_factory("markdown_table", log))
+    monkeypatch.setattr(gaz_runtime, "SemanticChunker", FakeSemanticFactory)
     monkeypatch.setattr(gaz_runtime, "SentenceSplitter", FakeSentenceFactory)
     monkeypatch.setattr(gaz_runtime, "HTMLSplitter", FakeHTMLFactory)
     monkeypatch.setattr(gaz_runtime, "JsonSplitter", make_factory("json", log))
@@ -295,11 +310,13 @@ def test_splitter_strategy_registry_uses_expected_chain(tmp_path, monkeypatch):
 
     csv_kwargs = next(kwargs for label, kwargs in log if label == "csv")
     xlsx_kwargs = next(kwargs for label, kwargs in log if label == "markdown_table")
+    semantic_kwargs = [kwargs for label, kwargs in log if label == "semantic"]
     assert csv_kwargs["max_rows_per_chunk"] == service._rag_settings.ingestion.chunk_size
     assert csv_kwargs["summarize_table"] is True
     assert xlsx_kwargs["split_table_rows"] is True
     sentence_sizes = [kwargs["chunk_size"] for label, kwargs in log if label == "sentence"]
-    assert sentence_sizes.count(2400) >= 2
+    assert len(semantic_kwargs) >= 2
+    assert all(kwargs["embeddings"] == service._get_embeddings() for kwargs in semantic_kwargs)
     assert sentence_sizes.count(1200) >= 3
     assert any(label == "html" for label, _kwargs in log)
     assert any(label == "json" for label, _kwargs in log)

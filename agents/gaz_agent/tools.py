@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import Counter
 from typing import Any, Dict, List, Sequence
 
 from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
+
+from agents.utils import build_internal_invoke_config, extract_text
 
 from .documents import GazDocumentsClient
 from .logic import (
@@ -31,6 +34,7 @@ from .schemas import (
 )
 
 
+LOG = logging.getLogger(__name__)
 _VALID_SEARCH_INTENTS = {"overview", "compare", "specs", "financing", "objection"}
 _VALID_BRANCHES = {
     "tco",
@@ -203,6 +207,20 @@ def _append_tool_call(state: Dict[str, Any], tool_name: str) -> List[str]:
     existing = list(state.get("tool_calls_this_turn") or [])
     existing.append(tool_name)
     return existing
+
+
+def _derive_child_thread_id(parent_thread_id: str, suffix: str) -> str:
+    thread_id = clean_text(parent_thread_id)
+    return f"{thread_id}{suffix}" if thread_id else suffix.lstrip(":")
+
+
+def _extract_last_ai_text(response: Any) -> str:
+    if not isinstance(response, dict):
+        return ""
+    for message in reversed(list(response.get("messages") or [])):
+        if isinstance(message, AIMessage):
+            return extract_text(message)
+    return ""
 
 
 
@@ -1249,6 +1267,118 @@ def build_branch_pack_tool(docs_client: GazDocumentsClient):
 
     return get_branch_pack
 
+
+def build_query_pricing_bi_tool(pricing_bi_agent: Any, pricing_bi_configurable: Dict[str, Any], thread_suffix: str):
+    @tool("query_pricing_bi")
+    def query_pricing_bi(question: str, runtime: ToolRuntime = None) -> Command:
+        """Query the internal BI agent for exact pricing, options, or maintenance facts."""
+        state = runtime.state if runtime else {}
+        resolved_question = clean_text(question)
+        _debug_tool_call("query_pricing_bi", {"question": resolved_question})
+
+        if not resolved_question:
+            payload = {
+                "status": "error",
+                "error_code": "empty_question",
+                "message": "Pricing BI question is empty.",
+            }
+            _debug_tool_result("query_pricing_bi", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:query_pricing_bi",
+                        code="empty_question",
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "query_pricing_bi"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        internal_config = build_internal_invoke_config(
+            runtime.config if runtime else None,
+            extra_tags=["gaz:pricing_bi"],
+        )
+        parent_configurable = dict(internal_config.get("configurable") or {})
+        configurable = dict(pricing_bi_configurable)
+        configurable.update(parent_configurable)
+        configurable["thread_id"] = _derive_child_thread_id(str(parent_configurable.get("thread_id") or ""), thread_suffix)
+        internal_config["configurable"] = configurable
+
+        try:
+            response = pricing_bi_agent.invoke(
+                {
+                    "messages": [
+                        HumanMessage(
+                            content=[
+                                {
+                                    "type": "text",
+                                    "text": resolved_question,
+                                }
+                            ]
+                        )
+                    ]
+                },
+                config=internal_config,
+                context=getattr(runtime, "context", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("Pricing BI tool failed: %s", exc)
+            payload = {
+                "status": "error",
+                "error_code": "pricing_bi_invoke_failed",
+                "message": str(exc),
+                "question": resolved_question,
+            }
+            _debug_tool_result("query_pricing_bi", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:query_pricing_bi",
+                        code="pricing_bi_invoke_failed",
+                        detail=str(exc),
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "query_pricing_bi"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        answer = clean_text(_extract_last_ai_text(response))
+        if not answer:
+            payload = {
+                "status": "error",
+                "error_code": "pricing_bi_empty_response",
+                "message": "Pricing BI returned an empty response.",
+                "question": resolved_question,
+            }
+            _debug_tool_result("query_pricing_bi", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:query_pricing_bi",
+                        code="pricing_bi_empty_response",
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "query_pricing_bi"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        payload = {
+            "status": "ok",
+            "question": resolved_question,
+            "answer": answer,
+        }
+        _debug_tool_result("query_pricing_bi", payload)
+        return Command(
+            update={
+                "tool_calls_this_turn": _append_tool_call(state, "query_pricing_bi"),
+                "messages": _tool_message(payload, runtime),
+            }
+        )
+
+    return query_pricing_bi
 
 
 def build_solution_shortlist_tool():

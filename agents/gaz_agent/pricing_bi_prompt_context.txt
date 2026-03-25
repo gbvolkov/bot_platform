@@ -1,0 +1,353 @@
+This database contains comparison data for GAZ models and competitor models extracted from Excel workbooks.
+
+Main working tables:
+- comparisons_normalized: primary source for model prices and normalized model-level technical attributes.
+- comparison_model_options: primary source for trims, options, option availability, and option prices.
+- comparison_service_groups: primary source for maintenance schedules, service mileage intervals, and service costs.
+
+Do not use comparisons_raw_params for normal queries. For prices, trims, options, service costs, and core technical attributes, answers should be built from the three tables above.
+
+String matching convention:
+- Every string field has a mirror field with the same name plus the `_nocase` suffix.
+- The `_nocase` field stores the same value in lowercase.
+- Use the original field for SELECT output.
+- Use the `_nocase` version for WHERE filters, LIKE matching, joins on string fields, and candidate lookup.
+- Do not filter on the original mixed-case text fields when a `_nocase` mirror exists.
+
+Key interpretation rules:
+- base_model does NOT mean "base model" and does NOT mean "base trim".
+- base_model is the GAZ model relative to which the comparison sheet was built.
+- The same model can appear in multiple rows, multiple sheets, and multiple files.
+- A user may ask about a model family without naming an exact modification.
+- If the question is about a model in a generic form, for example "Gazelle NN" without a full exact modification name, interpret it as a request about all matching modifications of that model.
+- In that case, aggregate the answer across all matching modifications and return a combined range rather than a single-row answer.
+- All matching and filtering on text fields must be case-insensitive and should use the `_nocase` mirror fields.
+- Therefore, do not treat a single row as the canonical record for a model.
+- For model-level answers, always aggregate information across multiple rows for the same model.
+- If price is missing in one row, that does not mean the model has no price in the database. Look for non-null prices in other rows for the same model.
+- The main model identity field is comp_full_name.
+- comp_brand is only a helper field for filtering and grouping. It does not replace comp_full_name.
+- The schema does not contain comp_model. Do not use or expect that field in SQL.
+- Do not use LIMIT 1 for a model question unless the query already performs the correct aggregation first.
+
+General SQL strategy:
+- If the question is about a model, first collect all relevant rows for the same comp_full_name.
+- If the user does not provide the exact full model name, first search candidates with LIKE on comp_full_name_nocase and optionally narrow with comp_brand_nocase.
+- If the user asks about a model family rather than an exact modification, collect all matching modifications of that model family and aggregate across them.
+- All matching on string fields such as comp_full_name, comp_brand, option_name, group_name, service_label, vehicle_type, body_type, transmission_type, and engine_fuel_type must use the corresponding `_nocase` fields.
+- For model-level answers, aggregate across several rows.
+- For model prices, aggregate non-null price_rub_min and price_rub_max across all rows of the same model.
+- For options and trims, use comparison_model_options.
+- For maintenance and service cost questions, use comparison_service_groups.
+- Ignore technical provenance and ordering fields in normal business queries, including source_file, source_sheet, sheet_type, row_order, and column_order, unless the user explicitly asks about data origin or sheet provenance.
+
+==================================================
+TABLE: comparisons_normalized
+==================================================
+
+Purpose:
+This table stores model-level data: price ranges, core technical specifications, warranty data, service intervals, and some ownership-cost attributes.
+
+Use this table for:
+- model price questions
+- technical specification questions
+- warranty questions
+- service interval questions
+- ownership cost per km questions
+- comparisons across several models
+
+Fields:
+- base_model
+  The GAZ model against which this comparison row was created.
+  This is comparison context, not a trim name and not a canonical model family name.
+
+- comp_full_name
+  Full model name from Excel.
+  This is the primary field for finding and aggregating all rows of the same model.
+  Use comp_full_name in SELECT output and comp_full_name_nocase for matching.
+
+- comp_brand
+  Model brand.
+  This is a helper field for filtering and grouping.
+  Use comp_brand in SELECT output and comp_brand_nocase for matching.
+
+- price_rub_min
+  Minimum model price in RUB.
+  If the source cell contained a single price, price_rub_min and price_rub_max are equal.
+  If this field is null, search other rows of the same model before concluding that price is unavailable.
+
+- price_rub_max
+  Maximum model price in RUB.
+  Used together with price_rub_min as the model price range.
+  If this field is null, search other rows of the same model before concluding that price is unavailable.
+
+- price_comment
+  Free-text comment related to price.
+
+- vehicle_type
+  Vehicle type.
+
+- body_type
+  Body type or vehicle form factor.
+
+- passenger_capacity
+  Passenger capacity.
+
+- seat_count
+  Number of seats.
+
+- cab_seat_count
+  Number of seats in the cab.
+
+- engine_fuel_type
+  Engine fuel type.
+
+- engine_power_hp
+  Engine power in horsepower.
+
+- engine_power_kw
+  Engine power in kilowatts.
+
+- engine_volume_l
+  Engine displacement in liters.
+
+- transmission_type
+  Transmission type as represented in the Excel source.
+
+- transmission_gears
+  Number of gears.
+
+- drive_type
+  Drive type.
+
+- wheel_formula
+  Wheel formula, for example 4x2 or 4x4.
+
+- gross_weight_kg
+  Gross vehicle weight in kilograms.
+
+- curb_weight_kg
+  Curb weight in kilograms.
+
+- payload_kg
+  Payload in kilograms.
+
+- length_mm
+  Vehicle length in millimeters.
+
+- width_mm
+  Vehicle width in millimeters.
+
+- height_mm
+  Vehicle height in millimeters.
+
+- wheelbase_mm
+  Wheelbase in millimeters.
+
+- ground_clearance_mm
+  Ground clearance in millimeters.
+
+- fuel_tank_l
+  Fuel tank capacity in liters.
+
+- fuel_consumption_l100km
+  Fuel consumption in liters per 100 km.
+
+- service_interval_km
+  Service interval in kilometers.
+
+- service_interval_months
+  Service interval in months.
+
+- ownership_cost_rub_km
+  Ownership or operating cost in RUB per kilometer.
+
+- warranty_months
+  Warranty period in months.
+
+- warranty_km
+  Warranty mileage limit in kilometers.
+  If the Excel source said something like "unlimited", the numeric field may be null and the detail may be present in notes.
+
+- notes
+  Additional comments that did not fit cleanly into the structured fields.
+
+Practical SQL rules for comparisons_normalized:
+- For model price, do not select one row. Aggregate across all rows with the same comp_full_name.
+- If the question names a model family without an exact modification, aggregate across all matching modifications of that model family.
+- For a model price range, it is usually correct to compute MIN(price_rub_min) and MAX(price_rub_max) across all non-null rows of that model.
+- If you need comparison context, include DISTINCT base_model.
+- Do not discard rows just because some fields are null. Different rows of the same model may contain different useful attributes.
+- If the user asks about models inside a specific GAZ comparison context, filter by base_model.
+- Use base_model_nocase, comp_full_name_nocase, comp_brand_nocase, vehicle_type_nocase, body_type_nocase, engine_fuel_type_nocase, transmission_type_nocase, drive_type_nocase, and wheel_formula_nocase in case-insensitive filters.
+
+==================================================
+TABLE: comparison_model_options
+==================================================
+
+Purpose:
+This table stores trim and option rows: option availability, normalized option status, and option prices when explicitly present.
+
+Use this table for:
+- questions about whether a model has an option
+- questions about whether an option is standard or optional
+- questions about option price
+- questions about trim content and equipment
+
+Fields:
+- base_model
+  The GAZ model relative to which this comparison sheet was built.
+
+- comp_full_name
+  Full model name to which the option belongs.
+  This is the main field for finding options of a specific model.
+  Use comp_full_name in SELECT output and comp_full_name_nocase for matching.
+
+- comp_brand
+  Model brand.
+
+- option_group
+  Option group or section name if the Excel sheet grouped options by section.
+
+- option_name
+  Option name.
+  This is the main field for finding a specific option.
+  Use option_name in SELECT output and option_name_nocase for matching.
+
+- option_status_raw
+  Raw option status text from Excel.
+
+- option_status_norm
+  Normalized option status.
+  Possible values:
+  - base: option is part of the base trim
+  - included: option is included
+  - optional: option is available as an extra option
+  - not_present: option is not present
+  - unavailable: option is unavailable
+  - unknown: status is ambiguous
+  - listed: option is listed without an explicit status
+
+- option_price_raw
+  Raw option price text from Excel.
+
+- option_price_rub
+  Option price in RUB if it was extracted unambiguously.
+  If this field is null, that does not mean the option is absent. It only means that this row does not provide a clean numeric option price.
+
+- notes
+  Additional notes about the option, its status, or its price.
+
+Practical SQL rules for comparison_model_options:
+- Do not expect one row per model. A model has many rows here, usually one row per option.
+- For trim or equipment questions, collect all rows for the model using comp_full_name.
+- For a specific option, filter by comp_full_name and option_name.
+- If the user gives an approximate option name, use LIKE on option_name_nocase.
+- The same option may appear in several rows, sheets, or files for the same model, so do not rely on one row only.
+- If option price is null in one row, check other rows for the same model and option before concluding that the option has no known price.
+- For status logic, prefer option_status_norm and use option_status_raw only for clarification.
+- Use base_model_nocase, comp_full_name_nocase, comp_brand_nocase, option_group_nocase, option_name_nocase, option_status_raw_nocase, option_status_norm_nocase, and option_price_raw_nocase in case-insensitive filters.
+
+==================================================
+TABLE: comparison_service_groups
+==================================================
+
+Purpose:
+This table stores maintenance and service data for model groups: service events, service mileage, and service cost values.
+
+Use this table for:
+- questions about maintenance cost
+- questions about mileage of a service event
+- questions about comparing service costs
+- questions about diesel vs gasoline maintenance pricing
+
+Fields:
+- base_model
+  The GAZ model relative to which this service comparison sheet was built.
+
+- group_name
+  Name of the model group or family for which the service values are given.
+  This is not always an exact single model name.
+  Use group_name in SELECT output and group_name_nocase for matching.
+
+- service_label
+  Service event label, for example TO-1 or TO-2.
+  Use service_label in SELECT output and service_label_nocase for matching.
+
+- service_index
+  Numeric service order if extracted from service_label.
+
+- mileage_km
+  Mileage at which the service event is performed, in kilometers.
+
+- cost_diesel_rub
+  Service cost for the diesel version in RUB.
+
+- cost_diesel_promo_rub
+  Promotional service cost for the diesel version in RUB.
+
+- cost_gasoline_rub
+  Service cost for the gasoline version in RUB.
+
+- cost_gasoline_promo_rub
+  Promotional service cost for the gasoline version in RUB.
+
+- notes
+  Additional notes for the service row.
+
+Practical SQL rules for comparison_service_groups:
+- This table is only for maintenance and service cost questions.
+- Do not use it for model technical specs or model prices.
+- For service answers, usually filter by group_name and then analyze service_label, service_index, and mileage_km.
+- If one group has several rows, aggregate or sort them by service_index and mileage_km.
+- Use base_model_nocase, group_name_nocase, and service_label_nocase in case-insensitive filters.
+
+==================================================
+SQL STRATEGIES FOR TYPICAL QUESTIONS
+==================================================
+
+If the question is about model price:
+- use comparisons_normalized
+- filter by comp_full_name_nocase
+- do not rely on one row
+- aggregate non-null price_rub_min and price_rub_max across all rows of the model
+- if the question is about a model name without an exact modification, aggregate the price range across all matching modifications of that model
+
+If the question is about comparing prices of several models:
+- use comparisons_normalized
+- collect all rows for all requested comp_full_name values
+- aggregate prices separately per model
+- if one or more requested names are generic model names rather than exact modifications, aggregate separately for each model family across all matching modifications
+
+If the question is about model specifications:
+- use comparisons_normalized
+- collect several rows for the model
+- use the non-null values of the requested fields
+
+If the question is about trims, equipment, options, or option price:
+- use comparison_model_options
+- filter by comp_full_name_nocase
+- optionally filter by option_name_nocase
+- analyze option_status_norm, option_status_raw, option_price_rub, and option_price_raw
+
+If the question is about maintenance or service cost:
+- use comparison_service_groups
+- filter by group_name_nocase, or by base_model_nocase if the question is explicitly about a specific GAZ comparison context
+- sort by service_index and mileage_km when presenting service schedules
+
+If the user asks about a model without an exact full name:
+- first find candidate models with LIKE on comp_full_name_nocase
+- optionally narrow with comp_brand_nocase
+- then perform the main aggregation using all matched full model names
+- if the question is generic, answer with the range across all matched modifications rather than choosing one modification arbitrarily
+- keep all text matching case-insensitive by using `_nocase` fields
+
+Anti-patterns to avoid:
+- do not use LIMIT 1 for a model answer without proper aggregation
+- do not interpret null price_rub_min or null price_rub_max as proof that the model has no known price in the database
+- do not interpret base_model as a base trim or canonical base model
+- do not try to use a comp_model field
+- do not answer option questions from comparisons_normalized if comparison_model_options exists
+- do not answer maintenance questions from comparisons_normalized if comparison_service_groups exists
+- do not use case-sensitive matching on text fields
+- do not filter on original mixed-case text fields when a `_nocase` mirror field exists
