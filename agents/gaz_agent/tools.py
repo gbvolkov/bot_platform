@@ -51,46 +51,99 @@ _COMPOSITE_READ_LIMIT = 4
 _FAMILY_ALIASES = {
     "gazelle_next": "gazelle_next",
     "gazelle next": "gazelle_next",
+    "gazelle неxt": "gazelle_next",
+    "gazelle некст": "gazelle_next",
     "газель next": "gazelle_next",
+    "газель некст": "gazelle_next",
     "gazelle_nn": "gazelle_nn",
     "gazelle nn": "gazelle_nn",
+    "gazelle нн": "gazelle_nn",
     "газель nn": "gazelle_nn",
+    "газель нн": "gazelle_nn",
     "gazelle_city": "gazelle_city",
     "gazelle city": "gazelle_city",
     "газель city": "gazelle_city",
+    "газель сити": "gazelle_city",
     "sobol_nn": "sobol_nn",
     "sobol nn": "sobol_nn",
+    "sobol нн": "sobol_nn",
     "соболь nn": "sobol_nn",
+    "соболь нн": "sobol_nn",
+    "sobol_4x4": "sobol_4x4",
+    "sobol 4x4": "sobol_4x4",
+    "sobol 4*4": "sobol_4x4",
+    "соболь 4x4": "sobol_4x4",
+    "соболь 4*4": "sobol_4x4",
+    "соболь 4х4": "sobol_4x4",
     "sobol_business": "sobol_business",
     "sobol business": "sobol_business",
     "соболь бизнес": "sobol_business",
     "gazon_next": "gazon_next",
     "gazon next": "gazon_next",
+    "gazon некст": "gazon_next",
     "газон next": "gazon_next",
+    "газон некст": "gazon_next",
     "valdai": "valdai",
     "валдай": "valdai",
+    "валдай next": "valdai",
+    "валдай 8": "valdai",
     "sadko": "sadko",
     "садко": "sadko",
+    "садко next": "sadko",
+    "садко 9": "sadko",
     "vector_next": "vector_next",
     "vector next": "vector_next",
     "вектор next": "vector_next",
+    "вектор некст": "vector_next",
     "citymax": "citymax",
     "city max": "citymax",
+    "ситимакс": "citymax",
+    "ситимакс 8": "citymax",
+    "ситимакс 9": "citymax",
     "паз": "paz",
+    "паз 3205": "paz",
+    "паз 4234": "paz",
     "paz": "paz",
     "sat": "sat",
 }
 _UNAVAILABLE_STATUS = "unavailable"
 _PARTIAL_STATUS = "partial"
+_FAMILY_DISPLAY_LABELS = {
+    "gazelle_next": "Газель NEXT",
+    "gazelle_nn": "Газель NN",
+    "gazelle_city": "Газель City",
+    "sobol_nn": "Соболь NN",
+    "sobol_4x4": "Соболь 4x4",
+    "sobol_business": "Соболь Бизнес",
+    "gazon_next": "Газон NEXT",
+    "valdai": "Валдай",
+    "sadko": "Садко",
+    "vector_next": "Вектор NEXT",
+    "citymax": "Ситимакс",
+    "paz": "ПАЗ",
+    "sat": "SAT",
+}
+_PRODUCT_TERM_GROUPS = {
+    "газель": ("gazelle_next", "gazelle_nn", "gazelle_city"),
+    "gazelle": ("gazelle_next", "gazelle_nn", "gazelle_city"),
+    "соболь": ("sobol_nn", "sobol_4x4"),
+    "sobol": ("sobol_nn", "sobol_4x4"),
+}
 
 
 def _normalize_family_text(value: Any) -> str:
     text = clean_text(value).casefold().replace("ё", "е").replace("_", " ").replace("-", " ")
+    text = re.sub(r"(\d)\s*[xх*]\s*(\d)", r"\1x\2", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
 _NORMALIZED_FAMILY_ALIASES = {_normalize_family_text(key): value for key, value in _FAMILY_ALIASES.items()}
 _KNOWN_FAMILY_IDS = tuple(dict.fromkeys(_NORMALIZED_FAMILY_ALIASES.values()))
+_PRODUCT_TERM_TO_FAMILY_IDS: Dict[str, Tuple[str, ...]] = {
+    alias: (family_id,) for alias, family_id in _NORMALIZED_FAMILY_ALIASES.items()
+}
+for alias, family_ids in _PRODUCT_TERM_GROUPS.items():
+    _PRODUCT_TERM_TO_FAMILY_IDS[_normalize_family_text(alias)] = tuple(family_ids)
 _FAMILY_ALIAS_PATTERNS: Tuple[Tuple[str, str, re.Pattern[str]], ...] = tuple(
     (
         alias,
@@ -98,6 +151,14 @@ _FAMILY_ALIAS_PATTERNS: Tuple[Tuple[str, str, re.Pattern[str]], ...] = tuple(
         re.compile(rf"(?<!\w){re.escape(alias)}(?!\w)", flags=re.IGNORECASE),
     )
     for alias, family_id in sorted(_NORMALIZED_FAMILY_ALIASES.items(), key=lambda item: (-len(item[0]), item[0]))
+)
+_PRODUCT_TERM_PATTERNS: Tuple[Tuple[str, Tuple[str, ...], re.Pattern[str]], ...] = tuple(
+    (
+        alias,
+        family_ids,
+        re.compile(rf"(?<!\w){re.escape(alias)}(?!\w)", flags=re.IGNORECASE),
+    )
+    for alias, family_ids in sorted(_PRODUCT_TERM_TO_FAMILY_IDS.items(), key=lambda item: (-len(item[0]), item[0]))
 )
 _DIMENSION_ALIASES = {
     "dimensions": ("dimension", "dimensions", "size", "length", "width", "height", "габар", "длина", "ширина", "высота"),
@@ -338,6 +399,60 @@ def _normalize_family_token(value: Any) -> str:
     return compact
 
 
+def _family_display_label(family_id: str) -> str:
+    return _FAMILY_DISPLAY_LABELS.get(family_id, family_label(family_id))
+
+
+def _resolve_product_term_value(value: Any) -> List[str]:
+    text = _normalize_family_text(value)
+    if not text:
+        return []
+    direct = _PRODUCT_TERM_TO_FAMILY_IDS.get(text)
+    if direct:
+        return list(dict.fromkeys(direct))
+    resolved: List[str] = []
+    for _alias, family_ids, pattern in _PRODUCT_TERM_PATTERNS:
+        if not pattern.search(text):
+            continue
+        for family_id in family_ids:
+            if family_id not in resolved:
+                resolved.append(family_id)
+    return resolved
+
+
+def _resolve_requested_product_terms(
+    requested_product_terms: Sequence[str] | None,
+    *,
+    fallback_text: str = "",
+) -> Dict[str, Any]:
+    explicit_terms = [clean_text(item) for item in requested_product_terms or [] if clean_text(item)]
+    resolved_family_ids: List[str] = []
+    unresolved_terms: List[str] = []
+    if explicit_terms:
+        for term in explicit_terms:
+            resolved = _resolve_product_term_value(term)
+            if resolved:
+                for family_id in resolved:
+                    if family_id not in resolved_family_ids:
+                        resolved_family_ids.append(family_id)
+            else:
+                unresolved_terms.append(term)
+        source_terms = explicit_terms
+    else:
+        source_terms = [clean_text(fallback_text)] if clean_text(fallback_text) else []
+        for term in source_terms:
+            for family_id in _resolve_product_term_value(term):
+                if family_id not in resolved_family_ids:
+                    resolved_family_ids.append(family_id)
+    return {
+        "explicit_terms": explicit_terms,
+        "source_terms": source_terms,
+        "resolved_family_ids": resolved_family_ids,
+        "resolved_family_labels": [_family_display_label(family_id) for family_id in resolved_family_ids],
+        "unresolved_terms": _dedupe_preserve(unresolved_terms),
+    }
+
+
 def _find_family_alias_matches(value: Any) -> List[Tuple[str, str]]:
     text = _normalize_family_text(value)
     matches: List[Tuple[str, str]] = []
@@ -493,7 +608,7 @@ def _sanitize_competitor_signal(raw_value: Any, requested_family_ids: Sequence[s
     requested = set(normalized_requested)
     matches = _find_family_alias_matches(text)
     if matches:
-        kept = [family_label(family_id) for family_id, _alias in matches if family_id in requested]
+        kept = [_family_display_label(family_id) for family_id, _alias in matches if family_id in requested]
         return ", ".join(_dedupe_preserve(kept))
     normalized = _normalize_family_token(text)
     return text if normalized in requested else ""
@@ -573,9 +688,9 @@ def _build_information_tool_family_guard(
             if normalized in allowed:
                 add_supported(normalized)
             else:
-                add_unsupported(family_label(normalized) if "_" in text else text)
+                add_unsupported(_family_display_label(normalized) if "_" in text else text)
                 add_unsupported_term(text)
-                add_unsupported_term(family_label(normalized))
+                add_unsupported_term(_family_display_label(normalized))
             return
         if treat_unknown_as_unsupported:
             add_unsupported(text)
@@ -606,9 +721,9 @@ def _build_information_tool_family_guard(
             if family_id in allowed:
                 add_supported(family_id)
             else:
-                add_unsupported(family_label(family_id))
+                add_unsupported(_family_display_label(family_id))
                 add_unsupported_term(alias)
-                add_unsupported_term(family_label(family_id))
+                add_unsupported_term(_family_display_label(family_id))
 
     mode = "pass"
     if has_explicit_request and unsupported_names and not supported_family_ids:
@@ -1997,21 +2112,35 @@ def build_query_pricing_bi_tool(
     allowed_family_ids: Sequence[str] | None = None,
 ):
     @tool("query_pricing_bi", parse_docstring=True)
-    def query_pricing_bi(question: str, runtime: ToolRuntime = None) -> Command:
+    def query_pricing_bi(
+        question: str,
+        requested_product_terms: List[str] | None = None,
+        runtime: ToolRuntime = None,
+    ) -> Command:
         """Query the internal pricing BI agent for exact price, option, and maintenance facts.
 
         Use this tool for business questions about model price ranges, option availability,
         option pricing, trims, and maintenance cost or service intervals. The question should
         stay in business language and should not mention database tables, columns, or SQL.
+        When possible, also pass product terms from the user's request. Umbrella terms such as
+        "Соболь" or "Газель" are allowed here; the tool will normalize and expand them to the
+        concrete internal product families before querying BI.
 
         Args:
             question: Business-language question for the pricing BI agent, such as a request
                 about model price, configuration content, option status, option price, or
                 maintenance cost.
+            requested_product_terms: Optional list of product terms from the user's request.
+                Pass names like "Газель NN", "Газель NEXT", or broader terms like "Соболь".
+                The tool will normalize and expand them internally.
         """
         state = runtime.state if runtime else {}
         resolved_question = clean_text(question)
-        _debug_tool_call("query_pricing_bi", {"question": resolved_question})
+        normalized_requested_terms = [clean_text(item) for item in requested_product_terms or [] if clean_text(item)]
+        _debug_tool_call(
+            "query_pricing_bi",
+            {"question": resolved_question, "requested_product_terms": normalized_requested_terms},
+        )
 
         if not resolved_question:
             payload = {
@@ -2031,14 +2160,35 @@ def build_query_pricing_bi_tool(
                     "messages": _tool_message(payload, runtime),
                 }
             )
-        guard = _build_information_tool_family_guard(
-            locale,
-            allowed_family_ids,
-            question=resolved_question,
-            state=state,
-        )
-        if guard["mode"] == _UNAVAILABLE_STATUS:
-            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+        resolved_scope = _resolve_requested_product_terms(normalized_requested_terms, fallback_text=resolved_question)
+        resolved_family_ids = list(resolved_scope.get("resolved_family_ids") or [])
+        resolved_family_labels = list(resolved_scope.get("resolved_family_labels") or [])
+        unresolved_terms = list(resolved_scope.get("unresolved_terms") or [])
+
+        normalized_allowed = _normalize_family_list(allowed_family_ids)
+        allowed_set = set(normalized_allowed)
+        effective_family_ids = list(resolved_family_ids)
+        unsupported_names: List[str] = []
+        partial_filter = False
+        if normalized_allowed and resolved_family_ids:
+            effective_family_ids = [family_id for family_id in resolved_family_ids if family_id in allowed_set]
+            unsupported_names.extend(
+                _family_display_label(family_id) for family_id in resolved_family_ids if family_id not in allowed_set
+            )
+            if effective_family_ids and len(effective_family_ids) != len(resolved_family_ids):
+                partial_filter = True
+        if normalized_allowed and normalized_requested_terms and unresolved_terms:
+            unsupported_names.extend(unresolved_terms)
+            if effective_family_ids:
+                partial_filter = True
+        unsupported_names = _dedupe_preserve(unsupported_names)
+
+        if normalized_allowed and not effective_family_ids and (resolved_family_ids or unresolved_terms):
+            payload = _family_filter_notice(
+                locale,
+                unsupported_names or unresolved_terms or normalized_requested_terms,
+                partial=False,
+            ) or {"status": _UNAVAILABLE_STATUS}
             _debug_tool_result("query_pricing_bi", payload)
             return Command(
                 update=_family_filter_block_update(
@@ -2046,12 +2196,19 @@ def build_query_pricing_bi_tool(
                     runtime,
                     locale=locale,
                     tool_name="query_pricing_bi",
-                    unsupported_names=guard["unsupported_names"],
+                    unsupported_names=unsupported_names or unresolved_terms or normalized_requested_terms,
                 )
             )
+
         forwarded_question = resolved_question
-        if guard["mode"] == _PARTIAL_STATUS:
-            forwarded_question = _sanitize_text_terms(resolved_question, guard["unsupported_terms"]) or resolved_question
+        scope_labels = [_family_display_label(family_id) for family_id in effective_family_ids] or resolved_family_labels
+        if scope_labels:
+            scope_prefix = (
+                f"Work only within these product families: {', '.join(scope_labels)}. "
+                if _locale_key(locale) == "en"
+                else f"Работай только по следующим продуктовым семействам: {', '.join(scope_labels)}. "
+            )
+            forwarded_question = f"{scope_prefix}{forwarded_question}"
 
         internal_config = build_internal_invoke_config(
             runtime.config if runtime else None,
@@ -2128,8 +2285,8 @@ def build_query_pricing_bi_tool(
             "question": resolved_question,
             "answer": answer,
         }
-        if guard["mode"] == _PARTIAL_STATUS:
-            payload = _apply_family_filter_notice(payload, locale, guard["unsupported_names"])
+        if partial_filter:
+            payload = _apply_family_filter_notice(payload, locale, unsupported_names)
         _debug_tool_result("query_pricing_bi", payload)
         return Command(
             update={
