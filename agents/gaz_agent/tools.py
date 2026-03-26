@@ -246,6 +246,15 @@ def parse_allowed_product_names_env(raw_value: str | None) -> List[str] | None:
     return allowed_family_ids or None
 
 
+def format_allowed_product_names(allowed_family_ids: Sequence[str] | None) -> List[str]:
+    labels: List[str] = []
+    for family_id in allowed_family_ids or ():
+        label = _family_display_label(family_id)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
 def _tool_message(content: Any, runtime: ToolRuntime | None) -> List[ToolMessage]:
     tool_call_id = runtime.tool_call_id if runtime else None
     if not isinstance(content, str):

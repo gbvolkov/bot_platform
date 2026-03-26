@@ -73,6 +73,7 @@ from .tools import (
     build_sales_landscape_tool,
     build_search_sales_materials_tool,
     build_solution_shortlist_tool,
+    format_allowed_product_names,
     parse_allowed_product_names_env,
 )
 
@@ -677,11 +678,46 @@ def _tool_contract_sections(locale: str, state: GazAgentState) -> List[str]:
     return sections
 
 
+def _allowed_family_prompt_sections(locale: str, allowed_family_ids: Optional[List[str]]) -> List[str]:
+    labels = format_allowed_product_names(allowed_family_ids)
+    if not labels:
+        return []
+    joined = ", ".join(labels)
+    if locale == "ru":
+        return [
+            (
+                "ОГРАНИЧЕНИЕ ПРОДУКТОВОГО СКОУПА:\n"
+                f"В текущей конфигурации агента разрешено обсуждать только следующие продуктовые семейства: {joined}.\n"
+                "Запрещено обсуждать, описывать, сравнивать, рекомендовать, перечислять модификации или называть цены для моделей и семейств вне этого списка.\n"
+                "Если пользователь спрашивает о модели или семействе вне разрешённого списка, прямо скажите, что в текущей конфигурации агента информация по нему недоступна, и не переходите к содержательному обсуждению такого продукта."
+            )
+        ]
+    return [
+        (
+            "PRODUCT SCOPE RESTRICTION:\n"
+            f"In the current agent configuration, you may discuss only these product families: {joined}.\n"
+            "You must not discuss, describe, compare, recommend, list modifications for, or quote prices for models or families outside this list.\n"
+            "If the user asks about a model or family outside the allowed list, state plainly that information for it is unavailable in the current agent configuration and do not continue into substantive discussion of that product."
+        )
+    ]
 
-def _build_turn_intent_extractor(model: BaseChatModel, summary_model: BaseChatModel, locale: str, structured_output_strategy: StructuredOutputStrategy):
+
+
+def _build_turn_intent_extractor(
+    model: BaseChatModel,
+    summary_model: BaseChatModel,
+    locale: str,
+    structured_output_strategy: StructuredOutputStrategy,
+    allowed_family_ids: Optional[List[str]],
+):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
-        return compose_prompt(locale, "turn_intent_extractor", _turn_intent_payload(request.state), _retry_prompt_sections(request.state))
+        return compose_prompt(
+            locale,
+            "turn_intent_extractor",
+            _turn_intent_payload(request.state),
+            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+        )
 
     return create_agent(
         model=model,
@@ -693,10 +729,21 @@ def _build_turn_intent_extractor(model: BaseChatModel, summary_model: BaseChatMo
 
 
 
-def _build_answer_planner(model: BaseChatModel, summary_model: BaseChatModel, locale: str, structured_output_strategy: StructuredOutputStrategy):
+def _build_answer_planner(
+    model: BaseChatModel,
+    summary_model: BaseChatModel,
+    locale: str,
+    structured_output_strategy: StructuredOutputStrategy,
+    allowed_family_ids: Optional[List[str]],
+):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
-        return compose_prompt(locale, "answer_planner", _answer_plan_payload(request.state), _retry_prompt_sections(request.state))
+        return compose_prompt(
+            locale,
+            "answer_planner",
+            _answer_plan_payload(request.state),
+            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+        )
 
     return create_agent(
         model=model,
@@ -708,12 +755,23 @@ def _build_answer_planner(model: BaseChatModel, summary_model: BaseChatModel, lo
 
 
 
-def _build_policy_validator(model: BaseChatModel, summary_model: BaseChatModel, locale: str, structured_output_strategy: StructuredOutputStrategy):
+def _build_policy_validator(
+    model: BaseChatModel,
+    summary_model: BaseChatModel,
+    locale: str,
+    structured_output_strategy: StructuredOutputStrategy,
+    allowed_family_ids: Optional[List[str]],
+):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
         payload = _compact_payload(request.state)
         payload["draft_answer"] = request.state.get("draft_answer") or ""
-        return compose_prompt(locale, "sales_validator", payload, _retry_prompt_sections(request.state))
+        return compose_prompt(
+            locale,
+            "sales_validator",
+            payload,
+            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+        )
 
     return create_agent(
         model=model,
@@ -725,10 +783,26 @@ def _build_policy_validator(model: BaseChatModel, summary_model: BaseChatModel, 
 
 
 
-def _build_sales_response_agent(model: BaseChatModel, summary_model: BaseChatModel, locale: str, tools: List[Any], tool_registry: Dict[str, Any]):
+def _build_sales_response_agent(
+    model: BaseChatModel,
+    summary_model: BaseChatModel,
+    locale: str,
+    tools: List[Any],
+    tool_registry: Dict[str, Any],
+    allowed_family_ids: Optional[List[str]],
+):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
-        return compose_prompt(locale, "sales_response_agent", _compact_payload(request.state), [*_retry_prompt_sections(request.state), *_tool_contract_sections(locale, request.state)])
+        return compose_prompt(
+            locale,
+            "sales_response_agent",
+            _compact_payload(request.state),
+            [
+                *_retry_prompt_sections(request.state),
+                *_allowed_family_prompt_sections(locale, allowed_family_ids),
+                *_tool_contract_sections(locale, request.state),
+            ],
+        )
 
     return create_agent(
         model=model,
@@ -750,13 +824,23 @@ def _build_sales_response_agent(model: BaseChatModel, summary_model: BaseChatMod
 
 
 
-def _build_sales_repair_agent(model: BaseChatModel, summary_model: BaseChatModel, locale: str):
+def _build_sales_repair_agent(
+    model: BaseChatModel,
+    summary_model: BaseChatModel,
+    locale: str,
+    allowed_family_ids: Optional[List[str]],
+):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
         payload = _compact_payload(request.state)
         payload["draft_answer"] = request.state.get("draft_answer") or ""
         payload["validation_feedback"] = request.state.get("validation_feedback") or {}
-        return compose_prompt(locale, "sales_repair_agent", payload, _retry_prompt_sections(request.state))
+        return compose_prompt(
+            locale,
+            "sales_repair_agent",
+            payload,
+            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+        )
 
     return create_agent(
         model=model,
@@ -767,10 +851,20 @@ def _build_sales_repair_agent(model: BaseChatModel, summary_model: BaseChatModel
 
 
 
-def _build_sales_continue_agent(model: BaseChatModel, summary_model: BaseChatModel, locale: str):
+def _build_sales_continue_agent(
+    model: BaseChatModel,
+    summary_model: BaseChatModel,
+    locale: str,
+    allowed_family_ids: Optional[List[str]],
+):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
-        return compose_prompt(locale, "sales_continue_agent", _compact_payload(request.state), _retry_prompt_sections(request.state))
+        return compose_prompt(
+            locale,
+            "sales_continue_agent",
+            _compact_payload(request.state),
+            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+        )
 
     return create_agent(
         model=model,
@@ -1457,11 +1551,29 @@ def initialize_agent(
         init_context=pricing_bi_init_context,
     )
 
-    turn_intent_extractor = _build_turn_intent_extractor(mini_llm, summary_llm, locale_key, structured_output_strategy)
-    answer_planner = _build_answer_planner(mini_llm, summary_llm, locale_key, structured_output_strategy)
-    validator = _build_policy_validator(mini_llm, summary_llm, locale_key, structured_output_strategy)
-    repair_agent = _build_sales_repair_agent(base_llm, summary_llm, locale_key)
-    sales_continue_agent = _build_sales_continue_agent(base_llm, summary_llm, locale_key)
+    turn_intent_extractor = _build_turn_intent_extractor(
+        mini_llm,
+        summary_llm,
+        locale_key,
+        structured_output_strategy,
+        allowed_family_ids,
+    )
+    answer_planner = _build_answer_planner(
+        mini_llm,
+        summary_llm,
+        locale_key,
+        structured_output_strategy,
+        allowed_family_ids,
+    )
+    validator = _build_policy_validator(
+        mini_llm,
+        summary_llm,
+        locale_key,
+        structured_output_strategy,
+        allowed_family_ids,
+    )
+    repair_agent = _build_sales_repair_agent(base_llm, summary_llm, locale_key, allowed_family_ids)
+    sales_continue_agent = _build_sales_continue_agent(base_llm, summary_llm, locale_key, allowed_family_ids)
 
     tool_registry: Dict[str, Any] = {
         "get_sales_catalog_overview": build_sales_catalog_overview_tool(locale_key),
@@ -1488,6 +1600,7 @@ def initialize_agent(
         locale_key,
         list(tool_registry.values()),
         tool_registry,
+        allowed_family_ids,
     )
 
     builder = StateGraph(GazAgentState, config_schema=ConfigSchema)
