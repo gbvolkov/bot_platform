@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from collections import Counter
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -80,6 +80,25 @@ _FAMILY_ALIASES = {
     "paz": "paz",
     "sat": "sat",
 }
+_UNAVAILABLE_STATUS = "unavailable"
+_PARTIAL_STATUS = "partial"
+
+
+def _normalize_family_text(value: Any) -> str:
+    text = clean_text(value).casefold().replace("ё", "е").replace("_", " ").replace("-", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+_NORMALIZED_FAMILY_ALIASES = {_normalize_family_text(key): value for key, value in _FAMILY_ALIASES.items()}
+_KNOWN_FAMILY_IDS = tuple(dict.fromkeys(_NORMALIZED_FAMILY_ALIASES.values()))
+_FAMILY_ALIAS_PATTERNS: Tuple[Tuple[str, str, re.Pattern[str]], ...] = tuple(
+    (
+        alias,
+        family_id,
+        re.compile(rf"(?<!\w){re.escape(alias)}(?!\w)", flags=re.IGNORECASE),
+    )
+    for alias, family_id in sorted(_NORMALIZED_FAMILY_ALIASES.items(), key=lambda item: (-len(item[0]), item[0]))
+)
 _DIMENSION_ALIASES = {
     "dimensions": ("dimension", "dimensions", "size", "length", "width", "height", "габар", "длина", "ширина", "высота"),
     "payload": ("payload", "capacity", "грузопод", "нагруз", "масса"),
@@ -141,6 +160,29 @@ _FINANCE_FALLBACK = {
     "ru": "Финансовое сравнение становится заметно конкретнее после сужения до 2–3 направлений и более понятной конфигурации.",
     "en": "The finance comparison becomes more concrete after narrowing to 2-3 directions and a clearer configuration.",
 }
+
+
+def parse_allowed_product_names_env(raw_value: str | None) -> List[str] | None:
+    raw_text = clean_text(raw_value)
+    if not raw_text:
+        return None
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("GAZ_AGENT_ALLOWED_PRODUCT_NAMES must be a valid JSON array of strings.") from exc
+    if not isinstance(parsed, list):
+        raise ValueError("GAZ_AGENT_ALLOWED_PRODUCT_NAMES must be a JSON array of strings.")
+
+    allowed_family_ids: List[str] = []
+    for item in parsed:
+        if not isinstance(item, str) or not clean_text(item):
+            raise ValueError("GAZ_AGENT_ALLOWED_PRODUCT_NAMES must contain only non-empty strings.")
+        family_id = _normalize_family_token(item)
+        if family_id not in _KNOWN_FAMILY_IDS:
+            raise ValueError(f"Unknown product family in GAZ_AGENT_ALLOWED_PRODUCT_NAMES: {item}")
+        if family_id not in allowed_family_ids:
+            allowed_family_ids.append(family_id)
+    return allowed_family_ids or None
 
 
 def _tool_message(content: Any, runtime: ToolRuntime | None) -> List[ToolMessage]:
@@ -284,17 +326,35 @@ def _locale_key(locale: str) -> str:
 
 
 def _normalize_family_token(value: Any) -> str:
-    text = clean_text(value).lower().replace("-", " ")
+    text = _normalize_family_text(value)
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return ""
-    if text in _FAMILY_ALIASES:
-        return _FAMILY_ALIASES[text]
+    if text in _NORMALIZED_FAMILY_ALIASES:
+        return _NORMALIZED_FAMILY_ALIASES[text]
     compact = text.replace(" ", "_")
-    if compact in _FAMILY_ALIASES.values():
+    if compact in _KNOWN_FAMILY_IDS:
         return compact
     return compact
 
+
+def _find_family_alias_matches(value: Any) -> List[Tuple[str, str]]:
+    text = _normalize_family_text(value)
+    matches: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    if not text:
+        return matches
+    for alias, family_id, pattern in _FAMILY_ALIAS_PATTERNS:
+        if family_id in seen:
+            continue
+        if pattern.search(text):
+            matches.append((family_id, alias))
+            seen.add(family_id)
+    return matches
+
+
+def _extract_family_mentions_from_text(value: Any) -> List[str]:
+    return [family_id for family_id, _alias in _find_family_alias_matches(value)]
 
 
 def _normalize_family_list(values: Sequence[str] | None) -> List[str]:
@@ -313,6 +373,11 @@ def _candidate_families(candidate: Dict[str, Any]) -> List[str]:
         family = _normalize_family_token(item)
         if family and family not in families:
             families.append(family)
+    if families:
+        return families
+    for family in _extract_family_mentions_from_text(candidate.get("title")):
+        if family not in families:
+            families.append(family)
     return families
 
 
@@ -328,6 +393,261 @@ def _candidate_ref(candidate: Dict[str, Any]) -> Dict[str, Any]:
         title=str(candidate.get("title") or candidate.get("candidate_id") or ""),
         doc_kind=str(candidate.get("doc_kind") or "general"),
     ).model_dump()
+
+
+def _dedupe_preserve(values: Sequence[str] | None) -> List[str]:
+    result: List[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = clean_text(value)
+        if not text:
+            continue
+        marker = text.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(text)
+    return result
+
+
+def _localized_family_filter_message(locale: str, unsupported_names: Sequence[str] | None, *, partial: bool) -> str:
+    names = ", ".join(_dedupe_preserve(unsupported_names))
+    if _locale_key(locale) == "en":
+        if partial:
+            return f"Information is available only for supported product families. Not available for: {names}."
+        return f"Information is not available for the following product families: {names}."
+    if partial:
+        return f"Информация доступна только по поддерживаемым продуктовым семействам. Недоступно для: {names}."
+    return f"Информация недоступна для следующих продуктовых семейств: {names}."
+
+
+def _family_filter_notice(locale: str, unsupported_names: Sequence[str] | None, *, partial: bool) -> Dict[str, Any] | None:
+    normalized_names = _dedupe_preserve(unsupported_names)
+    if not normalized_names:
+        return None
+    return {
+        "status": _PARTIAL_STATUS if partial else _UNAVAILABLE_STATUS,
+        "message": _localized_family_filter_message(locale, normalized_names, partial=partial),
+        "unsupported_product_names": normalized_names,
+    }
+
+
+def _apply_family_filter_notice(payload: Dict[str, Any], locale: str, unsupported_names: Sequence[str] | None) -> Dict[str, Any]:
+    notice = _family_filter_notice(locale, unsupported_names, partial=True)
+    if notice:
+        payload["availability_notice"] = notice
+    return payload
+
+
+def _filter_candidates_for_requested_families(
+    candidates: Sequence[Dict[str, Any]] | None,
+    requested_family_ids: Sequence[str] | None,
+    *,
+    keep_unknown: bool = False,
+) -> List[Dict[str, Any]]:
+    normalized_ids = _normalize_family_list(requested_family_ids)
+    if not normalized_ids:
+        return list(candidates or [])
+    requested = set(normalized_ids)
+    filtered: List[Dict[str, Any]] = []
+    for candidate in candidates or []:
+        families = _candidate_families(candidate)
+        if not families:
+            if keep_unknown:
+                filtered.append(candidate)
+            continue
+        if requested.intersection(families):
+            filtered.append(candidate)
+    return filtered
+
+
+def _filter_baseline_groups_for_requested_families(
+    baseline: Dict[str, Any],
+    requested_family_ids: Sequence[str] | None,
+) -> Dict[str, Any]:
+    normalized_ids = _normalize_family_list(requested_family_ids)
+    if not normalized_ids:
+        return dict(baseline)
+    requested = set(normalized_ids)
+    product_groups: List[Dict[str, Any]] = []
+    for group in baseline.get("product_groups") or []:
+        families = list(group.get("families") or [])
+        kept_families = [family for family in families if _normalize_family_token(family) in requested]
+        if not kept_families:
+            continue
+        updated_group = dict(group)
+        updated_group["families"] = kept_families
+        product_groups.append(updated_group)
+    updated_baseline = dict(baseline)
+    updated_baseline["product_groups"] = product_groups
+    return updated_baseline
+
+
+def _sanitize_competitor_signal(raw_value: Any, requested_family_ids: Sequence[str] | None) -> str:
+    text = clean_text(raw_value)
+    if not text:
+        return ""
+    normalized_requested = _normalize_family_list(requested_family_ids)
+    if not normalized_requested:
+        return text
+    requested = set(normalized_requested)
+    matches = _find_family_alias_matches(text)
+    if matches:
+        kept = [family_label(family_id) for family_id, _alias in matches if family_id in requested]
+        return ", ".join(_dedupe_preserve(kept))
+    normalized = _normalize_family_token(text)
+    return text if normalized in requested else ""
+
+
+def _sanitize_text_terms(text: str, terms_to_strip: Sequence[str] | None) -> str:
+    sanitized = clean_text(text)
+    for term in sorted(_dedupe_preserve(terms_to_strip), key=lambda item: (-len(item), item.casefold())):
+        sanitized = re.sub(
+            rf"(?<!\w){re.escape(term)}(?!\w)",
+            " ",
+            sanitized,
+            flags=re.IGNORECASE,
+        )
+    sanitized = re.sub(r"\b(and|or|и|или)\b\s+(?=(on|for|about|по)\b)", " ", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\b(and|or|и|или)\b(?=\s*(?:[,;:/-]|$))", " ", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"\s*[,;:/]\s*", " ", sanitized)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip(" ,;:/-")
+    return sanitized
+
+
+def _build_information_tool_family_guard(
+    locale: str,
+    allowed_family_ids: Sequence[str] | None,
+    *,
+    families: Sequence[str] | None = None,
+    competitor: Any = "",
+    question: str = "",
+    query: str = "",
+    topic: str = "",
+    use_case: str = "",
+    focus: str = "",
+    problem_focus: str = "",
+    state: Dict[str, Any] | None = None,
+    candidate: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    normalized_allowed = _normalize_family_list(allowed_family_ids)
+    if not normalized_allowed:
+        return {
+            "filter_enabled": False,
+            "mode": "pass",
+            "has_explicit_request": False,
+            "supported_family_ids": [],
+            "unsupported_names": [],
+            "unsupported_terms": [],
+        }
+
+    allowed = set(normalized_allowed)
+    state = state or {}
+    supported_family_ids: List[str] = []
+    unsupported_names: List[str] = []
+    unsupported_terms: List[str] = []
+    has_explicit_request = False
+
+    def add_supported(family_id: str) -> None:
+        if family_id and family_id not in supported_family_ids:
+            supported_family_ids.append(family_id)
+
+    def add_unsupported(name: Any) -> None:
+        text = clean_text(name)
+        if text and text not in unsupported_names:
+            unsupported_names.append(text)
+
+    def add_unsupported_term(value: Any) -> None:
+        text = clean_text(value)
+        if text and text not in unsupported_terms:
+            unsupported_terms.append(text)
+
+    def handle_structured_value(raw_value: Any, *, treat_unknown_as_unsupported: bool) -> None:
+        nonlocal has_explicit_request
+        text = clean_text(raw_value)
+        if not text:
+            return
+        has_explicit_request = True
+        normalized = _normalize_family_token(text)
+        if normalized in _KNOWN_FAMILY_IDS:
+            if normalized in allowed:
+                add_supported(normalized)
+            else:
+                add_unsupported(family_label(normalized) if "_" in text else text)
+                add_unsupported_term(text)
+                add_unsupported_term(family_label(normalized))
+            return
+        if treat_unknown_as_unsupported:
+            add_unsupported(text)
+            add_unsupported_term(text)
+
+    for raw_family in families or []:
+        handle_structured_value(raw_family, treat_unknown_as_unsupported=True)
+
+    for raw_family in ((candidate or {}).get("metadata") or {}).get("product_families") or []:
+        handle_structured_value(raw_family, treat_unknown_as_unsupported=True)
+
+    handle_structured_value(competitor, treat_unknown_as_unsupported=True)
+    handle_structured_value((state.get("slots") or {}).get("competitor"), treat_unknown_as_unsupported=True)
+
+    text_sources = (
+        question,
+        query,
+        topic,
+        use_case,
+        focus,
+        problem_focus,
+        state.get("problem_summary"),
+        (candidate or {}).get("title"),
+    )
+    for raw_text in text_sources:
+        for family_id, alias in _find_family_alias_matches(raw_text):
+            has_explicit_request = True
+            if family_id in allowed:
+                add_supported(family_id)
+            else:
+                add_unsupported(family_label(family_id))
+                add_unsupported_term(alias)
+                add_unsupported_term(family_label(family_id))
+
+    mode = "pass"
+    if has_explicit_request and unsupported_names and not supported_family_ids:
+        mode = _UNAVAILABLE_STATUS
+    elif has_explicit_request and unsupported_names and supported_family_ids:
+        mode = _PARTIAL_STATUS
+
+    return {
+        "filter_enabled": True,
+        "mode": mode,
+        "has_explicit_request": has_explicit_request,
+        "supported_family_ids": supported_family_ids,
+        "unsupported_names": _dedupe_preserve(unsupported_names),
+        "unsupported_terms": _dedupe_preserve(unsupported_terms),
+    }
+
+
+def _family_filter_block_update(
+    state: Dict[str, Any],
+    runtime: ToolRuntime | None,
+    *,
+    locale: str,
+    tool_name: str,
+    unsupported_names: Sequence[str] | None,
+) -> Dict[str, Any]:
+    payload = _family_filter_notice(locale, unsupported_names, partial=False) or {
+        "status": _UNAVAILABLE_STATUS,
+        "message": "Information is unavailable.",
+    }
+    return {
+        "runtime_warnings": _append_runtime_warning(
+            state,
+            stage=f"gaz:{tool_name}",
+            code="unsupported_product_family",
+            detail=", ".join(_dedupe_preserve(unsupported_names)),
+        ),
+        "tool_calls_this_turn": _append_tool_call(state, tool_name),
+        "messages": _tool_message(payload, runtime),
+    }
 
 
 
@@ -583,9 +903,22 @@ def _composite_update(
 
 
 
-def _landscape_digest(locale: str, state: Dict[str, Any], docs_client: GazDocumentsClient, topic: str, audience: str, use_case: str, focus: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+def _landscape_digest(
+    locale: str,
+    state: Dict[str, Any],
+    docs_client: GazDocumentsClient,
+    topic: str,
+    audience: str,
+    use_case: str,
+    focus: str,
+    *,
+    allowed_family_ids: Sequence[str] | None = None,
+    requested_family_ids: Sequence[str] | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
     query = " ".join(part for part in [clean_text(topic), clean_text(use_case), clean_text(focus)] if part)
     baseline = filter_sales_context(locale, topic=query, max_groups=4)
+    target_family_ids = _normalize_family_list(requested_family_ids) or _normalize_family_list(allowed_family_ids)
+    baseline = _filter_baseline_groups_for_requested_families(baseline, target_family_ids)
     finance_options = list(baseline.get("finance_options") or [])[:3]
     trace: Dict[str, Any] = {"tool_name": "get_sales_landscape", "query": query, "focus": clean_text(focus)}
     responses: List[Dict[str, Any]] = []
@@ -595,6 +928,11 @@ def _landscape_digest(locale: str, state: Dict[str, Any], docs_client: GazDocume
         if len(responses) < _COMPOSITE_SEARCH_LIMIT and any(term in lowered for term in ("finance", "leasing", "credit", "лизинг", "кредит", "финанс")):
             responses.append(_search_with_trace(docs_client, trace, query=query, intent="financing", families=[], competitor="", top_k=4))
     candidate_pool = _merge_candidates([], [candidate for response in responses for candidate in response.get("candidates") or []])
+    candidate_pool = _filter_candidates_for_requested_families(
+        candidate_pool,
+        target_family_ids,
+        keep_unknown=not _normalize_family_list(requested_family_ids),
+    )
     read_responses: List[Dict[str, Any]] = []
     for group in (baseline.get("product_groups") or [])[: min(2, _COMPOSITE_READ_LIMIT)]:
         group_families = {_normalize_family_token(item) for item in group.get("families") or []}
@@ -683,9 +1021,24 @@ def _comparison_assumptions(locale: str, explicit_families: Sequence[str] | None
 
 
 
-def _compare_digest(locale: str, state: Dict[str, Any], docs_client: GazDocumentsClient, query: str, families: Sequence[str] | None, competitor: str, dimensions: Sequence[str] | None, top_families: int) -> tuple[Dict[str, Any], Dict[str, Any]]:
+def _compare_digest(
+    locale: str,
+    state: Dict[str, Any],
+    docs_client: GazDocumentsClient,
+    query: str,
+    families: Sequence[str] | None,
+    competitor: str,
+    dimensions: Sequence[str] | None,
+    top_families: int,
+    *,
+    allowed_family_ids: Sequence[str] | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
     query_text = clean_text(query) or clean_text(state.get("problem_summary"))
+    allowed_ids = _normalize_family_list(allowed_family_ids)
+    allowed_set = set(allowed_ids)
     normalized_families = _normalize_family_list(families)
+    if allowed_set:
+        normalized_families = [family for family in normalized_families if family in allowed_set]
     axes = _infer_axes(query_text, dimensions)
     trace: Dict[str, Any] = {"tool_name": "compare_product_directions", "query": query_text, "axes": axes}
     responses: List[Dict[str, Any]] = []
@@ -695,7 +1048,19 @@ def _compare_digest(locale: str, state: Dict[str, Any], docs_client: GazDocument
     if axes and len(responses) < _COMPOSITE_SEARCH_LIMIT:
         responses.append(_search_with_trace(docs_client, trace, query=f"{query_text} {' '.join(axes)}", intent="specs", families=normalized_families, competitor=clean_text(competitor), top_k=4))
     candidate_pool = _merge_candidates([], [candidate for response in responses for candidate in response.get("candidates") or []])
-    selected_families = _pick_top_families(candidate_pool, normalized_families or state.get("provisional_recommendations") or [], top_families)
+    candidate_pool = _filter_candidates_for_requested_families(
+        candidate_pool,
+        normalized_families or allowed_ids,
+        keep_unknown=not normalized_families,
+    )
+    state_recommendations = _normalize_family_list(state.get("provisional_recommendations") or [])
+    if allowed_set:
+        state_recommendations = [family for family in state_recommendations if family in allowed_set]
+    selected_families = _pick_top_families(candidate_pool, normalized_families or state_recommendations, top_families)
+    if allowed_set:
+        selected_families = [family for family in selected_families if family in allowed_set]
+    if normalized_families:
+        selected_families = [family for family in selected_families if family in normalized_families]
     read_responses: List[Dict[str, Any]] = []
     for family in selected_families:
         for candidate in _pick_candidates_for_family(candidate_pool, family, limit=2):
@@ -776,9 +1141,24 @@ def _snapshot_assumptions(locale: str, explicit_families: Sequence[str] | None, 
 
 
 
-def _snapshot_digest(locale: str, state: Dict[str, Any], docs_client: GazDocumentsClient, query: str, families: Sequence[str] | None, dimensions: Sequence[str] | None, competitor: str, max_products: int) -> tuple[Dict[str, Any], Dict[str, Any]]:
+def _snapshot_digest(
+    locale: str,
+    state: Dict[str, Any],
+    docs_client: GazDocumentsClient,
+    query: str,
+    families: Sequence[str] | None,
+    dimensions: Sequence[str] | None,
+    competitor: str,
+    max_products: int,
+    *,
+    allowed_family_ids: Sequence[str] | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
     query_text = clean_text(query) or clean_text(state.get("problem_summary"))
+    allowed_ids = _normalize_family_list(allowed_family_ids)
+    allowed_set = set(allowed_ids)
     normalized_families = _normalize_family_list(families)
+    if allowed_set:
+        normalized_families = [family for family in normalized_families if family in allowed_set]
     axes = _infer_axes(query_text, dimensions)
     trace: Dict[str, Any] = {"tool_name": "collect_product_snapshot", "query": query_text, "dimensions": axes}
     responses: List[Dict[str, Any]] = []
@@ -788,7 +1168,19 @@ def _snapshot_digest(locale: str, state: Dict[str, Any], docs_client: GazDocumen
     if not normalized_families and len(responses) < _COMPOSITE_SEARCH_LIMIT:
         responses.append(_search_with_trace(docs_client, trace, query=query_text, intent="overview", families=[], competitor=clean_text(competitor), top_k=4))
     candidate_pool = _merge_candidates([], [candidate for response in responses for candidate in response.get("candidates") or []])
-    selected_families = _pick_top_families(candidate_pool, normalized_families or state.get("provisional_recommendations") or [], max_products)
+    candidate_pool = _filter_candidates_for_requested_families(
+        candidate_pool,
+        normalized_families or allowed_ids,
+        keep_unknown=not normalized_families,
+    )
+    state_recommendations = _normalize_family_list(state.get("provisional_recommendations") or [])
+    if allowed_set:
+        state_recommendations = [family for family in state_recommendations if family in allowed_set]
+    selected_families = _pick_top_families(candidate_pool, normalized_families or state_recommendations, max_products)
+    if allowed_set:
+        selected_families = [family for family in selected_families if family in allowed_set]
+    if normalized_families:
+        selected_families = [family for family in selected_families if family in normalized_families]
     read_responses: List[Dict[str, Any]] = []
     for family in selected_families:
         for candidate in _pick_candidates_for_family(candidate_pool, family, limit=2):
@@ -861,9 +1253,18 @@ def _snapshot_digest(locale: str, state: Dict[str, Any], docs_client: GazDocumen
 
 
 def build_classify_problem_branch_tool(locale: str = "ru"):
-    @tool("classify_problem_branch")
+    @tool("classify_problem_branch", parse_docstring=True)
     def classify_problem_branch(reasoning_note: str = "", runtime: ToolRuntime = None) -> Command:
-        """Classify the current customer case into one active business branch or a conflict."""
+        """Classify the current customer case into one active business branch or a conflict.
+
+        Use this tool when the conversation already contains enough problem context to decide
+        which sales branch is currently dominant, such as configuration, comparison,
+        passenger route, special body, or service-risk handling.
+
+        Args:
+            reasoning_note: Optional short note explaining why branch locking is needed now or
+                what ambiguity should be resolved.
+        """
         _debug_tool_call("classify_problem_branch", {"reasoning_note": reasoning_note})
         state = runtime.state if runtime else {}
         active_branch, branch_conflict, reasoning = classify_branch(
@@ -890,14 +1291,24 @@ def build_classify_problem_branch_tool(locale: str = "ru"):
 
 
 def build_sales_catalog_overview_tool(locale: str = "ru"):
-    @tool("get_sales_catalog_overview")
+    @tool("get_sales_catalog_overview", parse_docstring=True)
     def get_sales_catalog_overview(
         topic: str = "",
         audience: str = "",
         use_case: str = "",
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Return a broad product and financing overview for sales discovery."""
+        """Return a broad product and financing overview for early sales discovery.
+
+        Use this tool when the customer ask is still high level and you need a broad portfolio
+        view instead of narrow product facts. It is especially useful for early discovery,
+        initial qualification, and finance-aware top-of-funnel conversations.
+
+        Args:
+            topic: Main topic or commercial need to orient the overview around.
+            audience: Intended customer segment or stakeholder, if known.
+            use_case: Practical task, route, or workload the vehicle should cover.
+        """
         _debug_tool_call(
             "get_sales_catalog_overview",
             {"topic": topic, "audience": audience, "use_case": use_case},
@@ -925,8 +1336,12 @@ def build_sales_catalog_overview_tool(locale: str = "ru"):
 
 
 
-def build_sales_landscape_tool(locale: str, docs_client: GazDocumentsClient):
-    @tool("get_sales_landscape")
+def build_sales_landscape_tool(
+    locale: str,
+    docs_client: GazDocumentsClient,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("get_sales_landscape", parse_docstring=True)
     def get_sales_landscape(
         topic: str = "",
         audience: str = "",
@@ -934,13 +1349,61 @@ def build_sales_landscape_tool(locale: str, docs_client: GazDocumentsClient):
         focus: str = "",
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Build a broad multi-direction sales digest with supporting materials."""
+        """Build a broad multi-direction sales digest with supporting materials.
+
+        Use this tool when you need a curated landscape of likely product directions plus the
+        strongest supporting sales materials. It is best for broad commercial guidance before
+        the conversation narrows to one concrete model or exact specification.
+
+        Args:
+            topic: Main topic or vehicle need to explore.
+            audience: Customer segment or stakeholder perspective to optimize for.
+            use_case: Operational scenario, route type, or business task behind the request.
+            focus: Optional emphasis such as payload, dimensions, finance, passenger use, or
+                objections.
+        """
         state = runtime.state if runtime else {}
         _debug_tool_call(
             "get_sales_landscape",
             {"topic": topic, "audience": audience, "use_case": use_case, "focus": focus},
         )
-        payload, update = _landscape_digest(locale, state, docs_client, topic, audience, use_case, focus)
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            topic=topic,
+            use_case=use_case,
+            focus=focus,
+            state=state,
+        )
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("get_sales_landscape", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="get_sales_landscape",
+                    unsupported_names=guard["unsupported_names"],
+                )
+            )
+        payload, update = _landscape_digest(
+            locale,
+            state,
+            docs_client,
+            topic,
+            audience,
+            use_case,
+            focus,
+            allowed_family_ids=allowed_family_ids,
+            requested_family_ids=guard["supported_family_ids"],
+        )
+        if guard["mode"] == _PARTIAL_STATUS:
+            payload = _apply_family_filter_notice(payload, locale, guard["unsupported_names"])
+            digests = list(update.get("sales_digests") or [])
+            if digests:
+                digests[-1] = payload
+                update["sales_digests"] = digests
         _debug_tool_result("get_sales_landscape", payload)
         update["messages"] = _tool_message(payload, runtime)
         return Command(update=update)
@@ -949,8 +1412,12 @@ def build_sales_landscape_tool(locale: str, docs_client: GazDocumentsClient):
 
 
 
-def build_compare_product_directions_tool(locale: str, docs_client: GazDocumentsClient):
-    @tool("compare_product_directions")
+def build_compare_product_directions_tool(
+    locale: str,
+    docs_client: GazDocumentsClient,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("compare_product_directions", parse_docstring=True)
     def compare_product_directions(
         query: str,
         families: Sequence[str] | None = None,
@@ -959,7 +1426,23 @@ def build_compare_product_directions_tool(locale: str, docs_client: GazDocuments
         top_families: int = 3,
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Return a multi-product comparison digest for likely directions or competitor context."""
+        """Return a multi-product comparison digest for likely directions or competitor context.
+
+        Use this tool when the customer asks to compare several GAZ directions, or when a
+        competitor is mentioned and you need a structured multi-family comparison rather than a
+        single-product answer.
+
+        Args:
+            query: Natural-language comparison request in business terms.
+            families: Optional candidate product families to compare, such as Gazelle NEXT,
+                Sobol NN, or Gazon NEXT.
+            competitor: Optional competitor model, brand, or alternative solution mentioned by
+                the customer.
+            dimensions: Optional comparison axes such as dimensions, payload, power, engine,
+                fuel, versions, or finance.
+            top_families: Maximum number of product families to include in the digest after
+                internal narrowing.
+        """
         state = runtime.state if runtime else {}
         clamped_top_families = _clamp_int(top_families, lower=1, upper=4, default=3)
         _debug_tool_call(
@@ -972,7 +1455,51 @@ def build_compare_product_directions_tool(locale: str, docs_client: GazDocuments
                 "top_families": clamped_top_families,
             },
         )
-        payload, update = _compare_digest(locale, state, docs_client, query, families, competitor, dimensions, clamped_top_families)
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            families=families,
+            competitor=competitor,
+            query=query,
+            state=state,
+        )
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("compare_product_directions", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="compare_product_directions",
+                    unsupported_names=guard["unsupported_names"],
+                )
+            )
+        effective_families: Sequence[str] | None = (
+            guard["supported_family_ids"] if guard["has_explicit_request"] and guard["supported_family_ids"] else families
+        )
+        effective_competitor = (
+            _sanitize_competitor_signal(competitor, guard["supported_family_ids"] or allowed_family_ids)
+            if guard["has_explicit_request"]
+            else competitor
+        )
+        payload, update = _compare_digest(
+            locale,
+            state,
+            docs_client,
+            query,
+            effective_families,
+            effective_competitor,
+            dimensions,
+            clamped_top_families,
+            allowed_family_ids=allowed_family_ids,
+        )
+        if guard["mode"] == _PARTIAL_STATUS:
+            payload = _apply_family_filter_notice(payload, locale, guard["unsupported_names"])
+            digests = list(update.get("comparison_digests") or [])
+            if digests:
+                digests[-1] = payload
+                update["comparison_digests"] = digests
         _debug_tool_result("compare_product_directions", payload)
         update["messages"] = _tool_message(payload, runtime)
         return Command(update=update)
@@ -981,8 +1508,12 @@ def build_compare_product_directions_tool(locale: str, docs_client: GazDocuments
 
 
 
-def build_collect_product_snapshot_tool(locale: str, docs_client: GazDocumentsClient):
-    @tool("collect_product_snapshot")
+def build_collect_product_snapshot_tool(
+    locale: str,
+    docs_client: GazDocumentsClient,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("collect_product_snapshot", parse_docstring=True)
     def collect_product_snapshot(
         query: str,
         families: Sequence[str] | None = None,
@@ -991,7 +1522,18 @@ def build_collect_product_snapshot_tool(locale: str, docs_client: GazDocumentsCl
         max_products: int = 3,
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Return a structured multi-product snapshot for numeric or technical asks."""
+        """Return a structured multi-product snapshot for numeric or technical asks.
+
+        Use this tool when the customer needs a compact fact pack across a few likely products,
+        especially for dimensions, payload, engine, seating, or other technical attributes.
+
+        Args:
+            query: Natural-language request describing the technical or numeric need.
+            families: Optional product families to prioritize in the snapshot.
+            dimensions: Optional list of requested dimensions or technical axes to emphasize.
+            competitor: Optional competitor that should stay in view while selecting products.
+            max_products: Maximum number of product entries to return in the snapshot.
+        """
         state = runtime.state if runtime else {}
         clamped_max_products = _clamp_int(max_products, lower=1, upper=4, default=3)
         _debug_tool_call(
@@ -1004,7 +1546,51 @@ def build_collect_product_snapshot_tool(locale: str, docs_client: GazDocumentsCl
                 "max_products": clamped_max_products,
             },
         )
-        payload, update = _snapshot_digest(locale, state, docs_client, query, families, dimensions, competitor, clamped_max_products)
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            families=families,
+            competitor=competitor,
+            query=query,
+            state=state,
+        )
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("collect_product_snapshot", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="collect_product_snapshot",
+                    unsupported_names=guard["unsupported_names"],
+                )
+            )
+        effective_families: Sequence[str] | None = (
+            guard["supported_family_ids"] if guard["has_explicit_request"] and guard["supported_family_ids"] else families
+        )
+        effective_competitor = (
+            _sanitize_competitor_signal(competitor, guard["supported_family_ids"] or allowed_family_ids)
+            if guard["has_explicit_request"]
+            else competitor
+        )
+        payload, update = _snapshot_digest(
+            locale,
+            state,
+            docs_client,
+            query,
+            effective_families,
+            dimensions,
+            effective_competitor,
+            clamped_max_products,
+            allowed_family_ids=allowed_family_ids,
+        )
+        if guard["mode"] == _PARTIAL_STATUS:
+            payload = _apply_family_filter_notice(payload, locale, guard["unsupported_names"])
+            digests = list(update.get("product_snapshots") or [])
+            if digests:
+                digests[-1] = payload
+                update["product_snapshots"] = digests
         _debug_tool_result("collect_product_snapshot", payload)
         update["messages"] = _tool_message(payload, runtime)
         return Command(update=update)
@@ -1013,8 +1599,12 @@ def build_collect_product_snapshot_tool(locale: str, docs_client: GazDocumentsCl
 
 
 
-def build_search_sales_materials_tool(docs_client: GazDocumentsClient):
-    @tool("search_sales_materials")
+def build_search_sales_materials_tool(
+    locale: str,
+    docs_client: GazDocumentsClient,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("search_sales_materials", parse_docstring=True)
     def search_sales_materials(
         query: str,
         intent: str = "overview",
@@ -1023,12 +1613,25 @@ def build_search_sales_materials_tool(docs_client: GazDocumentsClient):
         top_k: int = 4,
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Search broad official sales materials before deeper reads."""
+        """Search official sales materials before reading any specific document in depth.
+
+        Use this tool to discover candidate brochures, presentations, battlecards, and other
+        approved materials that are relevant to the current ask. Prefer this before
+        `read_material` when you still need to identify the right sources.
+
+        Args:
+            query: Natural-language search request describing the customer problem or sales need.
+            intent: Search mode. Supported values are overview, compare, specs, financing, and
+                objection.
+            families: Optional product families to bias the search toward.
+            competitor: Optional competitor or alternative the customer mentioned.
+            top_k: Maximum number of material candidates to return.
+        """
         state = runtime.state if runtime else {}
         resolved_intent = clean_text(intent).lower() or "overview"
         if resolved_intent not in _VALID_SEARCH_INTENTS:
             resolved_intent = "overview"
-        normalized_families = [clean_text(item) for item in families or [] if clean_text(item)]
+        normalized_families = _normalize_family_list(families)
         clamped_top_k = _clamp_int(top_k, lower=1, upper=6, default=4)
         _debug_tool_call(
             "search_sales_materials",
@@ -1040,9 +1643,37 @@ def build_search_sales_materials_tool(docs_client: GazDocumentsClient):
                 "top_k": clamped_top_k,
             },
         )
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            families=families,
+            competitor=competitor,
+            query=query,
+            state=state,
+        )
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("search_sales_materials", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="search_sales_materials",
+                    unsupported_names=guard["unsupported_names"],
+                )
+            )
         search_query = clean_text(query) or clean_text(state.get("problem_summary"))
-        resolved_competitor = clean_text(competitor) or clean_text((state.get("slots") or {}).get("competitor"))
-        search_key = _build_search_key(search_query, resolved_intent, normalized_families, resolved_competitor)
+        effective_families = (
+            guard["supported_family_ids"] if guard["has_explicit_request"] and guard["supported_family_ids"] else normalized_families
+        )
+        competitor_source = clean_text(competitor) or clean_text((state.get("slots") or {}).get("competitor"))
+        resolved_competitor = (
+            _sanitize_competitor_signal(competitor_source, guard["supported_family_ids"] or allowed_family_ids)
+            if guard["has_explicit_request"]
+            else competitor_source
+        )
+        search_key = _build_search_key(search_query, resolved_intent, effective_families, resolved_competitor)
         existing_search_keys = list(state.get("search_keys_this_turn") or [])
         if search_key in existing_search_keys:
             content = {"status": "blocked", "reason": "duplicate_search_attempt", "query": search_query, "intent": resolved_intent}
@@ -1070,16 +1701,24 @@ def build_search_sales_materials_tool(docs_client: GazDocumentsClient):
         response = docs_client.search_sales_materials(
             query=search_query,
             intent=resolved_intent,
-            families=normalized_families,
+            families=effective_families,
             competitor=resolved_competitor,
             top_k=clamped_top_k,
         )
-        candidates = list(response.get("candidates") or [])
+        candidates = _filter_candidates_for_requested_families(
+            response.get("candidates") or [],
+            effective_families or allowed_family_ids,
+            keep_unknown=not bool(effective_families),
+        )
         allowed_ids = [item.get("candidate_id") for item in candidates if item.get("candidate_id")]
         research_status = dict(state.get("research_status") or {})
         queries = list(research_status.get("queries") or [])
         if clean_text(query):
             queries.append(clean_text(query))
+        response_payload = dict(response)
+        response_payload["candidates"] = candidates
+        if guard["mode"] == _PARTIAL_STATUS:
+            response_payload = _apply_family_filter_notice(response_payload, locale, guard["unsupported_names"])
         payload = {
             "docs_status": {"service_available": True, "collection_available": True},
             "search_query": search_query,
@@ -1097,19 +1736,34 @@ def build_search_sales_materials_tool(docs_client: GazDocumentsClient):
             "research_layer": "broad_search",
             "search_keys_this_turn": [*existing_search_keys, search_key],
             "tool_calls_this_turn": _append_tool_call(state, "search_sales_materials"),
-            "messages": _tool_message(response, runtime),
+            "messages": _tool_message(response_payload, runtime),
         }
-        _debug_tool_result("search_sales_materials", response)
+        _debug_tool_result("search_sales_materials", response_payload)
         return Command(update=payload)
 
     return search_sales_materials
 
 
 
-def build_read_material_tool(docs_client: GazDocumentsClient):
-    @tool("read_material")
+def build_read_material_tool(
+    locale: str,
+    docs_client: GazDocumentsClient,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("read_material", parse_docstring=True)
     def read_material(candidate_id: str, focus: str, max_segments: int = 3, runtime: ToolRuntime = None) -> Command:
-        """Read a targeted excerpt from a previously surfaced material candidate."""
+        """Read a targeted excerpt from a previously surfaced material candidate.
+
+        Use this tool only after `search_sales_materials` or `get_branch_pack` has returned
+        candidate documents. It reads focused excerpts instead of the whole material and is
+        best for extracting evidence for one concrete point.
+
+        Args:
+            candidate_id: Identifier of a previously surfaced material candidate that is allowed
+                in the current turn.
+            focus: Specific fact, objection, question, or topic to extract from the material.
+            max_segments: Maximum number of focused excerpt segments to return.
+        """
         state = runtime.state if runtime else {}
         allowed_ids = list(state.get("allowed_material_ids") or [])
         clamped_max_segments = _clamp_int(max_segments, lower=1, upper=5, default=3)
@@ -1123,6 +1777,17 @@ def build_read_material_tool(docs_client: GazDocumentsClient):
             },
         )
         focus_text = clean_text(focus)
+        selected_candidate = next(
+            (item for item in state.get("material_candidates") or [] if clean_text(item.get("candidate_id")) == clean_text(candidate_id)),
+            {},
+        )
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            focus=focus_text,
+            state=state,
+            candidate=selected_candidate,
+        )
         focus_key = _build_focus_key(candidate_id, focus_text)
         existing_focus_keys = list(state.get("read_focus_keys_this_turn") or [])
         read_attempts = dict(state.get("read_attempts_by_candidate") or {})
@@ -1142,6 +1807,18 @@ def build_read_material_tool(docs_client: GazDocumentsClient):
                     "tool_calls_this_turn": _append_tool_call(state, "read_material"),
                     "messages": _tool_message(content, runtime),
                 }
+            )
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("read_material", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="read_material",
+                    unsupported_names=guard["unsupported_names"],
+                )
             )
         if focus_key in existing_focus_keys:
             content = {"status": "blocked", "reason": "duplicate_read_attempt", "candidate_id": candidate_id, "focus": focus_text}
@@ -1194,6 +1871,8 @@ def build_read_material_tool(docs_client: GazDocumentsClient):
             focus=focus_text,
             max_segments=clamped_max_segments,
         )
+        if guard["mode"] == _PARTIAL_STATUS:
+            response = _apply_family_filter_notice(dict(response), locale, guard["unsupported_names"])
         research_status = dict(state.get("research_status") or {})
         documents_touched = list(research_status.get("documents_touched") or [])
         if candidate_id not in documents_touched:
@@ -1222,10 +1901,26 @@ def build_read_material_tool(docs_client: GazDocumentsClient):
 
 
 
-def build_branch_pack_tool(docs_client: GazDocumentsClient):
-    @tool("get_branch_pack")
+def build_branch_pack_tool(
+    locale: str,
+    docs_client: GazDocumentsClient,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("get_branch_pack", parse_docstring=True)
     def get_branch_pack(branch: str, problem_focus: str = "", top_k: int = 4, runtime: ToolRuntime = None) -> Command:
-        """Fetch a deeper, branch-focused material pack when broad search is not enough."""
+        """Fetch a deeper branch-focused material pack when broad search is not enough.
+
+        Use this tool after the active business branch is already known and you need more
+        focused materials than a generic sales search provides.
+
+        Args:
+            branch: Active business branch to load materials for. Supported values are tco,
+                configuration, comparison, service_risk, internal_approval, passenger_route,
+                special_body, and special_conditions.
+            problem_focus: Optional one-line description of the exact customer issue inside that
+                branch.
+            top_k: Maximum number of branch-specific material candidates to return.
+        """
         state = runtime.state if runtime else {}
         resolved_branch = clean_text(branch)
         clamped_top_k = _clamp_int(top_k, lower=1, upper=5, default=4)
@@ -1233,19 +1928,45 @@ def build_branch_pack_tool(docs_client: GazDocumentsClient):
             "get_branch_pack",
             {"branch": resolved_branch, "problem_focus": problem_focus, "top_k": clamped_top_k},
         )
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            problem_focus=problem_focus,
+            state=state,
+        )
         if resolved_branch not in _VALID_BRANCHES:
             content = {"status": "blocked", "reason": "invalid_branch", "branch": resolved_branch}
             _debug_tool_result("get_branch_pack", content)
             return Command(update={"messages": _tool_message(content, runtime)})
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("get_branch_pack", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="get_branch_pack",
+                    unsupported_names=guard["unsupported_names"],
+                )
+            )
         response = docs_client.get_branch_pack(
             branch=resolved_branch,
             slots=state.get("slots") or {},
             problem_summary=clean_text(problem_focus) or clean_text(state.get("problem_summary")),
             top_k=clamped_top_k,
         )
-        candidates = list(response.get("candidates") or [])
+        candidates = _filter_candidates_for_requested_families(
+            response.get("candidates") or [],
+            guard["supported_family_ids"] or allowed_family_ids,
+            keep_unknown=not bool(guard["supported_family_ids"]),
+        )
         allowed_ids = [item.get("candidate_id") for item in candidates if item.get("candidate_id")]
         research_status = dict(state.get("research_status") or {})
+        response_payload = dict(response)
+        response_payload["candidates"] = candidates
+        if guard["mode"] == _PARTIAL_STATUS:
+            response_payload = _apply_family_filter_notice(response_payload, locale, guard["unsupported_names"])
         payload = {
             "active_branch": resolved_branch,
             "branch_conflict": [],
@@ -1260,18 +1981,34 @@ def build_branch_pack_tool(docs_client: GazDocumentsClient):
             },
             "research_layer": "branch_pack",
             "tool_calls_this_turn": _append_tool_call(state, "get_branch_pack"),
-            "messages": _tool_message(response, runtime),
+            "messages": _tool_message(response_payload, runtime),
         }
-        _debug_tool_result("get_branch_pack", response)
+        _debug_tool_result("get_branch_pack", response_payload)
         return Command(update=payload)
 
     return get_branch_pack
 
 
-def build_query_pricing_bi_tool(pricing_bi_agent: Any, pricing_bi_configurable: Dict[str, Any], thread_suffix: str):
-    @tool("query_pricing_bi")
+def build_query_pricing_bi_tool(
+    locale: str,
+    pricing_bi_agent: Any,
+    pricing_bi_configurable: Dict[str, Any],
+    thread_suffix: str,
+    allowed_family_ids: Sequence[str] | None = None,
+):
+    @tool("query_pricing_bi", parse_docstring=True)
     def query_pricing_bi(question: str, runtime: ToolRuntime = None) -> Command:
-        """Query the internal BI agent for exact pricing, options, or maintenance facts."""
+        """Query the internal pricing BI agent for exact price, option, and maintenance facts.
+
+        Use this tool for business questions about model price ranges, option availability,
+        option pricing, trims, and maintenance cost or service intervals. The question should
+        stay in business language and should not mention database tables, columns, or SQL.
+
+        Args:
+            question: Business-language question for the pricing BI agent, such as a request
+                about model price, configuration content, option status, option price, or
+                maintenance cost.
+        """
         state = runtime.state if runtime else {}
         resolved_question = clean_text(question)
         _debug_tool_call("query_pricing_bi", {"question": resolved_question})
@@ -1294,6 +2031,27 @@ def build_query_pricing_bi_tool(pricing_bi_agent: Any, pricing_bi_configurable: 
                     "messages": _tool_message(payload, runtime),
                 }
             )
+        guard = _build_information_tool_family_guard(
+            locale,
+            allowed_family_ids,
+            question=resolved_question,
+            state=state,
+        )
+        if guard["mode"] == _UNAVAILABLE_STATUS:
+            payload = _family_filter_notice(locale, guard["unsupported_names"], partial=False) or {"status": _UNAVAILABLE_STATUS}
+            _debug_tool_result("query_pricing_bi", payload)
+            return Command(
+                update=_family_filter_block_update(
+                    state,
+                    runtime,
+                    locale=locale,
+                    tool_name="query_pricing_bi",
+                    unsupported_names=guard["unsupported_names"],
+                )
+            )
+        forwarded_question = resolved_question
+        if guard["mode"] == _PARTIAL_STATUS:
+            forwarded_question = _sanitize_text_terms(resolved_question, guard["unsupported_terms"]) or resolved_question
 
         internal_config = build_internal_invoke_config(
             runtime.config if runtime else None,
@@ -1313,7 +2071,7 @@ def build_query_pricing_bi_tool(pricing_bi_agent: Any, pricing_bi_configurable: 
                             content=[
                                 {
                                     "type": "text",
-                                    "text": resolved_question,
+                                    "text": forwarded_question,
                                 }
                             ]
                         )
@@ -1370,6 +2128,8 @@ def build_query_pricing_bi_tool(pricing_bi_agent: Any, pricing_bi_configurable: 
             "question": resolved_question,
             "answer": answer,
         }
+        if guard["mode"] == _PARTIAL_STATUS:
+            payload = _apply_family_filter_notice(payload, locale, guard["unsupported_names"])
         _debug_tool_result("query_pricing_bi", payload)
         return Command(
             update={
@@ -1384,7 +2144,11 @@ def build_query_pricing_bi_tool(pricing_bi_agent: Any, pricing_bi_configurable: 
 def build_solution_shortlist_tool():
     @tool("build_solution_shortlist")
     def build_solution_shortlist(runtime: ToolRuntime = None) -> Command:
-        """Build a deterministic shortlist from the currently surfaced materials."""
+        """Build a deterministic shortlist from the currently surfaced materials.
+
+        Use this tool after enough materials have already been surfaced and narrowed. It turns
+        the current material context into a concise shortlist without performing any new search.
+        """
         state = runtime.state if runtime else {}
         shortlist = [item.model_dump() for item in build_shortlist(state.get("active_branch"), state.get("slots") or {}, state.get("material_candidates") or [])]
         payload = {"shortlist": shortlist}
@@ -1406,7 +2170,11 @@ def build_solution_shortlist_tool():
 def build_followup_pack_tool():
     @tool("build_followup_pack")
     def build_followup_pack(runtime: ToolRuntime = None) -> Command:
-        """Build a deterministic next-step package from the current material context."""
+        """Build a deterministic next-step package from the current material context.
+
+        Use this tool after the relevant materials and branch context are already in place and
+        you need a structured follow-up package rather than more retrieval.
+        """
         state = runtime.state if runtime else {}
         followup = build_followup(
             state.get("active_branch"),

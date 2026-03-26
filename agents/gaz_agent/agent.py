@@ -73,6 +73,7 @@ from .tools import (
     build_sales_landscape_tool,
     build_search_sales_materials_tool,
     build_solution_shortlist_tool,
+    parse_allowed_product_names_env,
 )
 
 LOG = logging.getLogger(__name__)
@@ -1436,6 +1437,7 @@ def initialize_agent(
     if not pricing_prompt_context_path.is_absolute():
         pricing_prompt_context_path = (_REPO_ROOT / pricing_prompt_context_path).resolve()
     pricing_prompt_context = pricing_prompt_context_path.read_text(encoding="utf-8")
+    allowed_family_ids = parse_allowed_product_names_env(os.environ.get("GAZ_AGENT_ALLOWED_PRODUCT_NAMES"))
     pricing_bi_init_context = {
         "database_url": pricing_db_url,
         "database_prompt_context": pricing_prompt_context,
@@ -1463,19 +1465,21 @@ def initialize_agent(
 
     tool_registry: Dict[str, Any] = {
         "get_sales_catalog_overview": build_sales_catalog_overview_tool(locale_key),
-        "get_sales_landscape": build_sales_landscape_tool(locale_key, docs_client),
-        "compare_product_directions": build_compare_product_directions_tool(locale_key, docs_client),
-        "collect_product_snapshot": build_collect_product_snapshot_tool(locale_key, docs_client),
-        "search_sales_materials": build_search_sales_materials_tool(docs_client),
-        "read_material": build_read_material_tool(docs_client),
+        "get_sales_landscape": build_sales_landscape_tool(locale_key, docs_client, allowed_family_ids),
+        "compare_product_directions": build_compare_product_directions_tool(locale_key, docs_client, allowed_family_ids),
+        "collect_product_snapshot": build_collect_product_snapshot_tool(locale_key, docs_client, allowed_family_ids),
+        "search_sales_materials": build_search_sales_materials_tool(locale_key, docs_client, allowed_family_ids),
+        "read_material": build_read_material_tool(locale_key, docs_client, allowed_family_ids),
         "classify_problem_branch": build_classify_problem_branch_tool(locale_key),
-        "get_branch_pack": build_branch_pack_tool(docs_client),
+        "get_branch_pack": build_branch_pack_tool(locale_key, docs_client, allowed_family_ids),
         "build_solution_shortlist": build_solution_shortlist_tool(),
         "build_followup_pack": build_followup_pack_tool(),
         "query_pricing_bi": build_query_pricing_bi_tool(
+            locale_key,
             pricing_bi_agent,
             dict(pricing_bi_init_context),
             _PRICING_BI_THREAD_SUFFIX,
+            allowed_family_ids,
         ),
     }
     sales_response_agent = _build_sales_response_agent(
