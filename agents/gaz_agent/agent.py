@@ -584,43 +584,48 @@ def _tool_call_id(value: Any) -> str:
 
 
 def _sanitize_messages_for_followup(messages: List[Any]) -> tuple[List[Any], List[str]]:
-    resolved_tool_call_ids = {
-        clean_text(getattr(message, "tool_call_id", ""))
-        for message in messages
-        if isinstance(message, ToolMessage) and clean_text(getattr(message, "tool_call_id", ""))
-    }
     sanitized: List[Any] = []
     pruned_ids: List[str] = []
-    for message in messages:
+    idx = 0
+    total = len(messages)
+    while idx < total:
+        message = messages[idx]
+        if isinstance(message, ToolMessage):
+            break
         if not isinstance(message, AIMessage):
             sanitized.append(message)
+            idx += 1
             continue
         tool_calls = list(getattr(message, "tool_calls", []) or [])
         if not tool_calls:
             sanitized.append(message)
+            idx += 1
             continue
-        resolved_calls = [call for call in tool_calls if _tool_call_id(call) in resolved_tool_call_ids]
-        unresolved_ids = [
-            tool_call_id
-            for call in tool_calls
-            if (tool_call_id := _tool_call_id(call)) not in resolved_tool_call_ids
-        ]
-        if not unresolved_ids:
-            sanitized.append(message)
-            continue
-        pruned_ids.extend(unresolved_ids)
-        text_content = extract_text(message)
-        if not resolved_calls and not clean_text(text_content):
-            continue
-        sanitized.append(
-            message.model_copy(
-                update={
-                    "content": text_content,
-                    "tool_calls": resolved_calls,
-                    "invalid_tool_calls": [],
-                }
-            )
-        )
+
+        required_ids = [_tool_call_id(call) for call in tool_calls if _tool_call_id(call)]
+        if not required_ids:
+            break
+
+        pending_ids = set(required_ids)
+        segment: List[Any] = [message]
+        cursor = idx + 1
+        while cursor < total and isinstance(messages[cursor], ToolMessage):
+            tool_message = messages[cursor]
+            tool_call_id = clean_text(getattr(tool_message, "tool_call_id", ""))
+            if tool_call_id not in pending_ids:
+                break
+            pending_ids.remove(tool_call_id)
+            segment.append(tool_message)
+            cursor += 1
+            if not pending_ids:
+                break
+
+        if pending_ids:
+            pruned_ids.extend(required_ids)
+            break
+
+        sanitized.extend(segment)
+        idx = cursor
     deduped_pruned_ids = list(dict.fromkeys(pruned_ids))
     return sanitized, deduped_pruned_ids
 
