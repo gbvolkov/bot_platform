@@ -597,6 +597,15 @@ def _derive_sales_loop_guard_reason(
 
 
 
+def _recover_checkpoint_result(agent: Any, config: RunnableConfig) -> Dict[str, Any]:
+    get_state = getattr(agent, "get_state", None)
+    if not callable(get_state):
+        return {}
+    snapshot = get_state(config)
+    values = _to_dict(getattr(snapshot, "values", None))
+    return values if isinstance(values, dict) else {}
+
+
 def _invoke_agent_with_retry(
     agent,
     state: GazAgentState,
@@ -627,6 +636,34 @@ def _invoke_agent_with_retry(
             LOG.warning("Agent invoke failed stage=%s attempt=%s error=%s", stage_name, attempt, exc)
             warning_code = "graph_recursion_limit" if isinstance(exc, GraphRecursionError) else "invoke_exception"
             warnings.append(_runtime_warning(stage_name, warning_code, str(exc), attempt))
+            if isinstance(exc, GraphRecursionError):
+                try:
+                    recovered = _recover_checkpoint_result(agent, internal_config)
+                except Exception as recovery_exc:
+                    LOG.warning(
+                        "Checkpoint recovery failed stage=%s attempt=%s error=%s",
+                        stage_name,
+                        attempt,
+                        recovery_exc,
+                    )
+                    warnings.append(
+                        _runtime_warning(
+                            stage_name,
+                            "checkpoint_recovery_failed",
+                            str(recovery_exc),
+                            attempt,
+                        )
+                    )
+                else:
+                    if recovered:
+                        last_result = recovered
+                        warnings.append(
+                            _runtime_warning(
+                                stage_name,
+                                "checkpoint_recovered_after_recursion_limit",
+                                attempt=attempt,
+                            )
+                        )
             if non_retryable_exceptions and isinstance(exc, non_retryable_exceptions):
                 break
             continue
@@ -662,6 +699,8 @@ def _invoke_agent_with_retry(
                 warnings.append(_runtime_warning(stage_name, "sales_loop_guarded", guard_reason, attempt))
                 break
         warnings.append(_runtime_warning(stage_name, "empty_answer", attempt=attempt))
+    if last_result and not expects_structured and not clean_text(answer):
+        answer = _last_ai_text(list(last_result.get("messages") or []))
     return last_result, {}, clean_text(answer), warnings
 
 def _tool_contract_sections(locale: str, state: GazAgentState) -> List[str]:
