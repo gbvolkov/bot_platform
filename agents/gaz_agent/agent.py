@@ -577,6 +577,54 @@ def _extract_tool_limit_hits(messages: List[Any]) -> List[Dict[str, Any]]:
     return hits
 
 
+def _tool_call_id(value: Any) -> str:
+    if isinstance(value, dict):
+        return clean_text(value.get("id"))
+    return clean_text(getattr(value, "id", ""))
+
+
+def _sanitize_messages_for_followup(messages: List[Any]) -> tuple[List[Any], List[str]]:
+    resolved_tool_call_ids = {
+        clean_text(getattr(message, "tool_call_id", ""))
+        for message in messages
+        if isinstance(message, ToolMessage) and clean_text(getattr(message, "tool_call_id", ""))
+    }
+    sanitized: List[Any] = []
+    pruned_ids: List[str] = []
+    for message in messages:
+        if not isinstance(message, AIMessage):
+            sanitized.append(message)
+            continue
+        tool_calls = list(getattr(message, "tool_calls", []) or [])
+        if not tool_calls:
+            sanitized.append(message)
+            continue
+        resolved_calls = [call for call in tool_calls if _tool_call_id(call) in resolved_tool_call_ids]
+        unresolved_ids = [
+            tool_call_id
+            for call in tool_calls
+            if (tool_call_id := _tool_call_id(call)) not in resolved_tool_call_ids
+        ]
+        if not unresolved_ids:
+            sanitized.append(message)
+            continue
+        pruned_ids.extend(unresolved_ids)
+        text_content = extract_text(message)
+        if not resolved_calls and not clean_text(text_content):
+            continue
+        sanitized.append(
+            message.model_copy(
+                update={
+                    "content": text_content,
+                    "tool_calls": resolved_calls,
+                    "invalid_tool_calls": [],
+                }
+            )
+        )
+    deduped_pruned_ids = list(dict.fromkeys(pruned_ids))
+    return sanitized, deduped_pruned_ids
+
+
 
 def _derive_sales_loop_guard_reason(
     state: GazAgentState,
@@ -1419,7 +1467,21 @@ def create_sales_response_node(sales_response_agent, sales_continue_agent):
         continue_state: GazAgentState = dict(state)
         continue_state.update({k: v for k, v in (result or {}).items() if k != "messages"})
         if (result or {}).get("messages"):
-            continue_state["messages"] = list(result.get("messages") or [])
+            sanitized_messages, pruned_tool_call_ids = _sanitize_messages_for_followup(
+                list(result.get("messages") or [])
+            )
+            continue_state["messages"] = sanitized_messages
+            if pruned_tool_call_ids:
+                merged_warnings = _merge_runtime_warnings(
+                    {"runtime_warnings": merged_warnings},
+                    [
+                        _runtime_warning(
+                            "gaz:sales_response",
+                            "dangling_tool_calls_removed_before_continue",
+                            json.dumps(pruned_tool_call_ids, ensure_ascii=False),
+                        )
+                    ],
+                )
         continue_state["runtime_warnings"] = merged_warnings
         continue_state["tool_limit_hits"] = tool_limit_hits
         continue_state["sales_loop_guard_reason"] = loop_stop_reason or clean_text(continue_state.get("sales_loop_guard_reason")) or None
