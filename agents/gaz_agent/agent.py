@@ -225,6 +225,8 @@ _QUESTION_POLICY_MARKERS = (
     "email",
 )
 
+_DEFAULT_INTERNAL_RECURSION_LIMIT = 50
+
 
 
 def _is_question_policy_violation(violation: str) -> bool:
@@ -630,6 +632,8 @@ def _invoke_agent_with_retry(
         if attempt == 2:
             tags.append("retry")
         internal_config = build_internal_invoke_config(config, extra_tags=tags)
+        if not isinstance(internal_config.get("recursion_limit"), int):
+            internal_config["recursion_limit"] = _DEFAULT_INTERNAL_RECURSION_LIMIT
         try:
             result = agent.invoke(invoke_state, config=internal_config, context=getattr(runtime, "context", None))
         except Exception as exc:
