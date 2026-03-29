@@ -568,7 +568,7 @@ def derive_work_mode(intent: ClientIntent, answer_depth: AnswerDepth) -> GazStag
 
 
 def build_allowed_tool_names(intent: ClientIntent, answer_depth: AnswerDepth, work_mode: GazStage) -> List[str]:
-    allowed = ["query_pricing_bi", "get_sales_catalog_overview"]
+    allowed = ["query_pricing_bi", "web_search", "get_sales_catalog_overview"]
     if intent in {"overview", "financing", "recommendation", "next_step"}:
         allowed.append("get_sales_landscape")
     if intent in {"compare", "objection", "recommendation"}:
@@ -631,7 +631,10 @@ def select_active_tool_names(
     has_followup: bool = False,
 ) -> List[str]:
     planned = list(planned_tools or build_allowed_tool_names(intent, answer_depth, work_mode))
-    active: List[str] = ["query_pricing_bi"] if "query_pricing_bi" in planned else []
+    active: List[str] = []
+    for tool_name in ("query_pricing_bi", "web_search"):
+        if tool_name in planned:
+            active.append(tool_name)
 
     if intent == "overview":
         for tool_name in ("get_sales_catalog_overview", "get_sales_landscape"):
