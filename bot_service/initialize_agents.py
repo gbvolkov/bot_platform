@@ -91,11 +91,19 @@ def load_config() -> dict[str, Any]:
 
 
 def find_config_path() -> Path:
-    candidates = [Path("load.yaml"), Path("load.json")]
+    candidates = [
+        Path("load.yaml"),
+        Path("load.json"),
+        Path("data/config/bot_service/load.yaml"),
+        Path("data/config/bot_service/load.json"),
+    ]
     for candidate in candidates:
         if candidate.exists():
             return candidate
-    raise FileNotFoundError("Expected load.yaml or load.json in the working directory.")
+    raise FileNotFoundError(
+        "Expected load.yaml, load.json, data/config/bot_service/load.yaml, or "
+        "data/config/bot_service/load.json."
+    )
 
 
 def parse_yaml(text: str) -> dict[str, Any]:

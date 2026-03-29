@@ -81,7 +81,7 @@ Fixed service behavior in code:
 
 Not used by the standalone GAZ documents service:
 
-- `data/load.json`
+- `data/config/bot_service/load.json`
 - `BOT_SERVICE_*`
 - `GAZ_DOCUMENTS_SERVICE_URL`
 

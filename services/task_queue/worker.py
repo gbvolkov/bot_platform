@@ -133,6 +133,18 @@ async def _process_job(
                         QueueEvent(job_id=payload.job_id, type="chunk", content=content)
                     )
                     await queue.update_heartbeat(payload.job_id, status=current_status())
+                elif event_type == "custom":
+                    if not stream_started:
+                        await queue.mark_status(payload.job_id, "streaming")
+                        job_stage["value"] = "streaming"
+                        await queue.publish_event(
+                            QueueEvent(job_id=payload.job_id, type="status", status="streaming")
+                        )
+                        stream_started = True
+                    await queue.publish_event(
+                        QueueEvent(job_id=payload.job_id, type="custom", data=event.get("data"))
+                    )
+                    await queue.update_heartbeat(payload.job_id, status=current_status())
                 elif event_type in {"completed", "interrupt", "failed"}:
                     final_event = event
                     break

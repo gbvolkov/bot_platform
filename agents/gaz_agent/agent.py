@@ -73,6 +73,7 @@ from .tools import (
     build_sales_landscape_tool,
     build_search_sales_materials_tool,
     build_solution_shortlist_tool,
+    build_web_search_tool,
     format_allowed_product_names,
     parse_allowed_product_names_env,
 )
@@ -108,6 +109,7 @@ _TOOL_PROMPT_KEYS = {
     "build_solution_shortlist": "tool_shortlist",
     "build_followup_pack": "tool_followup",
     "query_pricing_bi": "tool_pricing_bi",
+    "web_search": "tool_web_search",
 }
 
 
@@ -664,7 +666,7 @@ def _invoke_agent_with_retry(
 
 def _tool_contract_sections(locale: str, state: GazAgentState) -> List[str]:
     sections = [get_prompt(locale, "tool_rules")]
-    prompt_keys: List[str] = ["tool_pricing_bi"]
+    prompt_keys: List[str] = ["tool_pricing_bi", "tool_web_search"]
     for tool_name in state.get("allowed_tool_names") or []:
         key = _TOOL_PROMPT_KEYS.get(tool_name)
         if key:
@@ -816,7 +818,7 @@ def _build_sales_response_agent(
             ToolCallLimitMiddleware(tool_name="search_sales_materials", run_limit=3, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name="read_material", run_limit=4, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name="get_branch_pack", run_limit=1, exit_behavior="continue"),
-            SalesToolSelectionMiddleware(tool_registry, always_available_tool_names=["query_pricing_bi"]),
+            SalesToolSelectionMiddleware(tool_registry, always_available_tool_names=["query_pricing_bi", "web_search"]),
             prompt,
         ],
         state_schema=GazAgentState,
@@ -1593,6 +1595,7 @@ def initialize_agent(
             _PRICING_BI_THREAD_SUFFIX,
             allowed_family_ids,
         ),
+        "web_search": build_web_search_tool(locale_key, config.YA_API_KEY, config.YA_FOLDER_ID),
     }
     sales_response_agent = _build_sales_response_agent(
         base_llm,

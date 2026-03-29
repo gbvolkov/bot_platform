@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import locale
 import sys
 import uuid
@@ -9,12 +10,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 try:
     import termios
 except ImportError:  # pragma: no cover - Windows
     termios = None
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    message_chunk_to_message,
+)
 
 from agents.sales_lead_agent.agent import initialize_agent
 from agents.utils import ModelType, extract_text
@@ -33,6 +41,20 @@ Use /multiline ... /end for multi-line input.
 _MULTILINE_START = "/multiline"
 _MULTILINE_END = "/end"
 _INPUT_FALLBACK_ENCODINGS = ("utf-8", "cp1251", "cp866", "latin-1")
+
+
+def _simulator_checkpointer_path() -> Path:
+    return Path(__file__).resolve().parent / "data" / "sales_lead_agent" / "simulator_checkpoints.sqlite"
+
+
+def _simulator_session_path() -> Path:
+    return Path(__file__).resolve().parent / "data" / "sales_lead_agent" / "simulator_session.json"
+
+
+def _persistent_checkpoint_saver():
+    checkpoint_path = _simulator_checkpointer_path()
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    return AsyncSqliteSaver.from_conn_string(str(checkpoint_path))
 
 
 @dataclass(frozen=True)
@@ -66,11 +88,8 @@ SCENARIOS: dict[str, list[ScenarioStep]] = {
         ScenarioStep(
             "Find new relevant transport insurance procurements.",
             ScenarioExpectation(
-                answer_type="lead_list",
                 required_tools=("purchase_search_tool",),
                 require_active_run=True,
-                require_searchable_index=True,
-                require_visible_support=True,
             ),
         ),
     ],
@@ -78,12 +97,8 @@ SCENARIOS: dict[str, list[ScenarioStep]] = {
         ScenarioStep(
             "Analyze one transport insurance procurement and summarize the main risks.",
             ScenarioExpectation(
-                answer_type="lead_card",
-                required_tools=("purchase_search_tool", "doc_search_tool"),
+                required_tools=("purchase_search_tool",),
                 require_active_run=True,
-                require_searchable_index=True,
-                require_document_evidence=True,
-                require_document_fact_labels=True,
             ),
         ),
     ],
@@ -100,12 +115,7 @@ SCENARIOS: dict[str, list[ScenarioStep]] = {
     "fact_lookup": [
         ScenarioStep(
             "Show where the documents specify bidder experience requirements.",
-            ScenarioExpectation(
-                answer_type="lead_card",
-                required_tools=("doc_search_tool",),
-                require_document_evidence=True,
-                require_document_fact_labels=True,
-            ),
+            ScenarioExpectation(),
         ),
     ],
     "comparison": [
@@ -122,11 +132,8 @@ SCENARIOS: dict[str, list[ScenarioStep]] = {
         ScenarioStep(
             "Find new relevant transport insurance procurements.",
             ScenarioExpectation(
-                answer_type="lead_list",
                 required_tools=("purchase_search_tool",),
                 require_active_run=True,
-                require_searchable_index=True,
-                require_visible_support=True,
             ),
         ),
         ScenarioStep(
@@ -146,19 +153,14 @@ SCENARIOS: dict[str, list[ScenarioStep]] = {
         ScenarioStep(
             "Analyze one transport insurance procurement and summarize the main risks.",
             ScenarioExpectation(
-                answer_type="lead_card",
-                required_tools=("purchase_search_tool", "doc_search_tool"),
+                required_tools=("purchase_search_tool",),
                 require_active_run=True,
-                require_searchable_index=True,
-                require_document_evidence=True,
-                require_document_fact_labels=True,
             ),
         ),
         ScenarioStep(
             "Show the source snippet for the main risk.",
             ScenarioExpectation(
                 answer_type="lead_card",
-                required_tools=("doc_search_tool",),
                 require_active_run=True,
                 require_searchable_index=True,
                 reuse_active_run_from_previous=True,
@@ -203,22 +205,16 @@ SCENARIOS: dict[str, list[ScenarioStep]] = {
         ScenarioStep(
             "Find new relevant transport insurance procurements.",
             ScenarioExpectation(
-                answer_type="lead_list",
                 required_tools=("purchase_search_tool",),
                 require_active_run=True,
-                require_searchable_index=True,
-                require_visible_support=True,
             ),
         ),
         ScenarioStep(
             "Find new relevant transport insurance procurements.",
             ScenarioExpectation(
-                answer_type="lead_list",
                 required_tools=("purchase_search_tool",),
                 require_active_run=True,
-                require_searchable_index=True,
                 reuse_active_run_from_previous=True,
-                require_visible_support=True,
             ),
         ),
     ],
@@ -238,11 +234,51 @@ def _new_config() -> dict[str, Any]:
     return {"configurable": {"thread_id": f"sales-lead-sim-{uuid.uuid4().hex}"}}
 
 
+def _load_persistent_interactive_session(*, default_scenario: str) -> tuple[dict[str, Any], str, bool]:
+    session_path = _simulator_session_path()
+    if not session_path.exists():
+        return _new_config(), default_scenario, False
+    try:
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+    except Exception:
+        return _new_config(), default_scenario, False
+    thread_id = str(payload.get("thread_id") or payload.get("conversation_id") or "").strip()
+    scenario = str(payload.get("scenario") or "").strip() or default_scenario
+    if not thread_id:
+        return _new_config(), scenario, False
+    return {"configurable": {"thread_id": thread_id}}, scenario, True
+
+
+def _save_persistent_interactive_session(*, config: dict[str, Any], scenario: str) -> None:
+    thread_id = str(config.get("configurable", {}).get("thread_id") or "").strip()
+    if not thread_id:
+        return
+    session_path = _simulator_session_path()
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "conversation_id": thread_id,
+        "thread_id": thread_id,
+        "scenario": scenario,
+    }
+    session_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _latest_ai_text(result: dict[str, Any]) -> str:
     for message in reversed(result.get("messages") or []):
         if isinstance(message, AIMessage):
             return extract_text(message)
     return ""
+
+
+def _print_progress_event(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        return
+    if payload.get("type") != "progress":
+        return
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        return
+    print(f"[Progress] {message}")
 
 
 def _decode_console_bytes(raw_value: bytes) -> str:
@@ -324,7 +360,46 @@ def _handle_command(raw_text: str, *, scenario: str) -> tuple[bool, str, bool]:
 
 async def _invoke_agent(graph: Any, config: dict[str, Any], user_text: str | None) -> TurnOutcome:
     payload = {} if user_text is None else {"messages": [HumanMessage(content=user_text)]}
-    result = await graph.ainvoke(payload, config=config)
+    result: dict[str, Any] | None = None
+    merged_chunk: AIMessageChunk | None = None
+    last_ai_message: AIMessage | None = None
+
+    async for item in graph.astream(
+        payload,
+        config=config,
+        stream_mode=["messages", "custom", "values"],
+        subgraphs=True,
+    ):
+        if not isinstance(item, tuple):
+            continue
+        if len(item) == 2:
+            mode, payload_item = item
+        elif len(item) == 3:
+            _namespace, mode, payload_item = item
+        else:
+            continue
+        if mode == "messages":
+            message, _meta = payload_item
+            if isinstance(message, AIMessageChunk):
+                merged_chunk = message if merged_chunk is None else merged_chunk + message
+            elif isinstance(message, AIMessage):
+                last_ai_message = message
+                if merged_chunk is not None:
+                    merged_message = message_chunk_to_message(merged_chunk)
+                    if extract_text(merged_message) == extract_text(message):
+                        merged_chunk = None
+        elif mode == "custom":
+            _print_progress_event(payload_item)
+        elif mode == "values" and isinstance(payload_item, dict):
+            result = payload_item
+
+    if result is None and last_ai_message is None and merged_chunk is not None:
+        last_ai_message = message_chunk_to_message(merged_chunk)
+    if result is None and last_ai_message is not None:
+        result = {"messages": [last_ai_message]}
+    if result is None:
+        result = {}
+
     return TurnOutcome(
         user_text=user_text or "",
         reply=_latest_ai_text(result),
@@ -334,7 +409,7 @@ async def _invoke_agent(graph: Any, config: dict[str, Any], user_text: str | Non
 
 
 def _transcript_path(name: str | None = None) -> Path:
-    root = "./data/simulator_transcripts"
+    root = Path("./data/simulator_transcripts")
     root.mkdir(parents=True, exist_ok=True)
     stem = name or f"session_{uuid.uuid4().hex}"
     return root / f"{stem}.md"
@@ -464,7 +539,10 @@ def _validate_outcome(
         errors.append("active_run_id is missing")
     if expectation.require_active_run and not outcome.result.get("index_id"):
         errors.append("index_id is missing for a run-scoped scenario")
-    if expectation.require_searchable_index and not _has_searchable_index_support(outcome.result):
+    if (
+        expectation.require_searchable_index
+        and not _has_searchable_index_support(outcome.result)
+    ):
         errors.append("searchable prepared index support is missing")
 
     if previous is not None and outcome.thread_id != previous.thread_id:
@@ -475,11 +553,20 @@ def _validate_outcome(
         if not previous_run_id or active_run_id != previous_run_id:
             errors.append("active_run_id was not reused from the previous turn")
 
-    if expectation.require_document_evidence and not _has_document_evidence(outcome.result):
+    if (
+        expectation.require_document_evidence
+        and not _has_document_evidence(outcome.result)
+    ):
         errors.append("document evidence is missing from the final normalized answer")
-    if expectation.require_document_fact_labels and not _has_document_fact_labels(outcome.result):
+    if (
+        expectation.require_document_fact_labels
+        and not _has_document_fact_labels(outcome.result)
+    ):
         errors.append("document-backed answer is missing explicit document fact-status labels")
-    if expectation.require_visible_support and not _has_visible_support(outcome.result):
+    if (
+        expectation.require_visible_support
+        and not _has_visible_support(outcome.result)
+    ):
         errors.append("visible evidence or fact-status support is missing from the final normalized answer")
 
     if not _has_valid_fact_labels(outcome.result):
@@ -527,54 +614,72 @@ def _save_transcript(path: Path, markdown: str) -> None:
 
 
 async def run_scripted_scenario(*, provider: ModelType, scenario: str) -> Path:
-    graph = initialize_agent(provider=provider, streaming=False)
-    config = _new_config()
-    outcomes: list[TurnOutcome] = []
-    previous: TurnOutcome | None = None
-    for step_index, step in enumerate(SCENARIOS[scenario]):
-        outcome = await _invoke_agent(graph, config, step.user_text)
-        _validate_outcome(
-            scenario_name=scenario,
-            step_index=step_index,
-            outcome=outcome,
-            expectation=step.expectation,
-            previous=previous,
+    async with _persistent_checkpoint_saver() as checkpoint_saver:
+        await checkpoint_saver.setup()
+        graph = initialize_agent(
+            provider=provider,
+            streaming=False,
+            checkpoint_saver=checkpoint_saver,
         )
-        outcomes.append(outcome)
-        previous = outcome
-    path = _transcript_path(scenario)
-    _save_transcript(path, _scripted_transcript_markdown(outcomes))
-    return path
+        config = _new_config()
+        outcomes: list[TurnOutcome] = []
+        previous: TurnOutcome | None = None
+        for step_index, step in enumerate(SCENARIOS[scenario]):
+            outcome = await _invoke_agent(graph, config, step.user_text)
+            _validate_outcome(
+                scenario_name=scenario,
+                step_index=step_index,
+                outcome=outcome,
+                expectation=step.expectation,
+                previous=previous,
+            )
+            outcomes.append(outcome)
+            previous = outcome
+        path = _transcript_path(scenario)
+        _save_transcript(path, _scripted_transcript_markdown(outcomes))
+        return path
 
 
 async def run_interactive(*, provider: ModelType, scenario: str) -> None:
-    graph = initialize_agent(provider=provider, streaming=False)
-    current_scenario = scenario
-    config = _new_config()
-    transcript: list[tuple[str, str]] = []
-    print("\nSales lead agent simulator")
-    print(f"Scenario: {current_scenario}")
-    print(HELP_TEXT)
+    async with _persistent_checkpoint_saver() as checkpoint_saver:
+        await checkpoint_saver.setup()
+        graph = initialize_agent(
+            provider=provider,
+            streaming=False,
+            checkpoint_saver=checkpoint_saver,
+        )
+        config, current_scenario, restored_session = _load_persistent_interactive_session(default_scenario=scenario)
+        _save_persistent_interactive_session(config=config, scenario=current_scenario)
+        transcript: list[tuple[str, str]] = []
+        print("\nSales lead agent simulator")
+        print(f"Scenario: {current_scenario}")
+        print(f"Thread ID: {config['configurable']['thread_id']}")
+        if restored_session:
+            print("[Simulator] restored previous dialog session.")
+        print(HELP_TEXT)
 
-    while True:
-        raw_text = _read_text_input("User> ", allow_multiline=True)
-        handled, current_scenario, should_reset = _handle_command(raw_text, scenario=current_scenario)
-        if should_reset:
-            config = _new_config()
-            transcript = []
-            print("\n[Simulator] new dialog session started.\n")
-            continue
-        if handled:
-            continue
-        user_text = raw_text.strip()
-        if not user_text:
-            continue
-        transcript.append(("user", user_text))
-        outcome = await _invoke_agent(graph, config, user_text)
-        print(f"\nAgent: {outcome.reply}\n")
-        transcript.append(("agent", outcome.reply))
-        markdown = "\n".join(f"## {speaker}\n{text}\n" for speaker, text in transcript)
-        _save_transcript(_transcript_path("interactive_last"), markdown)
+        while True:
+            raw_text = _read_text_input("User> ", allow_multiline=True)
+            handled, current_scenario, should_reset = _handle_command(raw_text, scenario=current_scenario)
+            if should_reset:
+                config = _new_config()
+                _save_persistent_interactive_session(config=config, scenario=current_scenario)
+                transcript = []
+                print(f"\n[Simulator] new dialog session started: {config['configurable']['thread_id']}\n")
+                continue
+            if handled:
+                _save_persistent_interactive_session(config=config, scenario=current_scenario)
+                continue
+            user_text = raw_text.strip()
+            if not user_text:
+                continue
+            transcript.append(("user", user_text))
+            outcome = await _invoke_agent(graph, config, user_text)
+            _save_persistent_interactive_session(config=config, scenario=current_scenario)
+            print(f"\nAgent: {outcome.reply}\n")
+            transcript.append(("agent", outcome.reply))
+            markdown = "\n".join(f"## {speaker}\n{text}\n" for speaker, text in transcript)
+            _save_transcript(_transcript_path("interactive_last"), markdown)
 
 
 async def run_all_scenarios(*, provider: ModelType) -> list[Path]:

@@ -18,12 +18,26 @@ This document describes how to set up the development environment from scratch, 
 | Python 3.13 | The repo targets 3.13. Use [`uv`](https://github.com/astral-sh/uv) or `pyenv` to install. |
 | Redis 7+    | Required for the task queue / PubSub. Default URI `redis://localhost:6380/0`. |
 | MySQL 8+ or MariaDB 10.5+ | `bot_service` persists data via SQLAlchemy + `aiomysql`. |
+| 7-Zip CLI (`7z` or `7zz`) | Required for archive extraction in document ingestion, including `.zip`, `.rar`, and `.arj`. |
 | Git, Make (optional) | For repository management and helper scripts. |
 
 Install `uv` (recommended) if you have not already:
 
 ```bash
 pip install uv
+```
+
+Install the 7-Zip command-line tool and ensure `7z` or `7zz` is on `PATH`:
+
+```bash
+# Ubuntu / Debian
+sudo apt-get update
+sudo apt-get install -y p7zip-full
+```
+
+```powershell
+# Windows
+winget install 7zip.7zip
 ```
 
 ---
@@ -63,6 +77,10 @@ Create `.env` in the repo root with:
 # Bot service database (MySQL / MariaDB)
 BOT_SERVICE_DATABASE_URL=mysql+aiomysql://username:password@localhost:3306/bot_platform
 
+# Sales lead retrieval service database (kept separate from bot_service)
+SALES_LEAD_RETRIEVAL_SERVICE_DATABASE_URL=sqlite+aiosqlite:///data/sales_lead_retrieval.sqlite
+SALES_LEAD_RETRIEVAL_SERVICE_BASE_URL=http://localhost:8010/api
+
 # Redis connection for task queue / PubSub
 TASK_QUEUE_REDIS_URL=redis://localhost:6380/0
 
@@ -86,6 +104,19 @@ GEMINI_API_KEY=...
 ```
 
 The legacy `gv.env` file (referenced in `config.py`) should also reside either in the project root or `%USERPROFILE%/.env/gv.env` with secrets such as database passwords or provider API keys.
+
+For `sales_lead_agent` Damia integrations, keep the API credentials in `gv.env` rather than `.env`:
+
+```dotenv
+DADATA_API_KEY=<dadata-api-key>
+SALES_LEAD_AGENT_DAMIA_SCORING_API_KEY=<damia-scoring-api-key>
+SALES_LEAD_AGENT_DAMIA_FSSP_API_KEY=<damia-fssp-api-key>
+SALES_LEAD_AGENT_SCORING_BASE_URL=https://api.damia.ru
+SALES_LEAD_AGENT_FSSP_BASE_URL=https://api.damia.ru
+SALES_LEAD_AGENT_SCORING_DEFAULT_MODEL=_problemCredit
+```
+
+Use the bare Damia API host as the base URL. The agent appends `/scoring/score`, `/scoring/fincoefs`, and `/fssp/isps` itself.
 
 ### 3.2 Database Bootstrapping
 
@@ -136,7 +167,30 @@ python -m services.task_queue.worker
 
 Ensure the environment variables (Redis URL, bot service base URL) are visible to this process.
 
-### 4.3 OpenAI-Compatible Proxy
+### 4.3 Sales Lead Retrieval Service
+
+`sales_lead_agent` procurement retrieval now runs as a separate service with its own API and its
+own database. Start this API before using `purchase_search_tool`:
+
+```bash
+uvicorn services.sales_lead_retrieval.main:app --reload --host 0.0.0.0 --port 8010
+```
+
+`bot_service` and the sales lead agent talk to this service over HTTP via
+`SALES_LEAD_RETRIEVAL_SERVICE_BASE_URL`. The retrieval service owns procurement retrieval jobs,
+job events, and retrieval status snapshots; `bot_service` no longer stores or queries those tables.
+
+### 4.4 Sales Lead Retrieval Worker
+
+The retrieval worker consumes queued procurement jobs from the retrieval service database, crawls
+`zakupki.gov.ru`, parses artifacts, and incrementally updates the shared document index plus the
+retrieval status snapshots exposed by the retrieval service API.
+
+```bash
+python -m services.sales_lead_retrieval.worker
+```
+
+### 4.5 OpenAI-Compatible Proxy
 
 ```bash
 uvicorn openai_proxy.main:app --reload --host 0.0.0.0 --port 8080

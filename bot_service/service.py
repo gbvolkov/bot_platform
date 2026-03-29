@@ -159,6 +159,7 @@ async def invoke_agent(
     user_id: str,
     user_role: Optional[str],
     pending_interrupt: Optional[Dict[str, Any]] = None,
+    state_patch: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     raw_user_text = None
     raw_attachments: List[Dict[str, Any]] = []
@@ -183,13 +184,18 @@ async def invoke_agent(
             len(raw_user_text or payload.text or ""),
         )
         response = await agent.ainvoke(
-            Command(resume=raw_user_text or payload.text or ""),
+            Command(
+                resume=raw_user_text or payload.text or "",
+                update=state_patch or None,
+            ),
             config=config,
         )
     else:
         initial_state: Dict[str, Any] = {"messages": [human]}
         if raw_attachments:
             initial_state["attachments"] = raw_attachments
+        if state_patch:
+            initial_state.update(state_patch)
         response = await agent.ainvoke(initial_state, config=config)
 
     if isinstance(response, dict):
@@ -319,6 +325,7 @@ async def invoke_agent_stream(
     user_id: str,
     user_role: Optional[str],
     pending_interrupt: Optional[Dict[str, Any]] = None,
+    state_patch: Optional[Dict[str, Any]] = None,
 ) -> tuple[AsyncIterator[Dict[str, Any]], asyncio.Future]:
     raw_user_text = None
     raw_attachments: List[Dict[str, Any]] = []
@@ -364,7 +371,10 @@ async def invoke_agent_stream(
                     len(raw_user_text or payload.text or ""),
                 )
                 stream = agent.astream(
-                    Command(resume=raw_user_text or payload.text or ""),
+                    Command(
+                        resume=raw_user_text or payload.text or "",
+                        update=state_patch or None,
+                    ),
                     config=config,
                     stream_mode=stream_modes,
                     subgraphs=subgraph_stream,
@@ -373,6 +383,8 @@ async def invoke_agent_stream(
                 initial_state: Dict[str, Any] = {"messages": [human]}
                 if raw_attachments:
                     initial_state["attachments"] = raw_attachments
+                if state_patch:
+                    initial_state.update(state_patch)
                 stream = agent.astream(
                     initial_state,
                     config=config,

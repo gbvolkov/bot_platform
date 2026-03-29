@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     )
     api_base_path: str = Field(default="/api")
     agent_config_path: str = Field(
-        default="data/load.json",
+        default="data/config/bot_service/load.json",
         description="Path to JSON/YAML agent registry configuration.",
     )
 

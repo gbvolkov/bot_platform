@@ -18,11 +18,11 @@ Back to the [documentation index](../index.md).
 ## Agent registration and lifecycle
 
 - `bot_service/agent_registry.py`
-  - Loads agent definitions from `data/load.json`.
+  - Loads agent definitions from `data/config/bot_service/load.json`.
   - Tracks initialization state: `pending`, `initializing`, `ready`, `error`.
   - Stores per-agent attachment, streaming, and checkpoint-saver metadata.
 - `.env`
-  - Overrides `BOT_SERVICE_AGENT_CONFIG_PATH` to `./data/load.json`, making that file the live registry source in this repo.
+  - Overrides `BOT_SERVICE_AGENT_CONFIG_PATH` to `./data/config/bot_service/load.json`, making that file the live registry source in this repo.
 
 ## Shared state and config conventions
 

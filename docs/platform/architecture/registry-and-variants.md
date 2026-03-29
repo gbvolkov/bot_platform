@@ -4,14 +4,14 @@ Back to the [documentation index](../index.md).
 
 ## How the registry works
 
-- The live registry source in this repository is `data/load.json`.
-- `.env` sets `BOT_SERVICE_AGENT_CONFIG_PATH=./data/load.json`.
+- The live registry source in this repository is `data/config/bot_service/load.json`.
+- `.env` sets `BOT_SERVICE_AGENT_CONFIG_PATH=./data/config/bot_service/load.json`.
 - `bot_service/agent_registry.py` loads this file, imports the referenced module, and expects an `initialize_agent(...)` callable.
 - `/api/agents/` and `/v1/models` expose only ready agents, not every configured entry.
 
 ## Agent definition fields
 
-Each entry in `data/load.json` can define:
+Each entry in `data/config/bot_service/load.json` can define:
 
 - `id`
 - `name`

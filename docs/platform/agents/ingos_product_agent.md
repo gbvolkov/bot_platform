@@ -10,7 +10,7 @@ Product-knowledge assistant for Ingosstrakh products. Each registry variant sele
 
 - Implementation: `agents/ingos_product_agent/agent.py`
 - Contract: exposes `initialize_agent(provider, product, use_platform_store, checkpoint_saver, prefetch_top_k=3)`
-- Registry variants: all `product_*` IDs in `data/load.json`
+- Registry variants: all `product_*` IDs in `data/config/bot_service/load.json`
 
 ## State graph / phases / routing
 

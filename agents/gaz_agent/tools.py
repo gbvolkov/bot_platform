@@ -10,6 +10,7 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from agents.tools.yandex_search import YandexSearchTool
 from agents.utils import build_internal_invoke_config, extract_text
 
 from .documents import GazDocumentsClient
@@ -2305,6 +2306,132 @@ def build_query_pricing_bi_tool(
         )
 
     return query_pricing_bi
+
+
+def build_web_search_tool(
+    locale: str,
+    api_key: str | None,
+    folder_id: str | None,
+):
+    search_backend = YandexSearchTool(
+        api_key=api_key or "",
+        folder_id=folder_id or "",
+        max_results=3,
+        summarize=True,
+    )
+
+    @tool("web_search", parse_docstring=True)
+    def web_search(query: str, runtime: ToolRuntime = None) -> Command:
+        """Search the public web with Yandex when the user explicitly asks for internet sources.
+
+        Use this tool only when the user directly asks to search the internet, check external
+        sources, or verify something on the web. Do not use it for internal product questions
+        that can be answered from the existing GAZ tools and materials.
+
+        Args:
+            query: A concise web search query describing what should be looked up online.
+        """
+        state = runtime.state if runtime else {}
+        resolved_query = clean_text(query)
+        _debug_tool_call("web_search", {"query": resolved_query})
+
+        if not resolved_query:
+            payload = {
+                "status": "error",
+                "error_code": "empty_query",
+                "message": "Web search query is empty.",
+            }
+            _debug_tool_result("web_search", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:web_search",
+                        code="empty_query",
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "web_search"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        if not api_key or not folder_id:
+            payload = {
+                "status": "error",
+                "error_code": "web_search_not_configured",
+                "message": "Yandex web search is not configured for this agent.",
+                "query": resolved_query,
+            }
+            _debug_tool_result("web_search", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:web_search",
+                        code="web_search_not_configured",
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "web_search"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        try:
+            answer = clean_text(search_backend.invoke({"query": resolved_query}))
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("Web search tool failed: %s", exc)
+            payload = {
+                "status": "error",
+                "error_code": "web_search_failed",
+                "message": str(exc),
+                "query": resolved_query,
+            }
+            _debug_tool_result("web_search", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:web_search",
+                        code="web_search_failed",
+                        detail=str(exc),
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "web_search"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        if not answer:
+            payload = {
+                "status": "error",
+                "error_code": "web_search_empty_response",
+                "message": "Yandex web search returned an empty response.",
+                "query": resolved_query,
+            }
+            _debug_tool_result("web_search", payload)
+            return Command(
+                update={
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:web_search",
+                        code="web_search_empty_response",
+                    ),
+                    "tool_calls_this_turn": _append_tool_call(state, "web_search"),
+                    "messages": _tool_message(payload, runtime),
+                }
+            )
+
+        payload = {
+            "status": "ok",
+            "query": resolved_query,
+            "answer": answer,
+        }
+        _debug_tool_result("web_search", payload)
+        return Command(
+            update={
+                "tool_calls_this_turn": _append_tool_call(state, "web_search"),
+                "messages": _tool_message(payload, runtime),
+            }
+        )
+
+    return web_search
 
 
 def build_solution_shortlist_tool():

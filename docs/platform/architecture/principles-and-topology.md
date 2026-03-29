@@ -10,12 +10,12 @@ This section is based primarily on:
 - `openai_proxy/main.py`, `openai_proxy/schemas.py`, `openai_proxy/utils.py`
 - `services/task_queue/*`
 - `agents/*`, `agents/utils.py`, `agents/llm_utils.py`
-- `.env`, `data/load.json`, `models.toml`
+- `.env`, `data/config/bot_service/load.json`, `models.toml`
 
 ## Architectural principles
 
 - Configuration drives exposure.
-  - Agents are registered from `data/load.json` through `BOT_SERVICE_AGENT_CONFIG_PATH`; implementation folders and exposed agent IDs are intentionally separate concepts.
+  - Agents are registered from `data/config/bot_service/load.json` through `BOT_SERVICE_AGENT_CONFIG_PATH`; implementation folders and exposed agent IDs are intentionally separate concepts.
 - Platform boundaries are explicit.
   - `bot_service` owns conversations and synchronous invocation.
   - `openai_proxy` owns OpenAI-compatible request/response shaping.

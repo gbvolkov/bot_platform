@@ -23,7 +23,7 @@ def _resolve_path(value: str) -> Path:
 
 
 def _default_registry_path() -> str:
-    return os.environ.get("BOT_SERVICE_AGENT_CONFIG_PATH", "data/load.json")
+    return os.environ.get("BOT_SERVICE_AGENT_CONFIG_PATH", "data/config/bot_service/load.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--registry-path",
         default=_default_registry_path(),
-        help="Agent registry path. Default: BOT_SERVICE_AGENT_CONFIG_PATH or data/load.json",
+        help="Agent registry path. Default: BOT_SERVICE_AGENT_CONFIG_PATH or data/config/bot_service/load.json",
     )
     parser.add_argument("--collection-id", default="gaz", help="Document collection id. Default: gaz")
     parser.add_argument("--docs-root", default="data/gaz-docs", help="Source documents directory. Default: data/gaz-docs")

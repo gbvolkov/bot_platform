@@ -49,7 +49,7 @@ _SKIP_CHECKPOINTER = object()
 
 def _resolve_config_path(raw_path: str | None) -> Path:
     if not raw_path:
-        raw_path = "data/load.json"
+        raw_path = "data/config/bot_service/load.json"
     path = Path(raw_path)
     if path.is_absolute():
         return path

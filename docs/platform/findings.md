@@ -8,7 +8,7 @@ This page captures a repository survey of `C:\Projects\bot_platform` as of March
 
 - The current request path is `openai_proxy` -> Redis-backed `services/task_queue` -> `bot_service` -> agent implementation, with the worker also republishing streaming progress and terminal events.
 - `bot_service` is the internal control plane: it initializes persistence, preloads active agents, exposes `/api/agents` and `/api/conversations`, and owns attachment normalization plus agent invocation.
-- Agent registration is config-driven from `data/load.json` through `bot_service/agent_registry.py`; startup behavior and API visibility depend on both config and async readiness.
+- Agent registration is config-driven from `data/config/bot_service/load.json` through `bot_service/agent_registry.py`; startup behavior and API visibility depend on both config and async readiness.
 - `services/kb_manager` is a real subsystem with its own FastAPI app and indexing service, not just a helper module.
 - The repository is not source-only. It already contains local state such as `.env`, `.venv`, `.attachments_store`, logs, SQLite files, and data indexes, so bulk cleanup and broad file assumptions are risky.
 
@@ -31,9 +31,9 @@ This page captures a repository survey of `C:\Projects\bot_platform` as of March
 
 ## Agent registry and configuration
 
-- `bot_service/agent_registry.py` resolves `settings.agent_config_path` and loads agent definitions from `data/load.json` rather than hard-coding the registry in Python.
+- `bot_service/agent_registry.py` resolves `settings.agent_config_path` and loads agent definitions from `data/config/bot_service/load.json` rather than hard-coding the registry in Python.
 - `agent_registry.preload_all()` is called during `bot_service` startup and asynchronously initializes every active agent.
-- API visibility is readiness-based. `GET /api/agents/` can omit an agent that exists in `data/load.json` if initialization has not finished yet.
+- API visibility is readiness-based. `GET /api/agents/` can omit an agent that exists in `data/config/bot_service/load.json` if initialization has not finished yet.
 - Attachment behavior is controlled by both `supported_content_types` and `allow_raw_attachments`; changes here affect whether files are converted to text or persisted under `.attachments_store` and passed through raw.
 - Configuration is split between legacy root `config.py`, which reads `gv.env`, and newer service-local settings modules (`bot_service/config.py`, `openai_proxy/config.py`, `services/task_queue/config.py`), which read prefixed values from `.env`.
 
@@ -50,7 +50,7 @@ This page captures a repository survey of `C:\Projects\bot_platform` as of March
 
 ## Documentation drift and edit risks
 
-- Repository instructions still describe agent registration as edits in `bot_service/agent_registry.py`, but the live implementation is config-driven from `data/load.json`.
+- Repository instructions still describe agent registration as edits in `bot_service/agent_registry.py`, but the live implementation is config-driven from `data/config/bot_service/load.json`.
 - Older documentation can point at outdated file shapes. For example, current API routes live in the `bot_service/api/` package rather than a flat `bot_service/api.py`.
 - The repo root contains committed or generated local state, so destructive cleanup, blanket formatting, or assumptions about a pristine worktree are unsafe.
 - A "missing" agent from `/api/agents/` may only be initializing; check startup state before treating it as a broken registration.
@@ -58,4 +58,4 @@ This page captures a repository survey of `C:\Projects\bot_platform` as of March
 
 ## Survey basis
 
-This summary was assembled from the current runtime code and supporting docs, including `README.md`, `services.md`, `pyproject.toml`, `config.py`, `bot_service/*`, `openai_proxy/*`, `services/task_queue/*`, `services/kb_manager/*`, `data/load.json`, `chat_client.py`, `runbs.py`, `runoai.py`, and the root `main.py`.
+This summary was assembled from the current runtime code and supporting docs, including `README.md`, `services.md`, `pyproject.toml`, `config.py`, `bot_service/*`, `openai_proxy/*`, `services/task_queue/*`, `services/kb_manager/*`, `data/config/bot_service/load.json`, `chat_client.py`, `runbs.py`, `runoai.py`, and the root `main.py`.

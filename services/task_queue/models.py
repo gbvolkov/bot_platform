@@ -16,6 +16,7 @@ JobStage = Literal[
 EventKind = Literal[
     "status",
     "chunk",
+    "custom",
     "completed",
     "failed",
     "heartbeat",
@@ -65,6 +66,10 @@ class QueueEvent(BaseModel):
     content: Optional[str] = Field(
         default=None,
         description="Text chunk emitted for streaming responses.",
+    )
+    data: Optional[Any] = Field(
+        default=None,
+        description="Structured custom payload forwarded from bot_service streaming.",
     )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
