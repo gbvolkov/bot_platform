@@ -323,6 +323,7 @@ async def post_message(
         await session.rollback()
 
         async def event_stream():
+            saw_chunk = False
             try:
                 events, result_future = await invoke_agent_stream(
                     agent=agent,
@@ -341,6 +342,7 @@ async def post_message(
             try:
                 async for event in events:
                     if event.get("type") == "chunk":
+                        saw_chunk = True
                         yield _build_sse_payload(
                             {
                                 "type": "chunk",
@@ -381,14 +383,14 @@ async def post_message(
             )
             agent_status = agent_result.get("agent_status")
             payload_type = "interrupt" if agent_status == "interrupted" else "completed"
-            yield _build_sse_payload(
-                {
-                    "type": payload_type,
-                    "content": response.agent_message.raw_text,
-                    "metadata": response.agent_message.metadata,
-                    "conversation_id": response.conversation.id,
-                }
-            )
+            completed_payload = {
+                "type": payload_type,
+                "metadata": response.agent_message.metadata,
+                "conversation_id": response.conversation.id,
+            }
+            if not saw_chunk:
+                completed_payload["content"] = response.agent_message.raw_text
+            yield _build_sse_payload(completed_payload)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
