@@ -292,20 +292,33 @@ async def _process_job(
                 logger.debug("Publishing chunk job_id=%s size=%d", payload.job_id, len(chunk))
                 await queue.publish_event(QueueEvent(job_id=payload.job_id, type="chunk", content=chunk))
                 await queue.update_heartbeat(payload.job_id, status=current_status())
+            streamed_already = True
         else:
             logger.debug("No content to stream job_id=%s", payload.job_id)
 
-        metadata = {
+        result_metadata = {
             "conversation_id": payload.conversation_id,
             "content": raw_text,
             "response": response,
         }
         if attachments:
-            metadata["attachments"] = attachments
+            result_metadata["attachments"] = attachments
 
-        await queue.store_result(payload.job_id, metadata)
+        await queue.store_result(payload.job_id, result_metadata)
+        completed_metadata = {
+            "conversation_id": payload.conversation_id,
+        }
+        if attachments:
+            completed_metadata["attachments"] = attachments
+        if not streamed_already and raw_text:
+            completed_metadata["content"] = raw_text
         await queue.publish_event(
-            QueueEvent(job_id=payload.job_id, type="completed", status="completed", metadata=metadata)
+            QueueEvent(
+                job_id=payload.job_id,
+                type="completed",
+                status="completed",
+                metadata=completed_metadata,
+            )
         )
         job_stage["value"] = "completed"
         await queue.update_heartbeat(payload.job_id, status=current_status())

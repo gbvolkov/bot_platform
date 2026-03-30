@@ -24,6 +24,23 @@ class _FakeClient:
         }
 
 
+class _FakeClientWithChunk:
+    async def send_message_stream(self, **kwargs):
+        yield {
+            "type": "chunk",
+            "content": "Hello ",
+        }
+        yield {
+            "type": "chunk",
+            "content": "world",
+        }
+        yield {
+            "type": "completed",
+            "content": "Hello world",
+            "metadata": {},
+        }
+
+
 class _FakeQueue:
     def __init__(self) -> None:
         self.statuses: list[str] = []
@@ -81,3 +98,41 @@ def test_process_job_forwards_custom_stream_events(monkeypatch):
     assert queue.events[2].data["stage"] == "crawler_search"
     assert queue.result is not None
     assert queue.failure is None
+
+
+def test_process_job_does_not_repeat_content_in_completed_event_after_chunks(monkeypatch):
+    async def no_heartbeat(queue, job_id, status_fn) -> None:
+        return None
+
+    monkeypatch.setattr(task_worker, "_heartbeat_loop", no_heartbeat)
+    payload = EnqueuePayload(
+        job_id="job-2",
+        model="sales_lead_agent",
+        conversation_id="conv-2",
+        user_id="user-2",
+        text="Find transport",
+        stream=True,
+    )
+    queue = _FakeQueue()
+
+    asyncio.run(
+        task_worker._process_job(
+            payload=payload,
+            client=_FakeClientWithChunk(),
+            queue=queue,
+        )
+    )
+
+    completed_event = queue.events[-1]
+    assert completed_event.type == "completed"
+    assert completed_event.metadata == {"conversation_id": "conv-2"}
+    assert queue.result == {
+        "conversation_id": "conv-2",
+        "content": "Hello world",
+        "response": {
+            "agent_message": {
+                "raw_text": "Hello world",
+                "metadata": {},
+            }
+        },
+    }
