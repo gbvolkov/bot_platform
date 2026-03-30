@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_GAZ_PRICING_DB_URL = f"sqlite:///{(REPO_ROOT / 'data' / 'gaz-pricing' / 'gaz_pricing.sqlite').as_posix()}"
+DEFAULT_GAZ_PRICING_DB_URL = f"sqlite:///{(REPO_ROOT / 'data' / 'gaz-pricing' / 'gaz_pricing_norm.sqlite').as_posix()}"
 DEFAULT_PROMPT_CONTEXT_PATH = REPO_ROOT / "agents" / "gaz_agent" / "pricing_bi_prompt_context.txt"
 MULTILINE_TERMINATOR = "."
 

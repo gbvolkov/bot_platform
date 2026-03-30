@@ -13,15 +13,17 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = REPO_ROOT / "data" / "gaz-pricing"
-DB_PATH = SOURCE_DIR / "gaz_pricing.sqlite"
+DB_PATH = SOURCE_DIR / "gaz_pricing_norm.sqlite"
 
 NORMALIZED_COLUMNS = [
+    "id",
     "source_file",
     "source_sheet",
     "sheet_type",
     "base_model",
     "comp_full_name",
     "comp_brand",
+    "comp_model",
     "price_rub_min",
     "price_rub_max",
     "price_comment",
@@ -63,6 +65,7 @@ NORMALIZED_TEXT_COLUMNS = {
     "base_model",
     "comp_full_name",
     "comp_brand",
+    "comp_model",
     "price_comment",
     "vehicle_type",
     "body_type",
@@ -205,6 +208,63 @@ SHEET_NEGATIVE_POSITIVE_ORM = "Негатив-Позитив ORM"
 SHEET_QUALITY = "качество"
 SHEET_DPO_STATS = "Статистика ДПО"
 
+ID_RULE_MODEL_ONLY = "model_only"
+ID_RULE_BRAND_MODEL = "brand_model"
+ID_RULE_MANUFACTURER_MODEL = "manufacturer_model"
+
+SOURCE_ALLOWLIST: dict[str, dict[str, str]] = {
+    "Вектор Некст_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
+    "Газель NEXT_Сравнение с конкурентами.xlsx": {
+        SHEET_BORT_TTX: ID_RULE_BRAND_MODEL,
+        SHEET_CMF_TTX: ID_RULE_BRAND_MODEL,
+        SHEET_BUS_TTX: ID_RULE_MANUFACTURER_MODEL,
+    },
+    "Газель NN_Сравнение с конкурентами.xlsx": {
+        SHEET_BORT_TTX: ID_RULE_BRAND_MODEL,
+        SHEET_CMF_TTX: ID_RULE_BRAND_MODEL,
+    },
+    "Газель Сити_Сравнение с конкурентами.xlsx": {
+        SHEET_BUS_TTX: ID_RULE_MANUFACTURER_MODEL,
+    },
+    "ПАЗ 3205_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
+    "ПАЗ 4234_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
+    "Садко 9_сравнение с конкурентами.xlsx": {SHEET_LDT_TTX: ID_RULE_BRAND_MODEL},
+    "Садко NEXT_сравнение с конкурентами.xlsx": {SHEET_LDT_TTX: ID_RULE_BRAND_MODEL},
+    "Ситимакс 8_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
+    "Ситимакс 9_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
+    "Соболь NN_Минивэн_Сравнение с конкурентами.xlsx": {SHEET_MINIVEN: ID_RULE_BRAND_MODEL},
+}
+
+INTEGER_FIELDS = {
+    "passenger_capacity",
+    "seat_count",
+    "cab_seat_count",
+    "transmission_gears",
+    "service_interval_months",
+    "warranty_months",
+}
+
+REAL_FIELDS = {
+    "price_rub_min",
+    "price_rub_max",
+    "engine_power_hp",
+    "engine_power_kw",
+    "engine_volume_l",
+    "gross_weight_kg",
+    "curb_weight_kg",
+    "payload_kg",
+    "length_mm",
+    "width_mm",
+    "height_mm",
+    "wheelbase_mm",
+    "ground_clearance_mm",
+    "fuel_tank_l",
+    "fuel_consumption_l100km",
+    "service_interval_km",
+    "ownership_cost_rub_km",
+    "warranty_km",
+}
+
 Parser = Callable[[dict[str, Any]], None]
 
 
@@ -234,10 +294,87 @@ NORMALIZED_COLUMNS = with_nocase_columns(NORMALIZED_COLUMNS, NORMALIZED_TEXT_COL
 SERVICE_COLUMNS = with_nocase_columns(SERVICE_COLUMNS, SERVICE_TEXT_COLUMNS)
 OPTION_COLUMNS = with_nocase_columns(OPTION_COLUMNS, OPTION_TEXT_COLUMNS)
 RAW_COLUMNS = with_nocase_columns(RAW_COLUMNS, RAW_TEXT_COLUMNS)
+NORMALIZED_BASE_COLUMNS = [column for column in NORMALIZED_COLUMNS if not column.endswith("_nocase")]
 
 
 def normalize_label(value: Any) -> str:
     return (clean_text(value) or "").lower().replace("ё", "е")
+
+
+TRANSLITERATION_MAP = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+
+def transliterate_to_ascii(value: str) -> str:
+    return "".join(TRANSLITERATION_MAP.get(char, char) for char in value)
+
+
+def normalize_id_part(value: Any) -> str | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    normalized = transliterate_to_ascii(text.lower())
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    if not normalized or normalized == "0":
+        return None
+    return normalized
+
+
+def build_id(*parts: Any) -> str | None:
+    normalized_parts: list[str] = []
+    for part in parts:
+        normalized = normalize_id_part(part)
+        if not normalized:
+            continue
+        if normalized in normalized_parts:
+            continue
+        normalized_parts.append(normalized)
+    return "_".join(normalized_parts) if normalized_parts else None
+
+
+def canonicalize_identity_parts(brand_value: Any, model_value: Any) -> tuple[str | None, str | None, str | None, str | None]:
+    brand = clean_text(brand_value)
+    model = clean_text(model_value)
+    if brand and not model:
+        model = brand
+    elif model and not brand:
+        brand = model
+    full_name = join_parts(brand, model) or brand or model
+    return brand, model, full_name, build_id(brand, model)
 
 
 def normalize_unit(label: str) -> tuple[str | None, str | None]:
@@ -788,13 +925,14 @@ class GazPricingImporter:
         self.source_dir = source_dir
         self.db_path = db_path
         self.conn: sqlite3.Connection | None = None
+        self.staged_rows: list[dict[str, Any]] = []
+        self.warnings: list[str] = []
         self.stats = {
             "workbooks": 0,
-            "sheets": 0,
-            "normalized_rows": 0,
-            "service_rows": 0,
-            "option_rows": 0,
-            "raw_rows": 0,
+            "selected_sheets": 0,
+            "staged_rows": 0,
+            "merged_rows": 0,
+            "warnings": 0,
         }
         self.parsers: dict[str, Parser] = {
             SHEET_SVESY_BAZY: self.parse_sheet_svesy_bazy,
@@ -845,26 +983,36 @@ class GazPricingImporter:
         self.db.row_factory = sqlite3.Row
         self.create_schema()
         try:
-            for workbook_path in sorted(self.source_dir.glob("*.xlsx")):
-                if workbook_path.name.startswith("~$"):
+            for source_file, sheet_map in SOURCE_ALLOWLIST.items():
+                workbook_path = self.source_dir / source_file
+                if not workbook_path.exists():
+                    self.warn(f"missing source workbook: {source_file}")
                     continue
                 self.stats["workbooks"] += 1
                 workbook = load_workbook(workbook_path, read_only=False, data_only=True)
                 base_model = extract_base_model(workbook_path.name)
-                for ws in workbook.worksheets:
-                    self.stats["sheets"] += 1
-                    parser = self.parsers.get(ws.title)
+                sheets_by_name = {ws.title: ws for ws in workbook.worksheets}
+                for source_sheet, id_rule in sheet_map.items():
+                    ws = sheets_by_name.get(source_sheet)
+                    if ws is None:
+                        self.warn(f"missing source sheet: {source_file}/{source_sheet}")
+                        continue
+                    parser = self.parsers.get(source_sheet)
                     if parser is None:
-                        raise ValueError(f"Unknown sheet name: {ws.title!r} in {workbook_path.name}")
+                        raise ValueError(f"Unknown allowlisted sheet name: {source_sheet!r} in {workbook_path.name}")
+                    self.stats["selected_sheets"] += 1
                     ctx = {
                         "workbook_path": workbook_path,
                         "source_file": workbook_path.name,
-                        "source_sheet": ws.title,
+                        "source_sheet": source_sheet,
                         "base_model": base_model,
                         "ws": ws,
+                        "id_rule": id_rule,
                     }
                     parser(ctx)
                 workbook.close()
+            for row in self.merge_staged_rows():
+                self.insert_row("comparisons_normalized", NORMALIZED_COLUMNS, row)
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -873,168 +1021,62 @@ class GazPricingImporter:
             self.db.close()
             self.conn = None
 
+    def sqlite_type_for_column(self, column: str) -> str:
+        base_column = column.removesuffix("_nocase") if column.endswith("_nocase") else column
+        if column.endswith("_nocase") or base_column in NORMALIZED_TEXT_COLUMNS or base_column == "id":
+            return "TEXT"
+        if base_column in INTEGER_FIELDS:
+            return "INTEGER"
+        if base_column in REAL_FIELDS:
+            return "REAL"
+        return "TEXT"
+
     def create_schema(self) -> None:
+        column_defs: list[str] = []
+        for column in NORMALIZED_COLUMNS:
+            not_null = " NOT NULL" if column in {"id", "source_file", "source_sheet", "sheet_type", "base_model"} else ""
+            column_defs.append(f"{column} {self.sqlite_type_for_column(column)}{not_null}")
         self.db.executescript(
-            """
+            f"""
             CREATE TABLE comparisons_normalized (
-                source_file TEXT NOT NULL,
-                source_file_nocase TEXT NOT NULL,
-                source_sheet TEXT NOT NULL,
-                source_sheet_nocase TEXT NOT NULL,
-                sheet_type TEXT NOT NULL,
-                sheet_type_nocase TEXT NOT NULL,
-                base_model TEXT NOT NULL,
-                base_model_nocase TEXT NOT NULL,
-                comp_full_name TEXT,
-                comp_full_name_nocase TEXT,
-                comp_brand TEXT,
-                comp_brand_nocase TEXT,
-                price_rub_min REAL,
-                price_rub_max REAL,
-                price_comment TEXT,
-                price_comment_nocase TEXT,
-                vehicle_type TEXT,
-                vehicle_type_nocase TEXT,
-                body_type TEXT,
-                body_type_nocase TEXT,
-                passenger_capacity INTEGER,
-                seat_count INTEGER,
-                cab_seat_count INTEGER,
-                engine_fuel_type TEXT,
-                engine_fuel_type_nocase TEXT,
-                engine_power_hp REAL,
-                engine_power_kw REAL,
-                engine_volume_l REAL,
-                transmission_type TEXT,
-                transmission_type_nocase TEXT,
-                transmission_gears INTEGER,
-                drive_type TEXT,
-                drive_type_nocase TEXT,
-                wheel_formula TEXT,
-                wheel_formula_nocase TEXT,
-                gross_weight_kg REAL,
-                curb_weight_kg REAL,
-                payload_kg REAL,
-                length_mm REAL,
-                width_mm REAL,
-                height_mm REAL,
-                wheelbase_mm REAL,
-                ground_clearance_mm REAL,
-                fuel_tank_l REAL,
-                fuel_consumption_l100km REAL,
-                service_interval_km REAL,
-                service_interval_months INTEGER,
-                ownership_cost_rub_km REAL,
-                warranty_months INTEGER,
-                warranty_km REAL,
-                notes TEXT,
-                notes_nocase TEXT
+                {", ".join(column_defs)}
             );
 
-            CREATE TABLE comparison_service_groups (
-                source_file TEXT NOT NULL,
-                source_file_nocase TEXT NOT NULL,
-                source_sheet TEXT NOT NULL,
-                source_sheet_nocase TEXT NOT NULL,
-                base_model TEXT NOT NULL,
-                base_model_nocase TEXT NOT NULL,
-                group_name TEXT NOT NULL,
-                group_name_nocase TEXT NOT NULL,
-                service_label TEXT NOT NULL,
-                service_label_nocase TEXT NOT NULL,
-                service_index INTEGER,
-                mileage_km REAL,
-                cost_diesel_rub REAL,
-                cost_diesel_promo_rub REAL,
-                cost_gasoline_rub REAL,
-                cost_gasoline_promo_rub REAL,
-                notes TEXT,
-                notes_nocase TEXT
-            );
-
-            CREATE TABLE comparison_model_options (
-                source_file TEXT NOT NULL,
-                source_file_nocase TEXT NOT NULL,
-                source_sheet TEXT NOT NULL,
-                source_sheet_nocase TEXT NOT NULL,
-                base_model TEXT NOT NULL,
-                base_model_nocase TEXT NOT NULL,
-                comp_full_name TEXT,
-                comp_full_name_nocase TEXT,
-                comp_brand TEXT,
-                comp_brand_nocase TEXT,
-                option_group TEXT,
-                option_group_nocase TEXT,
-                option_name TEXT NOT NULL,
-                option_name_nocase TEXT NOT NULL,
-                option_status_raw TEXT,
-                option_status_raw_nocase TEXT,
-                option_status_norm TEXT,
-                option_status_norm_nocase TEXT,
-                option_price_raw TEXT,
-                option_price_raw_nocase TEXT,
-                option_price_rub REAL,
-                notes TEXT,
-                notes_nocase TEXT,
-                row_order INTEGER,
-                column_order INTEGER
-            );
-
-            CREATE TABLE comparisons_raw_params (
-                source_file TEXT NOT NULL,
-                source_file_nocase TEXT NOT NULL,
-                source_sheet TEXT NOT NULL,
-                source_sheet_nocase TEXT NOT NULL,
-                sheet_type TEXT NOT NULL,
-                sheet_type_nocase TEXT NOT NULL,
-                base_model TEXT NOT NULL,
-                base_model_nocase TEXT NOT NULL,
-                record_scope TEXT NOT NULL,
-                record_scope_nocase TEXT NOT NULL,
-                comp_full_name TEXT,
-                comp_full_name_nocase TEXT,
-                comp_brand TEXT,
-                comp_brand_nocase TEXT,
-                group_name TEXT,
-                group_name_nocase TEXT,
-                param_name_raw TEXT,
-                param_name_raw_nocase TEXT,
-                param_name_norm TEXT,
-                param_name_norm_nocase TEXT,
-                value_raw TEXT,
-                value_raw_nocase TEXT,
-                value_num REAL,
-                value_text TEXT,
-                value_text_nocase TEXT,
-                unit_raw TEXT,
-                unit_raw_nocase TEXT,
-                unit_norm TEXT,
-                unit_norm_nocase TEXT,
-                parse_status TEXT,
-                parse_status_nocase TEXT,
-                parse_comment TEXT,
-                parse_comment_nocase TEXT,
-                cell_address TEXT,
-                cell_address_nocase TEXT,
-                row_order INTEGER,
-                column_order INTEGER
-            );
-
+            CREATE INDEX idx_norm_id ON comparisons_normalized(id);
             CREATE INDEX idx_norm_source ON comparisons_normalized(source_file, source_sheet);
             CREATE INDEX idx_norm_base_model_nocase ON comparisons_normalized(base_model_nocase);
             CREATE INDEX idx_norm_comp_full_name_nocase ON comparisons_normalized(comp_full_name_nocase);
             CREATE INDEX idx_norm_comp_brand_nocase ON comparisons_normalized(comp_brand_nocase);
-            CREATE INDEX idx_service_source ON comparison_service_groups(source_file, source_sheet);
-            CREATE INDEX idx_service_base_model_nocase ON comparison_service_groups(base_model_nocase);
-            CREATE INDEX idx_service_group_name_nocase ON comparison_service_groups(group_name_nocase);
-            CREATE INDEX idx_options_source ON comparison_model_options(source_file, source_sheet);
-            CREATE INDEX idx_options_base_model_nocase ON comparison_model_options(base_model_nocase);
-            CREATE INDEX idx_options_comp_full_name_nocase ON comparison_model_options(comp_full_name_nocase);
-            CREATE INDEX idx_options_comp_brand_nocase ON comparison_model_options(comp_brand_nocase);
-            CREATE INDEX idx_options_option_name_nocase ON comparison_model_options(option_name_nocase);
-            CREATE INDEX idx_raw_source ON comparisons_raw_params(source_file, source_sheet);
+            CREATE INDEX idx_norm_comp_model_nocase ON comparisons_normalized(comp_model_nocase);
             """
         )
+
+    def warn(self, message: str) -> None:
+        self.warnings.append(message)
+        self.stats["warnings"] = len(self.warnings)
+        sys.stderr.write(f"WARNING: {message}\n")
+
+    def merge_staged_rows(self) -> list[dict[str, Any]]:
+        merged_by_id: dict[str, dict[str, Any]] = {}
+        for row in self.staged_rows:
+            row_id = row["id"]
+            existing = merged_by_id.get(row_id)
+            if existing is None:
+                merged_by_id[row_id] = dict(row)
+                continue
+            for column in NORMALIZED_BASE_COLUMNS:
+                incoming = row.get(column)
+                if incoming is None:
+                    continue
+                if existing.get(column) is None:
+                    existing[column] = incoming
+            existing["comp_brand"], existing["comp_model"], existing["comp_full_name"], existing["id"] = canonicalize_identity_parts(
+                existing.get("comp_brand"),
+                existing.get("comp_model"),
+            )
+        merged_rows = [merged_by_id[row_id] for row_id in sorted(merged_by_id)]
+        self.stats["merged_rows"] = len(merged_rows)
+        return merged_rows
 
     def require_contains(self, ws: Worksheet, coord: str, expected: str) -> None:
         value = clean_text(ws[coord].value) or ""
@@ -1058,20 +1100,26 @@ class GazPricingImporter:
         self.db.execute(sql, [payload[column] for column in columns])
 
     def insert_normalized(self, row: dict[str, Any]) -> None:
-        self.insert_row("comparisons_normalized", NORMALIZED_COLUMNS, row)
-        self.stats["normalized_rows"] += 1
+        staged_row = {column: row.get(column) for column in NORMALIZED_BASE_COLUMNS}
+        staged_row["comp_brand"], staged_row["comp_model"], staged_row["comp_full_name"], staged_row["id"] = canonicalize_identity_parts(
+            staged_row.get("comp_brand"),
+            staged_row.get("comp_model"),
+        )
+        if staged_row["id"] is None:
+            location = f"{staged_row.get('source_file')}/{staged_row.get('source_sheet')}:{row.get('column_index')}"
+            self.warn(f"skipping row without normalized id: {location}")
+            return
+        self.staged_rows.append(staged_row)
+        self.stats["staged_rows"] += 1
 
     def insert_service(self, row: dict[str, Any]) -> None:
-        self.insert_row("comparison_service_groups", SERVICE_COLUMNS, row)
-        self.stats["service_rows"] += 1
+        return
 
     def insert_option(self, row: dict[str, Any]) -> None:
-        self.insert_row("comparison_model_options", OPTION_COLUMNS, row)
-        self.stats["option_rows"] += 1
+        return
 
     def insert_raw(self, row: dict[str, Any]) -> None:
-        self.insert_row("comparisons_raw_params", RAW_COLUMNS, row)
-        self.stats["raw_rows"] += 1
+        return
 
     def append_note(self, record: dict[str, Any], note: str | None) -> None:
         text = clean_text(note)
@@ -1102,20 +1150,27 @@ class GazPricingImporter:
         ctx: dict[str, Any],
         sheet_type: str,
         column_index: int,
-        comp_full_name: str,
+        comp_full_name: str | None,
         comp_brand: str | None = None,
+        comp_model: str | None = None,
         vehicle_type: str | None = None,
         body_type: str | None = None,
     ) -> dict[str, Any]:
-        row = {column: None for column in NORMALIZED_COLUMNS}
+        identity_brand, identity_model, full_name, row_id = canonicalize_identity_parts(
+            comp_brand,
+            comp_model if comp_model is not None else comp_full_name,
+        )
+        row = {column: None for column in NORMALIZED_BASE_COLUMNS}
         row.update(
             {
+                "id": row_id,
                 "source_file": ctx["source_file"],
                 "source_sheet": ctx["source_sheet"],
                 "sheet_type": sheet_type,
                 "base_model": ctx["base_model"],
-                "comp_full_name": clean_text(comp_full_name),
-                "comp_brand": clean_text(comp_brand),
+                "comp_full_name": full_name,
+                "comp_brand": identity_brand,
+                "comp_model": identity_model,
                 "vehicle_type": vehicle_type,
                 "body_type": body_type,
                 "column_index": column_index,
@@ -1152,7 +1207,7 @@ class GazPricingImporter:
         for column_index in columns:
             brand = clean_text(ws.cell(brand_row, column_index).value)
             model = clean_text(ws.cell(model_row, column_index).value)
-            full_name = join_parts(*self.header_parts(ws, column_index, prefix_rows), brand, model)
+            full_name = join_parts(brand, model)
             if not self.is_real_model_header(full_name):
                 continue
             records.append(
@@ -1162,6 +1217,7 @@ class GazPricingImporter:
                     column_index,
                     full_name,
                     comp_brand=brand,
+                    comp_model=model,
                     vehicle_type=vehicle_type,
                     body_type=body_type,
                 )
@@ -1238,14 +1294,6 @@ class GazPricingImporter:
 
     def build_minivan_records(self, ctx: dict[str, Any]) -> list[dict[str, Any]]:
         ws = ctx["ws"]
-        brand_by_column = {
-            2: "Соболь",
-            3: "Соболь",
-            4: "ATLANT",
-            5: "Lada",
-            6: "Lada",
-            7: "УАЗ",
-        }
         records: list[dict[str, Any]] = []
         for column_index in [2, 3, 4, 5, 6, 7]:
             name = clean_text(ws.cell(2, column_index).value)
@@ -1258,7 +1306,8 @@ class GazPricingImporter:
                     "technical",
                     column_index,
                     join_parts(name, detail) or name,
-                    comp_brand=brand_by_column[column_index],
+                    comp_brand=name,
+                    comp_model=detail,
                     vehicle_type="minivan",
                     body_type="minivan",
                 )
@@ -1316,7 +1365,8 @@ class GazPricingImporter:
                     "technical",
                     column_index,
                     actual_name,
-                    comp_brand=brand_by_column[column_index],
+                    comp_brand=actual_name,
+                    comp_model=actual_name,
                     vehicle_type="bus",
                     body_type="bus",
                 )
@@ -1563,7 +1613,8 @@ class GazPricingImporter:
                     "technical",
                     column_index,
                     actual_name,
-                    comp_brand=brand_by_column[column_index],
+                    comp_brand=actual_name,
+                    comp_model=actual_name,
                     vehicle_type="bus",
                     body_type="bus",
                 )
@@ -1811,6 +1862,7 @@ class GazPricingImporter:
                     column_index,
                     full_name,
                     comp_brand=brand,
+                    comp_model=model,
                     vehicle_type="truck",
                     body_type="chassis",
                 )
@@ -1861,20 +1913,20 @@ class GazPricingImporter:
         ws = ctx["ws"]
         records: list[dict[str, Any]] = []
         for column_index in model_columns:
-            prefix = clean_text(ws.cell(1, column_index).value)
             brand = clean_text(ws.cell(2, column_index).value)
             model = clean_text(ws.cell(3, column_index).value)
-            if not prefix or not brand or not model:
+            if not brand or not model:
                 raise ValueError(
-                    f"{ws.title}: expected complete header in {get_column_letter(column_index)}1:{get_column_letter(column_index)}3"
+                    f"{ws.title}: expected complete header in {get_column_letter(column_index)}2:{get_column_letter(column_index)}3"
                 )
             records.append(
                 self.new_model_record(
                     ctx,
                     "technical",
                     column_index,
-                    join_parts(prefix, brand, model) or brand,
+                    join_parts(brand, model) or brand,
                     comp_brand=brand,
+                    comp_model=model,
                     vehicle_type="bus",
                     body_type="bus",
                 )
@@ -4151,7 +4203,6 @@ class GazPricingImporter:
             vehicle_type="truck",
             body_type="flatbed",
         )
-        self.disambiguate_bort_ttx_records(ws, records, fuel_row=layout["fuel_row"])
         self.ingest_model_matrix(
             ctx,
             sheet_type="technical",
@@ -4254,8 +4305,8 @@ class GazPricingImporter:
 
     def parse_sheet_miniven(self, ctx: dict[str, Any]) -> None:
         ws = ctx["ws"]
-        self.require_contains(ws, "A2", "Марка, модель")
-        self.require_contains(ws, "A3", "модификация")
+        self.require_contains(ws, "A2", "Марка")
+        self.require_contains(ws, "A3", "Модель")
         self.require_contains(ws, "A56", "Комплектации и опции")
         self.require_contains(ws, "A136", "Гарантия общая")
         records = self.build_minivan_records(ctx)
@@ -7087,8 +7138,8 @@ def main() -> int:
     importer = GazPricingImporter(SOURCE_DIR, DB_PATH)
     importer.run()
     sys.stdout.write(
-        "Imported workbooks={workbooks} sheets={sheets} normalized={normalized_rows} "
-        "service={service_rows} options={option_rows} raw={raw_rows}\n".format(**importer.stats)
+        "Imported workbooks={workbooks} selected_sheets={selected_sheets} staged={staged_rows} "
+        "merged={merged_rows} warnings={warnings}\n".format(**importer.stats)
     )
     return 0
 
