@@ -55,6 +55,28 @@ def _extract_text(message: BaseMessage) -> str:
     return str(content)
 
 
+def _extract_stream_text(message: BaseMessage) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        text_value = content.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        return str(content)
+    if isinstance(content, list):
+        texts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    texts.append(text_value)
+            else:
+                texts.append(str(item))
+        return "".join(texts)
+    return str(content)
+
+
 def _normalise_attachment_piece(piece: Dict[str, Any]) -> Dict[str, Any]:
     attachment: Dict[str, Any] = {"type": piece.get("type")}
 
@@ -251,7 +273,7 @@ async def invoke_agent(
 
 
 def _extract_stream_delta(message: BaseMessage) -> str:
-    return _extract_text(message)
+    return _extract_stream_text(message)
 
 
 def _sanitize_chunk(message: AIMessageChunk) -> AIMessageChunk:
