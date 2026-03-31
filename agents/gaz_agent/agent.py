@@ -159,6 +159,7 @@ class SalesToolSelectionMiddleware(AgentMiddleware):
             has_branch_pack=bool((state.get("research_status") or {}).get("last_branch_pack")),
             has_shortlist=bool(state.get("shortlist")),
             has_followup=bool((state.get("followup_pack") or {}).get("documents")),
+            has_pricing_bi_call_this_turn="query_pricing_bi" in set(state.get("tool_calls_this_turn") or []),
         )
         selected = [self._tool_registry[name] for name in active_tool_names if name in self._tool_registry]
         selected_names = {name for name in active_tool_names if name in self._tool_registry}

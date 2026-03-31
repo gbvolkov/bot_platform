@@ -412,6 +412,8 @@ def test_russian_locale_bundle_is_available():
     assert "get_sales_landscape" in get_prompt("ru", "tool_landscape")
     assert "compare_product_directions" in get_prompt("ru", "tool_compare_directions")
     assert "collect_product_snapshot" in get_prompt("ru", "tool_snapshot")
+    assert "после query_pricing_bi" in get_prompt("ru", "tool_snapshot")
+    assert "технических характеристиках" in get_prompt("ru", "tool_pricing_bi")
     assert "немного подождать" in get_text("ru", "document_package_wait_question")
     assert "Deep research" not in get_text("ru", "document_package_wait_content")
     assert "{reason}" not in get_text("ru", "deep_comparison_wait_content")
@@ -539,7 +541,7 @@ def test_select_active_tool_names_for_compare_starts_with_composite_comparison()
     assert active == ["compare_product_directions"]
 
 
-def test_select_active_tool_names_for_specs_starts_with_snapshot():
+def test_select_active_tool_names_for_specs_starts_with_pricing_bi():
     planned = build_allowed_tool_names("specs", "justified", "RESEARCH")
     active = select_active_tool_names(
         "specs",
@@ -554,8 +556,29 @@ def test_select_active_tool_names_for_specs_starts_with_snapshot():
         has_branch_pack=False,
         has_shortlist=False,
         has_followup=False,
+        has_pricing_bi_call_this_turn=False,
     )
-    assert active == ["collect_product_snapshot"]
+    assert active == ["query_pricing_bi", "web_search"]
+
+
+def test_select_active_tool_names_for_specs_unlocks_snapshot_after_pricing_bi():
+    planned = build_allowed_tool_names("specs", "justified", "RESEARCH")
+    active = select_active_tool_names(
+        "specs",
+        "justified",
+        "RESEARCH",
+        planned_tools=planned,
+        has_sales_digest=False,
+        has_comparison_digest=False,
+        has_product_snapshot=False,
+        has_material_candidates=False,
+        has_material_reads=False,
+        has_branch_pack=False,
+        has_shortlist=False,
+        has_followup=False,
+        has_pricing_bi_call_this_turn=True,
+    )
+    assert active == ["query_pricing_bi", "web_search", "collect_product_snapshot", "search_sales_materials"]
 
 
 def test_select_active_tool_names_for_recommendation_prefers_composites_before_narrow_reads():

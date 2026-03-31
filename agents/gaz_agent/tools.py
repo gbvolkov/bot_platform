@@ -2127,19 +2127,23 @@ def build_query_pricing_bi_tool(
         requested_product_terms: List[str] | None = None,
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Query the internal pricing BI agent for exact price, option, and maintenance facts.
+        """Query the internal pricing BI agent for exact commercial and technical facts.
 
-        Use this tool for business questions about model price ranges, option availability,
-        option pricing, trims, and maintenance cost or service intervals. The question should
-        stay in business language and should not mention database tables, columns, or SQL.
-        When possible, also pass product terms from the user's request. Umbrella terms such as
-        "Соболь" or "Газель" are allowed here; the tool will normalize and expand them to the
-        concrete internal product families before querying BI.
+        Use this tool first for business questions about model price ranges, option
+        availability, option pricing, trims, maintenance cost or service intervals, and
+        exact technical characteristics stored in the pricing database. This includes
+        structured fields such as gross weight, curb weight, payload, wheelbase, dimensions,
+        engine, power, transmission, drive type, wheel formula, seating, fuel tank, warranty,
+        and similar exact specification fields. The question should stay in business language
+        and should not mention database tables, columns, or SQL. When possible, also pass
+        product terms from the user's request. Umbrella terms such as "Соболь" or "Газель"
+        are allowed here; the tool will normalize and expand them to the concrete internal
+        product families before querying BI.
 
         Args:
             question: Business-language question for the pricing BI agent, such as a request
-                about model price, configuration content, option status, option price, or
-                maintenance cost.
+                about model price, configuration content, exact technical characteristics,
+                option status, option price, warranty, or maintenance cost.
             requested_product_terms: Optional list of product terms from the user's request.
                 Pass names like "Газель NN", "Газель NEXT", or broader terms like "Соболь".
                 The tool will normalize and expand them internally.

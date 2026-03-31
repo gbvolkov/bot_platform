@@ -629,6 +629,7 @@ def select_active_tool_names(
     has_branch_pack: bool = False,
     has_shortlist: bool = False,
     has_followup: bool = False,
+    has_pricing_bi_call_this_turn: bool = False,
 ) -> List[str]:
     planned = list(planned_tools or build_allowed_tool_names(intent, answer_depth, work_mode))
     active: List[str] = []
@@ -673,9 +674,14 @@ def select_active_tool_names(
         return list(dict.fromkeys(active))
 
     if intent == "specs":
+        if not has_pricing_bi_call_this_turn:
+            return list(dict.fromkeys(active))
         if not has_product_snapshot:
-            if "collect_product_snapshot" in planned:
-                active.append("collect_product_snapshot")
+            for tool_name in ("collect_product_snapshot", "search_sales_materials"):
+                if tool_name in planned:
+                    active.append(tool_name)
+            if has_material_candidates and "read_material" in planned:
+                active.append("read_material")
             return list(dict.fromkeys(active))
         for tool_name in ("collect_product_snapshot", "search_sales_materials"):
             if tool_name in planned:
