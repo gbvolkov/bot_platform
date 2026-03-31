@@ -1074,6 +1074,7 @@ class GazPricingImporter:
                 existing.get("comp_brand"),
                 existing.get("comp_model"),
             )
+            existing["base_model"] = existing.get("comp_brand")
         merged_rows = [merged_by_id[row_id] for row_id in sorted(merged_by_id)]
         self.stats["merged_rows"] = len(merged_rows)
         return merged_rows
@@ -1105,6 +1106,7 @@ class GazPricingImporter:
             staged_row.get("comp_brand"),
             staged_row.get("comp_model"),
         )
+        staged_row["base_model"] = staged_row.get("comp_brand")
         if staged_row["id"] is None:
             location = f"{staged_row.get('source_file')}/{staged_row.get('source_sheet')}:{row.get('column_index')}"
             self.warn(f"skipping row without normalized id: {location}")
@@ -1167,7 +1169,7 @@ class GazPricingImporter:
                 "source_file": ctx["source_file"],
                 "source_sheet": ctx["source_sheet"],
                 "sheet_type": sheet_type,
-                "base_model": ctx["base_model"],
+                "base_model": identity_brand,
                 "comp_full_name": full_name,
                 "comp_brand": identity_brand,
                 "comp_model": identity_model,

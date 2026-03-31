@@ -20,8 +20,9 @@ Key interpretation rules:
 - Do not assume `comp_full_name` is the only identity field.
 - For exact model aggregation, prefer grouping by `id`.
 - For candidate search from a user query, use `comp_full_name_nocase`, `comp_brand_nocase`, and `comp_model_nocase`.
-- `base_model` is comparison context, not a trim and not the canonical model identity.
-- Filtering only by `base_model` usually returns both the target GAZ rows and competitor rows from the same workbook context.
+- `base_model` is the canonical base-model field.
+- `comp_brand` mirrors `base_model`.
+- `base_model_nocase` and `comp_brand_nocase` are equal lowercase mirrors of the same value.
 
 General SQL strategy:
 - If the user asks about a specific model or modification, first locate candidate rows by `comp_full_name_nocase`, `comp_brand_nocase`, or `comp_model_nocase`, then aggregate by `id`.
@@ -46,10 +47,10 @@ Important fields:
   Use only when the user explicitly asks about origin.
 
 - `base_model`
-  The GAZ comparison context where the row came from.
+  Canonical base-model field. Do not treat it as workbook context.
 
 - `comp_brand`
-  First canonical identity part.
+  Brand/display alias that mirrors `base_model`.
 
 - `comp_model`
   Second canonical identity part.
@@ -99,8 +100,7 @@ Practical SQL rules:
 - For fuzzy user input, first find candidates with `LIKE` on `comp_full_name_nocase`, `comp_brand_nocase`, and `comp_model_nocase`.
 - If the user asks for prices, prefer `MIN(price_rub_min)` and `MAX(price_rub_max)` across the matched ids.
 - If the user asks for technical specs, select the requested structured fields from the matched ids and ignore rows where those fields are null.
-- If the user asks specifically about a GAZ family itself, do not use `base_model` alone as the identity filter.
-- Use `base_model` mainly to narrow comparison context when the user explicitly names that context.
+- `base_model` is canonical for filtering; `comp_brand` is an equivalent mirror.
 - Ignore provenance/order fields in normal business answers unless the user asks about data source.
 
 Typical body_type mapping:

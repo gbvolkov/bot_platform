@@ -81,6 +81,7 @@ def test_merge_rows_prefers_first_non_empty_value_and_fills_gaps(tmp_path):
     assert len(merged_rows) == 1
     merged = merged_rows[0]
     assert merged["id"] == "argo_swb"
+    assert merged["base_model"] == "ARGO"
     assert merged["comp_full_name"] == "ARGO SWB"
     assert merged["price_rub_min"] == 100.0
     assert merged["wheelbase_mm"] == 3000.0
@@ -120,6 +121,9 @@ def test_importer_builds_single_merged_table_from_real_excels(tmp_path):
         assert row_count == 83
         assert conn.execute("select count(*) from comparisons_normalized where id is null or trim(id) = ''").fetchone()[0] == 0
         assert conn.execute(
+            "select count(*) from comparisons_normalized where ifnull(base_model, '') <> ifnull(comp_brand, '')"
+        ).fetchone()[0] == 0
+        assert conn.execute(
             "select count(*) from (select id, count(*) as c from comparisons_normalized group by id having c > 1)"
         ).fetchone()[0] == 0
 
@@ -151,4 +155,5 @@ def test_downstream_defaults_point_to_normalized_db_and_single_table_contract():
     assert "TABLE: comparison_service_groups" not in prompt_text
     assert "TABLE: comparisons_raw_params" not in prompt_text
     assert "comp_model" in prompt_text
+    assert "comp_brand` mirrors `base_model`" in prompt_text
     assert "TABLE: comparisons_normalized" in prompt_text
