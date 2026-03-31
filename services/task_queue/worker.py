@@ -127,6 +127,13 @@ async def _process_job(
                         )
                         stream_started = True
                         streamed_already = True
+                        logger.debug(
+                            "Stream flags set on first chunk job_id=%s stream_started=%s streamed_already=%s",
+                            payload.job_id,
+                            stream_started,
+                            streamed_already,
+                        )
+                    streamed_already = True
                     streamed_parts.append(content)
                     logger.debug("Publishing chunk job_id=%s size=%d", payload.job_id, len(content))
                     await queue.publish_event(
@@ -141,12 +148,26 @@ async def _process_job(
                             QueueEvent(job_id=payload.job_id, type="status", status="streaming")
                         )
                         stream_started = True
+                        logger.debug(
+                            "Stream flags set on first custom event job_id=%s stream_started=%s streamed_already=%s",
+                            payload.job_id,
+                            stream_started,
+                            streamed_already,
+                        )
                     await queue.publish_event(
                         QueueEvent(job_id=payload.job_id, type="custom", data=event.get("data"))
                     )
                     await queue.update_heartbeat(payload.job_id, status=current_status())
                 elif event_type in {"completed", "interrupt", "failed"}:
                     final_event = event
+                    logger.debug(
+                        "Terminal stream event received job_id=%s type=%s stream_started=%s streamed_already=%s streamed_parts=%d",
+                        payload.job_id,
+                        event_type,
+                        stream_started,
+                        streamed_already,
+                        len(streamed_parts),
+                    )
                     break
 
                 elapsed = time.monotonic() - start_time
@@ -173,6 +194,15 @@ async def _process_job(
 
             raw_text = final_event.get("content") or "".join(streamed_parts)
             metadata = final_event.get("metadata") or {}
+            logger.debug(
+                "Post-stream aggregation job_id=%s final_type=%s raw_text_chars=%d stream_started=%s streamed_already=%s streamed_parts=%d",
+                payload.job_id,
+                final_event.get("type"),
+                len(raw_text),
+                stream_started,
+                streamed_already,
+                len(streamed_parts),
+            )
             if not stream_started and raw_text:
                 await queue.mark_status(payload.job_id, "streaming")
                 job_stage["value"] = "streaming"
@@ -283,6 +313,13 @@ async def _process_job(
             logger.info("Job %s interrupted; awaiting user input", payload.job_id)
             return
 
+        logger.debug(
+            "Pre-final-streaming decision job_id=%s raw_text_chars=%d streamed_already=%s agent_status=%s",
+            payload.job_id,
+            len(raw_text),
+            streamed_already,
+            agent_status,
+        )
         if raw_text and not streamed_already:
             await queue.mark_status(payload.job_id, "streaming")
             job_stage["value"] = "streaming"

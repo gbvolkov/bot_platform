@@ -293,6 +293,28 @@ def _sanitize_chunk(message: AIMessageChunk) -> AIMessageChunk:
     return message
 
 
+def _coerce_incremental_stream_delta(*, emitted_text: str, delta: str) -> str:
+    if not delta:
+        return ""
+    if not emitted_text:
+        return delta
+    if delta == emitted_text:
+        logging.debug(
+            "Suppressing replayed stream delta size=%d because it matches already emitted text",
+            len(delta),
+        )
+        return ""
+    if delta.startswith(emitted_text):
+        incremental = delta[len(emitted_text) :]
+        logging.debug(
+            "Trimming cumulative stream delta from size=%d to incremental size=%d",
+            len(delta),
+            len(incremental),
+        )
+        return incremental
+    return delta
+
+
 def _build_agent_result_from_state(
     *,
     state: Dict[str, Any] | None,
@@ -381,6 +403,7 @@ async def invoke_agent_stream(
     async def _run() -> None:
         last_state: Dict[str, Any] | None = None
         saw_delta = False
+        emitted_text = ""
         stream_modes, subgraph_stream = agent_registry.stream_config(agent_id)
         merged_chunk: AIMessageChunk | None = None
         last_ai_message: AIMessage | None = None
@@ -437,10 +460,26 @@ async def invoke_agent_stream(
                         if merged_chunk is not None:
                             merged_message = message_chunk_to_message(merged_chunk)
                             merged_text = _extract_stream_delta(merged_message)
+                            logging.debug(
+                                "invoke_agent_stream comparing merged stream text size=%d with final AIMessage size=%d conversation_id=%s agent_id=%s",
+                                len(merged_text),
+                                len(message_text),
+                                conversation_id,
+                                agent_id,
+                            )
                             merged_chunk = None
                             if merged_text == message_text:
+                                logging.debug(
+                                    "invoke_agent_stream suppressed final AIMessage replay because merged and final texts matched conversation_id=%s agent_id=%s",
+                                    conversation_id,
+                                    agent_id,
+                                )
                                 message_text = ""
                         delta = message_text
+                    delta = _coerce_incremental_stream_delta(
+                        emitted_text=emitted_text,
+                        delta=delta,
+                    )
                     if delta:
                         if not saw_delta:
                             logging.debug(
@@ -449,6 +488,7 @@ async def invoke_agent_stream(
                                 agent_id,
                             )
                         saw_delta = True
+                        emitted_text += delta
                         _enqueue({"type": "chunk", "content": delta})
                 elif mode == "values":
                     if isinstance(payload_item, dict):

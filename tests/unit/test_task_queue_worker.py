@@ -41,6 +41,23 @@ class _FakeClientWithChunk:
         }
 
 
+class _FakeClientWithCustomThenChunk:
+    async def send_message_stream(self, **kwargs):
+        yield {
+            "type": "custom",
+            "data": {"type": "progress", "message": "Thinking"},
+        }
+        yield {
+            "type": "chunk",
+            "content": "Hello world",
+        }
+        yield {
+            "type": "completed",
+            "content": "Hello world",
+            "metadata": {},
+        }
+
+
 class _FakeQueue:
     def __init__(self) -> None:
         self.statuses: list[str] = []
@@ -136,3 +153,33 @@ def test_process_job_does_not_repeat_content_in_completed_event_after_chunks(mon
             }
         },
     }
+
+
+def test_process_job_does_not_replay_final_text_after_custom_then_chunk(monkeypatch):
+    async def no_heartbeat(queue, job_id, status_fn) -> None:
+        return None
+
+    monkeypatch.setattr(task_worker, "_heartbeat_loop", no_heartbeat)
+    payload = EnqueuePayload(
+        job_id="job-3",
+        model="gaz_agent",
+        conversation_id="conv-3",
+        user_id="user-3",
+        text="Help me choose a fleet",
+        stream=True,
+    )
+    queue = _FakeQueue()
+
+    asyncio.run(
+        task_worker._process_job(
+            payload=payload,
+            client=_FakeClientWithCustomThenChunk(),
+            queue=queue,
+        )
+    )
+
+    event_types = [event.type for event in queue.events]
+    assert event_types == ["status", "status", "custom", "chunk", "completed"]
+    chunk_events = [event for event in queue.events if event.type == "chunk"]
+    assert len(chunk_events) == 1
+    assert chunk_events[0].content == "Hello world"
