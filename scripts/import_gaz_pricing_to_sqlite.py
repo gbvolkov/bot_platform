@@ -15,6 +15,253 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIR = REPO_ROOT / "data" / "gaz-pricing"
 DB_PATH = SOURCE_DIR / "gaz_pricing_norm.sqlite"
 
+BORT_TTX_EXTRA_STRING_COLUMNS = [
+    "level",
+    "double_cab",
+    "front_axle_load_kg",
+    "rear_axle_load_kg",
+    "chassis_curb_weight_kg",
+    "chassis_payload_kg",
+    "front_overhang_mm",
+    "rear_overhang_mm",
+    "chassis_dimensions",
+    "cargo_platform_dimensions",
+    "pallet_capacity",
+    "board_material",
+    "side_board_folding",
+    "floor_type",
+    "awning",
+    "turning_radius_m",
+    "loading_height_mm",
+    "engine",
+    "engine_power_rpm",
+    "engine_torque",
+    "engine_torque_rpm",
+    "ecology_class",
+    "neutralization_system",
+    "adblue_system",
+    "brake_system",
+    "brake_mechanisms",
+    "electronic_brake_system",
+    "engine_brake",
+    "parking_brake",
+    "locking_differential",
+    "front_suspension",
+    "rear_suspension",
+    "battery",
+    "cruise_control",
+    "light_rain_sensor",
+    "tire_pressure_monitoring",
+    "instrument_cluster_trip_computer",
+    "air_conditioner",
+    "athermal_glazing",
+    "preheater",
+    "windshield_heating",
+    "driver_seat",
+    "driver_seat_heating",
+    "driver_seat_air_suspension",
+    "passenger_seats",
+    "passenger_seat_heating",
+    "airbag",
+    "seat_belts",
+    "seat_belt_reminder",
+    "cabin_storage",
+    "cab_clothes_hooks",
+    "sun_visors",
+    "cigarette_lighter",
+    "ashtray",
+    "socket_12v",
+    "headlights",
+    "daytime_running_lights",
+    "fog_lights",
+    "central_lock",
+    "alarm",
+    "immobilizer",
+    "mirror_heating",
+    "mirror_electric_adjustment",
+    "power_windows",
+    "audio_preparation",
+    "radio_1din",
+    "radio_2din",
+    "rear_view_camera",
+    "steering_wheel",
+    "steering_column_adjustment",
+    "fairing",
+    "tire_configuration",
+    "front_tire_size",
+    "rear_tire_size",
+    "discs",
+    "front_wheel_arch_liners_mudguards",
+    "rear_wheel_arch_liners_mudguards",
+    "corrosion_warranty_years",
+    "first_maintenance",
+    "exclusive_options",
+    "design_features",
+    "insurance_taxes_leasing_period",
+    "maintenance_cost_period",
+    "used_spare_parts_cost",
+]
+
+CMF_TTX_EXTRA_STRING_COLUMNS = [
+    "license_category",
+    "side_door_opening_width_mm",
+    "side_door_opening_height_mm",
+    "rear_door_opening_height_mm",
+    "rear_door_opening_width_mm",
+    "cargo_compartment_length_mm",
+    "cargo_compartment_width_mm",
+    "cargo_compartment_height_mm",
+    "cargo_compartment_volume_m3",
+    "engine_start",
+    "telematics",
+    "parking_sensors",
+    "adas_other",
+    "cargo_van",
+    "floor_protective_covering",
+    "sidewall_trim",
+    "headliner_trim",
+    "rear_doors_opening_angle",
+    "tie_down_loops_floor",
+]
+
+LDT_TTX_EXTRA_STRING_COLUMNS = [
+    "cab_modification",
+    "front_track_mm",
+    "generator",
+    "onboard_voltage",
+    "tinting",
+    "fuel_filter",
+    "headlight_adjustment",
+    "tachograph",
+    "tachograph_preparation",
+    "multifunction_steering_wheel",
+    "additional_cabin_insulation",
+    "stabilizer_bar",
+    "toolbox",
+    "pto",
+    "pto_hatch",
+    "ownership_cost_total_rub",
+    "maintenance_and_used_spare_parts_cost",
+]
+
+MINIVAN_EXTRA_STRING_COLUMNS = [
+    "price_without_discounts_rub",
+    "vehicle_category",
+    "fording_depth_mm",
+    "transfer_case",
+    "low_range_ratio",
+    "winter_package",
+    "steering_wheel_heating",
+    "blind_spot_monitoring",
+    "lockers",
+    "mudguards",
+    "engine_protection",
+    "usb_connectors",
+    "center_console_between_seats",
+    "wireless_charging",
+    "airflow_distribution",
+    "interior_trim_materials",
+    "luggage_net",
+    "additional_usb_type_a_sockets",
+    "cup_holders",
+    "insurance_taxes_period",
+]
+
+BUS_TTX_EXTRA_STRING_COLUMNS = [
+    "bus_class",
+    "length_without_rear_step_mm",
+    "height_with_additional_air_conditioner_mm",
+    "side_door_opening_height_from_step_mm",
+    "passenger_salon_ceiling_height_mm",
+    "width_between_entrance_handrails_mm",
+    "rear_locking_differential",
+    "keyless_entry",
+    "side_door_step",
+    "rear_door_step",
+    "passenger_compartment_seat_belts",
+    "era_glonass",
+    "side_moldings",
+    "wheel_arch_liners_mudguards",
+    "passenger_salon_seats",
+    "seat_upholstery",
+    "seat_pitch_mm",
+    "distance_between_seat_backs",
+    "roof_ventilation_hatch",
+    "window_vents",
+    "passenger_compartment_heater",
+    "interior_lighting",
+    "step_lighting",
+    "luggage_shelves",
+    "additional_12v_sockets_near_storage_niche",
+    "additional_usb_type_a_sockets_near_storage_niche",
+    "interior_rearview_mirror",
+    "passenger_compartment_air_conditioner",
+    "additional_independent_electric_heater",
+    "roof_ventilator_fvu",
+]
+
+PAZ_EXPANDED_EXTRA_STRING_COLUMNS = [
+    "production_start",
+    "service_doors",
+    "floor_level",
+    "luggage_volume_m3",
+    "passenger_capacity_text",
+    "seat_count_text",
+    "max_speed_kmh",
+    "fuel_consumption_per_100km",
+    "gas_cylinder_capacity_m3",
+    "ventilation_system",
+    "route_informer_full",
+    "route_informer_basic",
+    "route_indicator_stencil",
+    "video_surveillance_4_cameras",
+    "video_surveillance_8_cameras",
+    "video_surveillance_8_cameras_data_transfer",
+    "reverse_motion_buzzer",
+    "passenger_seat_belts_standard",
+    "passenger_seat_belts_comfort_three_point",
+    "yellow_door_open_signal",
+    "usb_sockets_mobile",
+    "accumulation_area_convector",
+    "double_flooring",
+    "high_performance_salon_heaters",
+    "passenger_door_insulation",
+    "tinted_salon_glazing",
+    "clear_double_glazed_windows_with_vents",
+    "tinted_double_glazed_windows_with_vents",
+    "window_curtains",
+    "glonass_gps_navigation",
+    "passenger_information_system_media_panels",
+    "public_address_system_internal",
+    "public_address_system_external_internal",
+    "payment_terminal",
+    "cashless_fare_payment_system",
+    "without_air_conditioner",
+    "asmpp",
+    "tachograph_skzi",
+    "fire_suppression_system",
+    "non_base_body_color",
+    "additional_cng_cylinders",
+    "arctic_cng_cylinders",
+    "capacitive_fuel_level_sensor",
+    "additional_toolkit_1",
+    "first_aid_kit",
+    "two_fire_extinguishers_2l",
+    "warning_triangle",
+]
+
+ALL_EXTRA_STRING_COLUMNS = BORT_TTX_EXTRA_STRING_COLUMNS + [
+    column
+    for column in (
+        CMF_TTX_EXTRA_STRING_COLUMNS
+        + LDT_TTX_EXTRA_STRING_COLUMNS
+        + MINIVAN_EXTRA_STRING_COLUMNS
+        + BUS_TTX_EXTRA_STRING_COLUMNS
+        + PAZ_EXPANDED_EXTRA_STRING_COLUMNS
+    )
+    if column not in BORT_TTX_EXTRA_STRING_COLUMNS
+]
+
 NORMALIZED_COLUMNS = [
     "id",
     "source_file",
@@ -61,6 +308,7 @@ NORMALIZED_COLUMNS = [
     "ownership_cost_rub_km",
     "warranty_months",
     "warranty_km",
+    *ALL_EXTRA_STRING_COLUMNS,
     "notes",
 ]
 
@@ -79,6 +327,7 @@ NORMALIZED_TEXT_COLUMNS = {
     "transmission_type",
     "drive_type",
     "wheel_formula",
+    *ALL_EXTRA_STRING_COLUMNS,
     "notes",
 }
 
@@ -239,6 +488,376 @@ SOURCE_ALLOWLIST: dict[str, dict[str, str]] = {
     "Ситимакс 8_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
     "Ситимакс 9_Сравнение с конкурентами ПАЗ.xlsx": {SHEET_PAZ_EXPANDED: ID_RULE_MODEL_ONLY},
     "Соболь NN_Минивэн_Сравнение с конкурентами.xlsx": {SHEET_MINIVEN: ID_RULE_BRAND_MODEL},
+}
+
+BORT_TTX_EXTRA_FIELD_BY_ROW = {
+    6: "double_cab",
+    8: "front_axle_load_kg",
+    9: "rear_axle_load_kg",
+    11: "chassis_curb_weight_kg",
+    13: "chassis_payload_kg",
+    15: "front_overhang_mm",
+    16: "rear_overhang_mm",
+    17: "chassis_dimensions",
+    18: "cargo_platform_dimensions",
+    19: "pallet_capacity",
+    20: "board_material",
+    21: "side_board_folding",
+    22: "floor_type",
+    23: "awning",
+    24: "turning_radius_m",
+    25: "loading_height_mm",
+    31: "engine_power_rpm",
+    32: "engine_torque",
+    33: "engine_torque_rpm",
+    34: "ecology_class",
+    35: "neutralization_system",
+    36: "adblue_system",
+    38: "brake_system",
+    39: "brake_mechanisms",
+    40: "electronic_brake_system",
+    41: "engine_brake",
+    42: "parking_brake",
+    43: "locking_differential",
+    44: "front_suspension",
+    45: "rear_suspension",
+    47: "battery",
+    49: "cruise_control",
+    50: "light_rain_sensor",
+    51: "tire_pressure_monitoring",
+    52: "instrument_cluster_trip_computer",
+    53: "air_conditioner",
+    54: "athermal_glazing",
+    55: "preheater",
+    56: "windshield_heating",
+    57: "driver_seat",
+    58: "driver_seat_heating",
+    59: "driver_seat_air_suspension",
+    60: "passenger_seats",
+    61: "passenger_seat_heating",
+    62: "airbag",
+    63: "seat_belts",
+    64: "seat_belt_reminder",
+    65: "cabin_storage",
+    66: "cab_clothes_hooks",
+    67: "sun_visors",
+    68: "cigarette_lighter",
+    69: "ashtray",
+    70: "socket_12v",
+    71: "headlights",
+    72: "daytime_running_lights",
+    73: "fog_lights",
+    74: "central_lock",
+    75: "alarm",
+    76: "immobilizer",
+    77: "mirror_heating",
+    78: "mirror_electric_adjustment",
+    79: "power_windows",
+    80: "audio_preparation",
+    81: "radio_1din",
+    82: "radio_2din",
+    83: "rear_view_camera",
+    84: "steering_wheel",
+    85: "steering_column_adjustment",
+    86: "fairing",
+    89: "tire_configuration",
+    90: "front_tire_size",
+    91: "rear_tire_size",
+    92: "discs",
+    93: "front_wheel_arch_liners_mudguards",
+    94: "rear_wheel_arch_liners_mudguards",
+    98: "corrosion_warranty_years",
+    100: "first_maintenance",
+    102: "exclusive_options",
+    103: "design_features",
+    107: "insurance_taxes_leasing_period",
+    108: "maintenance_cost_period",
+    109: "used_spare_parts_cost",
+}
+
+CMF_TTX_EXTRA_FIELD_BY_ROW = {
+    6: "double_cab",
+    8: "license_category",
+    13: "front_overhang_mm",
+    14: "rear_overhang_mm",
+    17: "side_door_opening_width_mm",
+    18: "side_door_opening_height_mm",
+    19: "rear_door_opening_height_mm",
+    20: "rear_door_opening_width_mm",
+    21: "cargo_compartment_length_mm",
+    22: "cargo_compartment_width_mm",
+    23: "cargo_compartment_height_mm",
+    24: "cargo_compartment_volume_m3",
+    25: "pallet_capacity",
+    26: "loading_height_mm",
+    28: "turning_radius_m",
+    33: "engine_power_rpm",
+    34: "engine_torque",
+    35: "engine_torque_rpm",
+    36: "ecology_class",
+    37: "neutralization_system",
+    38: "engine_start",
+    40: "brake_system",
+    41: "brake_mechanisms",
+    42: "electronic_brake_system",
+    43: "parking_brake",
+    44: "locking_differential",
+    47: "cruise_control",
+    48: "light_rain_sensor",
+    50: "instrument_cluster_trip_computer",
+    51: "air_conditioner",
+    52: "preheater",
+    53: "windshield_heating",
+    54: "driver_seat",
+    55: "driver_seat_heating",
+    56: "passenger_seats",
+    57: "passenger_seat_heating",
+    58: "airbag",
+    59: "seat_belts",
+    60: "seat_belt_reminder",
+    61: "cabin_storage",
+    62: "sun_visors",
+    63: "steering_column_adjustment",
+    64: "cigarette_lighter",
+    65: "ashtray",
+    66: "socket_12v",
+    67: "headlights",
+    68: "daytime_running_lights",
+    69: "fog_lights",
+    70: "central_lock",
+    71: "immobilizer",
+    72: "alarm",
+    73: "mirror_heating",
+    74: "mirror_electric_adjustment",
+    75: "power_windows",
+    76: "radio_1din",
+    77: "radio_2din",
+    78: "telematics",
+    79: "steering_wheel",
+    80: "rear_view_camera",
+    81: "parking_sensors",
+    82: "adas_other",
+    83: "cargo_van",
+    84: "floor_protective_covering",
+    85: "sidewall_trim",
+    86: "headliner_trim",
+    87: "rear_doors_opening_angle",
+    88: "tie_down_loops_floor",
+    91: "tire_configuration",
+    93: "discs",
+    96: "corrosion_warranty_years",
+    98: "first_maintenance",
+    100: "exclusive_options",
+    101: "design_features",
+}
+
+BUS_TTX_OPTION_FIELD_BY_ROW = {
+    53: "central_lock",
+    54: "preheater",
+    55: "mirror_heating",
+    56: "mirror_electric_adjustment",
+    57: "power_windows",
+    58: "athermal_glazing",
+    59: "windshield_heating",
+    60: "keyless_entry",
+    61: "rear_view_camera",
+    62: "parking_sensors",
+    63: "side_door_step",
+    64: "rear_door_step",
+    66: "airbag",
+    67: "seat_belts",
+    68: "seat_belt_reminder",
+    69: "passenger_compartment_seat_belts",
+    70: "immobilizer",
+    71: "alarm",
+    72: "era_glonass",
+    74: "headlights",
+    75: "daytime_running_lights",
+    76: "fog_lights",
+    77: "side_moldings",
+    78: "wheel_arch_liners_mudguards",
+    80: "steering_column_adjustment",
+    81: "sun_visors",
+    82: "steering_wheel",
+    83: "cruise_control",
+    84: "air_conditioner",
+    85: "radio_1din",
+    86: "radio_2din",
+    87: "instrument_cluster_trip_computer",
+    88: "light_rain_sensor",
+    89: "driver_seat_heating",
+    90: "driver_seat",
+    91: "passenger_seats",
+    92: "cab_clothes_hooks",
+    93: "cabin_storage",
+    94: "socket_12v",
+    95: "cigarette_lighter",
+    96: "ashtray",
+    97: "tire_pressure_monitoring",
+    99: "passenger_salon_seats",
+    100: "seat_upholstery",
+    101: "seat_pitch_mm",
+    102: "distance_between_seat_backs",
+    103: "floor_protective_covering",
+    104: "roof_ventilation_hatch",
+    105: "window_vents",
+    106: "passenger_compartment_heater",
+    107: "interior_lighting",
+    108: "step_lighting",
+    109: "luggage_shelves",
+    110: "additional_12v_sockets_near_storage_niche",
+    111: "additional_usb_type_a_sockets_near_storage_niche",
+    112: "interior_rearview_mirror",
+    113: "passenger_compartment_air_conditioner",
+    114: "additional_independent_electric_heater",
+    115: "roof_ventilator_fvu",
+}
+
+MINIVAN_OPTION_FIELD_BY_ROW = {
+    58: "winter_package",
+    59: "windshield_heating",
+    60: "steering_wheel_heating",
+    61: "preheater",
+    62: "mirror_heating",
+    63: "driver_seat_heating",
+    66: "parking_sensors",
+    67: "tire_pressure_monitoring",
+    68: "blind_spot_monitoring",
+    70: "passenger_seat_heating",
+    71: "central_lock",
+    72: "mirror_electric_adjustment",
+    73: "power_windows",
+    74: "athermal_glazing",
+    75: "keyless_entry",
+    76: "rear_view_camera",
+    77: "cruise_control",
+    78: "air_conditioner",
+    79: "light_rain_sensor",
+    80: "side_door_step",
+    81: "rear_door_step",
+    84: "airbag",
+    85: "seat_belts",
+    86: "seat_belt_reminder",
+    87: "passenger_compartment_seat_belts",
+    88: "immobilizer",
+    89: "alarm",
+    90: "era_glonass",
+    93: "headlights",
+    94: "daytime_running_lights",
+    95: "fog_lights",
+    96: "side_moldings",
+    97: "tinting",
+    98: "lockers",
+    99: "mudguards",
+    100: "engine_protection",
+    103: "steering_column_adjustment",
+    104: "sun_visors",
+    105: "steering_wheel",
+    106: "radio_1din",
+    107: "radio_2din",
+    108: "usb_connectors",
+    109: "instrument_cluster_trip_computer",
+    110: "driver_seat",
+    111: "passenger_seats",
+    112: "cab_clothes_hooks",
+    113: "cabin_storage",
+    114: "center_console_between_seats",
+    115: "wireless_charging",
+    116: "socket_12v",
+    117: "cigarette_lighter",
+    118: "ashtray",
+    120: "passenger_salon_seats",
+    121: "airflow_distribution",
+    122: "interior_trim_materials",
+    123: "seat_upholstery",
+    124: "floor_protective_covering",
+    125: "luggage_net",
+    126: "roof_ventilation_hatch",
+    127: "window_vents",
+    128: "passenger_compartment_heater",
+    129: "step_lighting",
+    130: "additional_usb_type_a_sockets",
+    131: "cup_holders",
+    132: "interior_rearview_mirror",
+    133: "passenger_compartment_air_conditioner",
+    134: "additional_independent_electric_heater",
+}
+
+PAZ_EXPANDED_TEXT_FIELD_BY_ROW = {
+    4: "production_start",
+    5: "bus_class",
+    9: "service_doors",
+    10: "passenger_capacity_text",
+    11: "seat_count_text",
+    12: "floor_level",
+    13: "luggage_volume_m3",
+    15: "passenger_salon_ceiling_height_mm",
+    17: "turning_radius_m",
+    22: "engine_torque",
+    23: "max_speed_kmh",
+    24: "ecology_class",
+    25: "fuel_consumption_per_100km",
+    28: "gas_cylinder_capacity_m3",
+    30: "front_suspension",
+    31: "rear_suspension",
+    32: "brake_system",
+    33: "brake_mechanisms",
+    34: "ventilation_system",
+    35: "passenger_compartment_heater",
+    38: "corrosion_warranty_years",
+}
+
+PAZ_EXPANDED_OPTION_FIELD_BY_ROW = {
+    42: "route_informer_full",
+    43: "route_informer_basic",
+    44: "route_indicator_stencil",
+    45: "video_surveillance_4_cameras",
+    46: "video_surveillance_8_cameras",
+    47: "video_surveillance_8_cameras_data_transfer",
+    48: "reverse_motion_buzzer",
+    49: "passenger_seat_belts_standard",
+    50: "passenger_seat_belts_comfort_three_point",
+    51: "yellow_door_open_signal",
+    52: "usb_sockets_mobile",
+    53: "accumulation_area_convector",
+    54: "double_flooring",
+    55: "high_performance_salon_heaters",
+    56: "passenger_door_insulation",
+    57: "tinted_salon_glazing",
+    58: "clear_double_glazed_windows_with_vents",
+    59: "tinted_double_glazed_windows_with_vents",
+    60: "luggage_shelves",
+    61: "window_curtains",
+    62: "glonass_gps_navigation",
+    63: "passenger_information_system_media_panels",
+    64: "public_address_system_internal",
+    65: "public_address_system_external_internal",
+    66: "payment_terminal",
+    67: "cashless_fare_payment_system",
+    68: "air_conditioner",
+    69: "without_air_conditioner",
+    70: "asmpp",
+    71: "tachograph_skzi",
+    72: "fire_suppression_system",
+    73: "non_base_body_color",
+    74: "additional_cng_cylinders",
+    75: "arctic_cng_cylinders",
+    76: "capacitive_fuel_level_sensor",
+    77: "additional_toolkit_1",
+    78: "first_aid_kit",
+    79: "two_fire_extinguishers_2l",
+    80: "warning_triangle",
+    81: "cabin_storage",
+    82: "cab_clothes_hooks",
+    83: "sun_visors",
+    84: "socket_12v",
+    85: "daytime_running_lights",
+    86: "fog_lights",
+    87: "mirror_heating",
+    88: "mirror_electric_adjustment",
+    89: "audio_preparation",
+    90: "radio_1din",
+    91: "radio_2din",
 }
 
 INTEGER_FIELDS = {
@@ -965,15 +1584,29 @@ def parse_paz_dimensions(raw: str | None) -> tuple[float | None, float | None, f
     if not text:
         return None, None, None
     head = clean_text(text.split("(", 1)[0])
-    if not head or has_range_marker(head):
+    if not head:
         return None, None, None
-    parts = [clean_text(part) for part in head.split("/")]
-    if len(parts) != 3:
-        return None, None, None
-    numbers = [strict_single_number(part) for part in parts]
-    if any(number is None for number in numbers):
+    numbers = number_tokens(head)
+    if len(numbers) < 3:
         return None, None, None
     return numbers[0], numbers[1], numbers[2]
+
+
+def parse_paz_conditioner_height(raw: str | None) -> float | None:
+    numbers = number_tokens(raw)
+    if len(numbers) < 4:
+        return None
+    return numbers[3]
+
+
+def parse_slash_pair_text(raw: str | None) -> tuple[str | None, str | None]:
+    text = clean_text(raw)
+    if not text:
+        return None, None
+    if "/" not in text:
+        return text, text
+    left, right = [clean_text(part) for part in text.split("/", 1)]
+    return left, right
 
 
 def parse_paz_seat_count(raw: str | None) -> int | None:
@@ -1788,21 +2421,29 @@ class GazPricingImporter:
             )
         return records
 
-    def apply_paz_expanded_exact_label(self, record: dict[str, Any], label: str, raw_value: str) -> tuple[str, str | None, float | None]:
+    def apply_paz_expanded_exact_label(
+        self,
+        record: dict[str, Any],
+        label: str,
+        raw_value: str,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, str | None, float | None]:
         label_text = clean_text(label)
         mapped = False
         value_num = None
         parse_comment = None
 
         if label_text == "Старт производства":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            record["production_start"] = raw_value
+            mapped = True
             value_num = strict_single_number(raw_value)
         elif label_text == "Класс":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            record["bus_class"] = raw_value
+            mapped = True
         elif label_text == "Колесная формула":
-            if raw_value == "4x2":
-                record["wheel_formula"] = raw_value
-                mapped = True
+            record["wheel_formula"] = raw_value
+            mapped = True
         elif label_text == "Полная / снаряженная массы, кг":
             gross_bounds, curb_bounds = parse_slash_pair_bounds(raw_value)
             if assign_numeric_range(record, "gross_weight_kg", *gross_bounds):
@@ -1813,21 +2454,36 @@ class GazPricingImporter:
                 if value_num is None:
                     value_num = record.get("curb_weight_kg")
         elif label_text == "Кол-во служебных дверей":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            record["service_doors"] = raw_value
+            mapped = True
+        elif label_text == "Нагрузка на переднюю/заднюю ось":
+            front_axle_load, rear_axle_load = parse_slash_pair_text(raw_value)
+            if front_axle_load is not None:
+                record["front_axle_load_kg"] = front_axle_load
+                mapped = True
+            if rear_axle_load is not None:
+                record["rear_axle_load_kg"] = rear_axle_load
+                mapped = True
         elif label_text == "Пассажировместимость общая":
+            record["passenger_capacity_text"] = raw_value
+            mapped = True
             value = strict_single_number(raw_value)
             if value is not None:
                 record["passenger_capacity"] = int(value)
-                mapped = True
                 value_num = value
         elif label_text == "Мест для сидения":
+            record["seat_count_text"] = raw_value
+            mapped = True
             value = parse_paz_seat_count(raw_value)
             if value is not None:
                 record["seat_count"] = value
-                mapped = True
                 value_num = float(value)
         elif label_text == "Уровень пола":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            record["floor_level"] = raw_value
+            mapped = True
+        elif label_text == "Объём багажника, м3":
+            record["luggage_volume_m3"] = raw_value
+            mapped = True
         elif label_text == "Габариты ДxШxВ, мм":
             length, width, height = parse_paz_dimensions(raw_value)
             if length is not None:
@@ -1839,12 +2495,22 @@ class GazPricingImporter:
             if height is not None:
                 record["height_mm"] = height
                 mapped = True
+            conditioner_height = parse_paz_conditioner_height(raw_value)
+            if conditioner_height is not None:
+                record["height_with_additional_air_conditioner_mm"] = f"{conditioner_height:g}"
+                mapped = True
+        elif label_text == "Высота салона":
+            record["passenger_salon_ceiling_height_mm"] = raw_value
+            mapped = True
         elif label_text == "Колесная база, мм":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["wheelbase_mm"] = value
                 mapped = True
                 value_num = value
+        elif label_text == "Радиус разворота":
+            record["turning_radius_m"] = raw_value
+            mapped = True
         elif label_text == "Дорожный просвет, мм":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -1852,46 +2518,82 @@ class GazPricingImporter:
                 mapped = True
                 value_num = value
         elif label_text == "Двигатель":
+            record["engine"] = raw_value
             fuel_type = parse_paz_fuel_type(raw_value)
             if fuel_type is not None:
                 record["engine_fuel_type"] = fuel_type
                 mapped = True
-            self.append_note(record, f"{label_text}: {raw_value}")
+            if not mapped:
+                mapped = True
         elif label_text == "Объем двигателя":
-            value = strict_single_number(raw_value)
+            value = parse_engine_volume(raw_value, label_text)
             if value is not None:
-                record["engine_volume_l"] = round(value, 3)
+                record["engine_volume_l"] = value
                 mapped = True
                 value_num = value
         elif label_text == "Мощность двигателя, л.с.":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["engine_power_hp"] = value
+                record["engine_power_kw"] = round(value / 1.35962, 2)
                 mapped = True
                 value_num = value
+        elif label_text == "Крутящий момент, Н*м":
+            record["engine_torque"] = raw_value
+            mapped = True
+            value_num = first_number(raw_value)
+        elif label_text == "Максимальная скорость, км/ч":
+            record["max_speed_kmh"] = raw_value
+            mapped = True
+        elif label_text == "Экология":
+            record["ecology_class"] = raw_value
+            mapped = True
+        elif label_text == "Расход топлива на л/м3/100 км":
+            record["fuel_consumption_per_100km"] = raw_value
+            mapped = True
+            value = first_number(raw_value)
+            if value is not None and record.get("fuel_consumption_l100km") is None:
+                record["fuel_consumption_l100km"] = value
         elif label_text == "КПП":
-            transmission_map = {
-                "6MT": ("MT", 6),
-                "6MT (Fast Gear 6J76Т)": ("MT", 6),
-                "6MT (ISUZU MYY6S)": ("MT", 6),
-                "6MT (Fast Gear)": ("MT", 6),
-                "6АТ (Fast Gear F6A145RB)": ("AT", 6),
-                "6АТ": ("AT", 6),
-                "5АТ": ("AT", 5),
-                "АКПП Voith 854.6S 4ст.": ("AT", 4),
-            }
-            transmission = transmission_map.get(raw_value)
-            if transmission is not None:
-                record["transmission_type"] = transmission[0]
-                record["transmission_gears"] = transmission[1]
+            transmission_type, transmission_gears = parse_transmission(raw_value)
+            if transmission_type is not None:
+                record["transmission_type"] = transmission_type
                 mapped = True
-                value_num = float(transmission[1])
+            if transmission_gears is not None:
+                record["transmission_gears"] = transmission_gears
+                mapped = True
+                value_num = float(transmission_gears)
         elif label_text == "Емкость топливного бака, л":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["fuel_tank_l"] = value
                 mapped = True
                 value_num = value
+        elif label_text == "Емкость газового баллона, м³":
+            record["gas_cylinder_capacity_m3"] = raw_value
+            mapped = True
+        elif label_text == "Шины":
+            record["front_tire_size"] = raw_value
+            record["rear_tire_size"] = raw_value
+            mapped = True
+        elif label_text == "Передняя подвеска":
+            record["front_suspension"] = raw_value
+            mapped = True
+        elif label_text == "Задняя подвеска":
+            record["rear_suspension"] = raw_value
+            mapped = True
+        elif label_text == "Тормозная системв":
+            record["brake_system"] = raw_value
+            mapped = True
+        elif label_text in {"Тормозные механизмы передние / задние", "Тормозные механизмы  передние / задние"}:
+            record["brake_mechanisms"] = raw_value
+            mapped = True
+        elif label_text == "Вентиляция":
+            record["ventilation_system"] = raw_value
+            mapped = True
+        elif label_text == "Система отопления":
+            record["passenger_compartment_heater"] = raw_value
+            mapped = True
         elif label_text == "Гарантия":
             months, km = parse_paz_warranty(raw_value)
             if months is not None:
@@ -1906,6 +2608,9 @@ class GazPricingImporter:
                 record["service_interval_km"] = value
                 mapped = True
                 value_num = value
+        elif label_text == "Гарантия на кузов":
+            record["corrosion_warranty_years"] = raw_value
+            mapped = True
         elif label_text == "Цена по прайсу, тыс. руб. с НДС":
             _, price_min, price_max, price_comment = parse_paz_price(raw_value)
             if price_min is not None and price_max is not None:
@@ -1917,28 +2622,6 @@ class GazPricingImporter:
             else:
                 parse_comment = price_comment
             if re.search(r"[A-Za-zА-Яа-я]", raw_value):
-                self.append_note(record, f"{label_text}: {raw_value}")
-        elif label_text in {
-            "Нагрузка на переднюю/заднюю ось",
-            "Объём багажника, м3",
-            "Высота салона",
-            "Радиус разворота",
-            "Крутящий момент, Н*м",
-            "Максимальная скорость, км/ч",
-            "Экология",
-            "Расход топлива на л/м3/100 км",
-            "Емкость газового баллона, м³",
-            "Шины",
-            "Передняя подвеска",
-            "Задняя подвеска",
-            "Тормозная системв",
-            "Тормозные механизмы передние / задние",
-            "Тормозные механизмы  передние / задние",
-            "Вентиляция",
-            "Система отопления",
-            "Гарантия на кузов",
-        }:
-            if label_text in {"Экология"}:
                 self.append_note(record, f"{label_text}: {raw_value}")
         else:
             raise ValueError(f"{record['source_sheet']}: unexpected label {label_text!r}")
@@ -1960,6 +2643,9 @@ class GazPricingImporter:
                 raw_value = clean_text(ws.cell(row_index, column_index).value)
                 if raw_value is None:
                     continue
+                option_field = PAZ_EXPANDED_OPTION_FIELD_BY_ROW.get(row_index)
+                if option_field is not None:
+                    record[option_field] = raw_value
                 status_raw, status_norm, price_raw, price_rub = parse_paz_option_value(raw_value)
                 if status_raw is None and price_raw is not None:
                     status_raw = "опция"
@@ -2099,6 +2785,7 @@ class GazPricingImporter:
                     body_type="bus",
                 )
             )
+            records[-1]["level"] = clean_text(ws.cell(1, column_index).value)
         return records
 
     def parse_bus_power_exact(self, raw_value: str) -> tuple[float | None, float | None]:
@@ -2109,13 +2796,23 @@ class GazPricingImporter:
         hp = parse_number_literal(match.group(2))
         return hp, kw
 
-    def apply_bus_ttx_exact_label(self, record: dict[str, Any], label: str, raw_value: str) -> tuple[str, str | None, float | None]:
+    def apply_bus_ttx_exact_label(
+        self,
+        record: dict[str, Any],
+        label: str,
+        raw_value: str,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, str | None, float | None]:
         label_text = clean_text(label)
         mapped = False
         value_num = None
 
         if label_text == "Класс автобуса":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["bus_class"] = value
+                mapped = True
         elif label_text == "Кол-во мест для сидения (включая водителя), чел.":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -2155,15 +2852,26 @@ class GazPricingImporter:
                 mapped = True
                 value_num = value
         elif label_text == "без задн.подножки, мм":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["length_without_rear_step_mm"] = value
+                mapped = True
         elif label_text == "колесная база, мм":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["wheelbase_mm"] = value
                 mapped = True
                 value_num = value
-        elif label_text in {"передний свес, мм", "задний свес, мм"}:
-            self.append_note(record, f"{label_text}: {raw_value}")
+        elif label_text == "передний свес, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["front_overhang_mm"] = value
+                mapped = True
+        elif label_text == "задний свес, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_overhang_mm"] = value
+                mapped = True
         elif label_text == "Ширина, мм":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -2177,18 +2885,50 @@ class GazPricingImporter:
                 mapped = True
                 value_num = value
         elif label_text == "Высота с доп. кондиционером, мм":
-            self.append_note(record, f"{label_text}: {raw_value}")
-        elif label_text in {
-            "Ширина проема боковой двери, мм",
-            "Высота проема боковой двери, мм",
-            "Высота проема боковой двери от ступеньки, мм",
-            "Высота проема задних дверей, мм",
-            "Ширина проема задних дверей, мм",
-            "Высота потолка в пассажирском салоне, мм",
-            "Ширина между входными поручнями",
-            "Мин. радиус разворота, м",
-        }:
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["height_with_additional_air_conditioner_mm"] = value
+                mapped = True
+        elif label_text == "Ширина проема боковой двери, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["side_door_opening_width_mm"] = value
+                mapped = True
+        elif label_text == "Высота проема боковой двери, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["side_door_opening_height_mm"] = value
+                mapped = True
+        elif label_text == "Высота проема боковой двери от ступеньки, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["side_door_opening_height_from_step_mm"] = value
+                mapped = True
+        elif label_text == "Высота проема задних дверей, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_door_opening_height_mm"] = value
+                mapped = True
+        elif label_text == "Ширина проема задних дверей, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_door_opening_width_mm"] = value
+                mapped = True
+        elif label_text == "Высота потолка в пассажирском салоне, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["passenger_salon_ceiling_height_mm"] = value
+                mapped = True
+        elif label_text == "Ширина между входными поручнями":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["width_between_entrance_handrails_mm"] = value
+                mapped = True
+        elif label_text == "Мин. радиус разворота, м":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["turning_radius_m"] = value
+                mapped = True
         elif label_text == "Дорожный просвет, мм":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -2196,6 +2936,10 @@ class GazPricingImporter:
                 mapped = True
                 value_num = value
         elif label_text == "Двигатель":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine"] = value
+                mapped = True
             self.append_note(record, f"{label_text}: {raw_value}")
         elif label_text == "Топливо":
             record["engine_fuel_type"] = raw_value
@@ -2215,8 +2959,26 @@ class GazPricingImporter:
                 record["engine_power_kw"] = kw
                 mapped = True
                 value_num = kw
-        elif label_text in {"при об. мин.", "Крутящий момент", "Экологический класс"}:
-            self.append_note(record, f"{label_text}: {raw_value}")
+        elif label_text == "при об. мин." and row_index == 33:
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_power_rpm"] = value
+                mapped = True
+        elif label_text == "Крутящий момент":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_torque"] = value
+                mapped = True
+        elif label_text == "при об. мин." and row_index == 35:
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_torque_rpm"] = value
+                mapped = True
+        elif label_text == "Экологический класс":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["ecology_class"] = value
+                mapped = True
         elif label_text == "КПП":
             record["transmission_type"] = raw_value
             mapped = True
@@ -2228,14 +2990,36 @@ class GazPricingImporter:
             if gears is not None:
                 record["transmission_gears"] = gears
                 value_num = float(gears)
-        elif label_text in {
-            "Задний блокируемый дифференциал",
-            "Тормозные механизмы",
-            "Электронная тормозная система",
-            "Стояночный тормоз",
-            "Блокируемый дифференциал",
-        }:
-            self.append_note(record, f"{label_text}: {raw_value}")
+        elif label_text == "Задний блокируемый дифференциал":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_locking_differential"] = value
+                mapped = True
+        elif label_text == "Тормозное управление":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["brake_system"] = value
+                mapped = True
+        elif label_text == "Тормозные механизмы":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["brake_mechanisms"] = value
+                mapped = True
+        elif label_text == "Электронная тормозная система":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["electronic_brake_system"] = value
+                mapped = True
+        elif label_text == "Стояночный тормоз":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["parking_brake"] = value
+                mapped = True
+        elif label_text == "Блокируемый дифференциал":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["locking_differential"] = value
+                mapped = True
         elif label_text == "Топливный бак, л":
             value = primary_numeric_value(raw_value)
             if value is not None:
@@ -2249,8 +3033,26 @@ class GazPricingImporter:
                 record["wheel_formula"] = f"{formula_match.group(1)}x{formula_match.group(2)}"
                 record["drive_type"] = clean_text(formula_match.group(3))
                 mapped = True
-        elif label_text in {"Ошиновка", "Размер шин передних", "задних", "Диски"}:
-            self.append_note(record, f"{label_text}: {raw_value}")
+        elif label_text == "Ошиновка":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["tire_configuration"] = value
+                mapped = True
+        elif label_text == "Размер шин передних":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["front_tire_size"] = value
+                mapped = True
+        elif label_text == "задних" and row_index == 49:
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_tire_size"] = value
+                mapped = True
+        elif label_text == "Диски":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["discs"] = value
+                mapped = True
         elif label_text == "Гарантия общая, мес./пробег тыс. км":
             months, km = parse_combined_warranty_value(raw_value)
             if months is not None:
@@ -2260,7 +3062,10 @@ class GazPricingImporter:
                 record["warranty_km"] = km
                 mapped = True
         elif label_text == "Гарантия от сквозной коррозии":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["corrosion_warranty_years"] = value
+                mapped = True
         elif label_text == "Межсервисный интервал, км":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -2308,6 +3113,9 @@ class GazPricingImporter:
                     raw_value = clean_text(ws.cell(row_index, column_index).value)
                     if raw_value is None:
                         continue
+                    field = BUS_TTX_OPTION_FIELD_BY_ROW.get(row_index)
+                    if field is not None:
+                        record[field] = raw_value
                     self.insert_option_row(
                         ctx,
                         record=record,
@@ -2384,7 +3192,10 @@ class GazPricingImporter:
                 mapped = True
                 value_num = float(value)
         elif label_text == 'Модификация "спальник" или "двухрядка"':
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["cab_modification"] = value
+                mapped = True
         elif label_text == "Полная масса, кг":
             if assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value):
                 mapped = True
@@ -2398,6 +3209,10 @@ class GazPricingImporter:
                 mapped = True
                 value_num = record.get("payload_kg")
         elif label_text == "Габаритные размеры шасси, мм (ДхШхВ)":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["chassis_dimensions"] = value
+                mapped = True
             length, width, height = parse_ldt_dimensions(raw_value)
             if length is not None:
                 record["length_mm"] = length
@@ -2408,6 +3223,21 @@ class GazPricingImporter:
             if height is not None:
                 record["height_mm"] = height
                 mapped = True
+        elif label_text == "Мин. радиус разворота, м":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["turning_radius_m"] = value
+                mapped = True
+        elif label_text == "Колея передних колес, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["front_track_mm"] = value
+                mapped = True
+        elif label_text == "Погрузочная высота шасси, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["loading_height_mm"] = value
+                mapped = True
         elif label_text == "Дорожный просвет, мм":
             value = primary_numeric_value(raw_value)
             if value is not None:
@@ -2415,9 +3245,15 @@ class GazPricingImporter:
                 mapped = True
                 value_num = value
         elif label_text == "Двигатель":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine"] = value
+                mapped = True
         elif label_text == "Экологический класс":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["ecology_class"] = value
+                mapped = True
         elif label_text == "Объем двигателя, л":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -2439,20 +3275,30 @@ class GazPricingImporter:
                 mapped = True
             if kw is not None:
                 value_num = kw
-        elif label_text == "Коробка передач":
-            transmission_map = {
-                "6МКПП": ("MT", 6),
-                "5МКПП": ("MT", 5),
-                "8МКПП": ("MT", 8),
-            }
-            transmission = transmission_map.get(raw_value)
-            if transmission is not None:
-                record["transmission_type"] = transmission[0]
-                record["transmission_gears"] = transmission[1]
+        elif label_text == "при об/мин":
+            value = clean_text(raw_value)
+            if value is not None:
+                if record.get("engine_power_rpm") is None:
+                    record["engine_power_rpm"] = value
+                else:
+                    record["engine_torque_rpm"] = value
                 mapped = True
-                value_num = float(transmission[1])
+        elif label_text == "Max крутящий момент, Н*м":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_torque"] = value
+                mapped = True
+        elif label_text == "Коробка передач":
+            transmission_type, gears = parse_transmission(raw_value)
+            if transmission_type is not None:
+                record["transmission_type"] = transmission_type
+                mapped = True
+            if gears is not None:
+                record["transmission_gears"] = gears
+                mapped = True
+                value_num = float(gears)
         elif label_text == "Топливный бак, л":
-            value = strict_single_number(raw_value)
+            value = first_number(raw_value)
             if value is not None:
                 record["fuel_tank_l"] = value
                 mapped = True
@@ -2470,52 +3316,113 @@ class GazPricingImporter:
                     if km is not None:
                         record["warranty_km"] = km * 1000.0
                         mapped = True
+        elif label_text == "Система нейтрализации":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["neutralization_system"] = value
+                mapped = True
+        elif label_text == "Аккумулятор":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["battery"] = value
+                mapped = True
+        elif label_text == "Генератор":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["generator"] = value
+                mapped = True
+        elif label_text == "Напряжение бортовой сети":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["onboard_voltage"] = value
+                mapped = True
+        elif label_text == "Тормозная система":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["brake_system"] = value
+                mapped = True
+        elif label_text == "Тормозные механизмы":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["brake_mechanisms"] = value
+                mapped = True
+        elif label_text == "Электронная тормозная система":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["electronic_brake_system"] = value
+                mapped = True
+        elif label_text == "Стояночный тормоз":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["parking_brake"] = value
+                mapped = True
+        elif label_text == "Горный тормоз":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_brake"] = value
+                mapped = True
         elif label_text == "Межсервисный интервал, км":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["service_interval_km"] = value
                 mapped = True
                 value_num = value
+        elif label_text == "От сквозной коррозии, лет":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["corrosion_warranty_years"] = value
+                mapped = True
+        elif label_text == "Первое ТО":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["first_maintenance"] = value
+                mapped = True
+        elif label_text == "Эксклюзивные опции":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["exclusive_options"] = value
+                mapped = True
+        elif label_text == "Конструктивные особенности":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["design_features"] = value
+                mapped = True
         elif label_text == "Средний расход топлива фактический, л/100 км":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["fuel_consumption_l100km"] = value
                 mapped = True
                 value_num = value
+        elif label_text == "Стоимость владения, руб":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["ownership_cost_total_rub"] = value
+                mapped = True
         elif label_text == "Цена а/м":
             if self.set_price(record, raw_value, label_text):
                 mapped = True
                 value_num = strict_single_number(raw_value)
+        elif label_text == "Страховка+налоги+лизинг за период":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["insurance_taxes_leasing_period"] = value
+                mapped = True
+        elif label_text == "Cтоимость ТО за период":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["maintenance_cost_period"] = value
+                mapped = True
+        elif label_text == "Стоимость ТО и б/и запчастей":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["maintenance_and_used_spare_parts_cost"] = value
+                mapped = True
         elif label_text == "Затраты на 1 км пробега":
             value = strict_single_number(raw_value)
             if value is not None:
                 record["ownership_cost_rub_km"] = value
                 mapped = True
                 value_num = value
-        elif label_text in {
-            "Мин. радиус разворота, м",
-            "Колея передних колес, мм",
-            "Погрузочная высота шасси, мм",
-            "при об/мин",
-            "Max крутящий момент, Н*м",
-            "Система нейтрализации",
-            "Аккумулятор",
-            "Генератор",
-            "Напряжение бортовой сети",
-            "Тормозная система",
-            "Тормозные механизмы",
-            "Электронная тормозная система",
-            "Стояночный тормоз",
-            "Горный тормоз",
-            "От сквозной коррозии, лет",
-            "Первое ТО",
-            "Эксклюзивные опции",
-            "Конструктивные особенности",
-            "Страховка+налоги+лизинг за период",
-            "Cтоимость ТО за период",
-            "Стоимость ТО и б/и запчастей",
-        }:
-            pass
         else:
             raise ValueError(f"{record['source_sheet']}: unexpected label {label_text!r}")
 
@@ -2535,6 +3442,89 @@ class GazPricingImporter:
                 raw_value = clean_text(ws.cell(row_index, column_index).value)
                 if raw_value is None:
                     continue
+                if row_index == 33:
+                    record["cruise_control"] = raw_value
+                elif row_index == 34:
+                    record["instrument_cluster_trip_computer"] = raw_value
+                elif row_index == 35:
+                    record["air_conditioner"] = raw_value
+                elif row_index == 36:
+                    record["preheater"] = raw_value
+                elif row_index == 37:
+                    record["driver_seat"] = raw_value
+                elif row_index == 38:
+                    record["driver_seat_heating"] = raw_value
+                elif row_index == 39:
+                    record["passenger_seats"] = raw_value
+                elif row_index == 40:
+                    record["passenger_seat_heating"] = raw_value
+                elif row_index == 41:
+                    record["airbag"] = raw_value
+                elif row_index == 42:
+                    record["cabin_storage"] = raw_value
+                elif row_index == 43:
+                    record["sun_visors"] = raw_value
+                elif row_index == 44:
+                    record["tinting"] = raw_value
+                elif row_index == 45:
+                    record["fuel_filter"] = raw_value
+                elif row_index == 46:
+                    record["steering_column_adjustment"] = raw_value
+                elif row_index == 47:
+                    record["headlights"] = raw_value
+                elif row_index == 48:
+                    record["daytime_running_lights"] = raw_value
+                elif row_index == 49:
+                    record["headlight_adjustment"] = raw_value
+                elif row_index == 50:
+                    record["fog_lights"] = raw_value
+                elif row_index == 51:
+                    record["central_lock"] = raw_value
+                elif row_index == 52:
+                    record["era_glonass"] = raw_value
+                elif row_index == 53:
+                    record["tachograph"] = raw_value
+                elif row_index == 54:
+                    record["tachograph_preparation"] = raw_value
+                elif row_index == 55:
+                    record["radio_1din"] = raw_value
+                elif row_index == 56:
+                    record["radio_2din"] = raw_value
+                elif row_index == 57:
+                    record["multifunction_steering_wheel"] = raw_value
+                elif row_index == 58:
+                    record["rear_view_camera"] = raw_value
+                elif row_index == 59:
+                    record["parking_sensors"] = raw_value
+                elif row_index == 60:
+                    record["mirror_heating"] = raw_value
+                elif row_index == 61:
+                    record["mirror_electric_adjustment"] = raw_value
+                elif row_index == 62:
+                    record["power_windows"] = raw_value
+                elif row_index == 63:
+                    record["additional_cabin_insulation"] = raw_value
+                elif row_index == 64:
+                    front, rear = parse_slash_pair_text(raw_value)
+                    if front is not None:
+                        record["front_suspension"] = front
+                    if rear is not None:
+                        record["rear_suspension"] = rear
+                elif row_index == 65:
+                    record["stabilizer_bar"] = raw_value
+                elif row_index == 66:
+                    record["front_tire_size"] = raw_value
+                    record["rear_tire_size"] = raw_value
+                elif row_index == 67:
+                    record["toolbox"] = raw_value
+                elif row_index == 68:
+                    record["reverse_motion_buzzer"] = raw_value
+                elif row_index == 69:
+                    record["pto"] = raw_value
+                elif row_index == 70:
+                    record["pto_hatch"] = raw_value
+                elif row_index == 71:
+                    record["fairing"] = raw_value
                 self.insert_option_row(
                     ctx,
                     record=record,
@@ -2859,7 +3849,14 @@ class GazPricingImporter:
 
             raise RuntimeError(f"БОРТ_ТТХ и состав: duplicate model header cannot be disambiguated: {full_name}")
 
-    def apply_bort_ttx_label(self, record: dict[str, Any], label: str, raw_value: str) -> tuple[str, str | None]:
+    def apply_bort_ttx_label(
+        self,
+        record: dict[str, Any],
+        label: str,
+        raw_value: str,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, str | None]:
         mapped = False
         label_text = clean_text(label)
 
@@ -2877,8 +3874,13 @@ class GazPricingImporter:
             mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса а/м, кг":
             mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
-        elif label_text in {"Грузоподьемность а/м, кг", "грузоподьемность шасси, кг"}:
+        elif label_text == "Грузоподьемность а/м, кг":
             mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value, prefer_existing=True) or mapped
+        elif label_text == "грузоподьемность шасси, кг":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["chassis_payload_kg"] = value
+                mapped = True
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length, width, height = parse_dimensions(raw_value)
             if length is not None:
@@ -2896,6 +3898,10 @@ class GazPricingImporter:
                 record["ground_clearance_mm"] = value
                 mapped = True
         elif label_text == "Двигатель":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine"] = value
+                mapped = True
             self.append_note(record, f"{label_text}: {raw_value}")
         elif label_text == "топливо":
             value = clean_text(raw_value)
@@ -2963,6 +3969,11 @@ class GazPricingImporter:
             if value is not None:
                 record["ownership_cost_rub_km"] = value
                 mapped = True
+        elif row_index in BORT_TTX_EXTRA_FIELD_BY_ROW:
+            value = clean_text(raw_value)
+            if value is not None:
+                record[BORT_TTX_EXTRA_FIELD_BY_ROW[row_index]] = value
+                mapped = True
 
         status = "parsed" if mapped else ("partial" if number_tokens(raw_value) else "text")
         return status, None
@@ -2980,7 +3991,14 @@ class GazPricingImporter:
             }
         raise RuntimeError("ЦМФ_ТТХ и состав: unsupported layout")
 
-    def apply_cmf_ttx_label(self, record: dict[str, Any], label: str, raw_value: str) -> tuple[str, str | None]:
+    def apply_cmf_ttx_label(
+        self,
+        record: dict[str, Any],
+        label: str,
+        raw_value: str,
+        *,
+        row_index: int | None = None,
+    ) -> tuple[str, str | None]:
         mapped = False
         label_text = clean_text(label)
 
@@ -3021,6 +4039,10 @@ class GazPricingImporter:
                 record["ground_clearance_mm"] = value
                 mapped = True
         elif label_text == "Двигатель":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine"] = value
+                mapped = True
             self.append_note(record, f"{label_text}: {raw_value}")
         elif label_text == "Топливо":
             value = clean_text(raw_value)
@@ -3061,6 +4083,12 @@ class GazPricingImporter:
             if wheel_formula is not None:
                 record["wheel_formula"] = wheel_formula
                 mapped = True
+        elif label_text == "Размер шин":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["front_tire_size"] = value
+                record["rear_tire_size"] = value
+                mapped = True
         elif label_text == "Гарантия общая, мес./пробег тыс. км":
             months, km = parse_combined_warranty_value(raw_value)
             if months is not None:
@@ -3079,6 +4107,11 @@ class GazPricingImporter:
             if value is not None:
                 record["fuel_consumption_l100km"] = value
                 mapped = True
+        elif row_index in CMF_TTX_EXTRA_FIELD_BY_ROW:
+            value = clean_text(raw_value)
+            if value is not None:
+                record[CMF_TTX_EXTRA_FIELD_BY_ROW[row_index]] = value
+                mapped = True
 
         status = "parsed" if mapped else ("partial" if number_tokens(raw_value) else "text")
         return status, None
@@ -3088,7 +4121,10 @@ class GazPricingImporter:
         label_text = clean_text(label)
 
         if label_text == "Цена без учета скидок и акций, руб.":
-            mapped = self.set_price(record, raw_value, label_text) or mapped
+            value = clean_text(raw_value)
+            if value is not None:
+                record["price_without_discounts_rub"] = value
+                mapped = True
         elif label_text == "Колесная база, мм":
             value = primary_numeric_value(raw_value)
             if value is not None:
@@ -3106,6 +4142,16 @@ class GazPricingImporter:
                 mapped = True
         elif label_text == "Полная масса":
             mapped = assign_primary_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
+        elif label_text == "категория прав":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["license_category"] = value
+                mapped = True
+        elif label_text == "Категория ТС":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["vehicle_category"] = value
+                mapped = True
         elif label_text == "Снаряженная масса, кг":
             mapped = assign_primary_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность, кг":
@@ -3125,13 +4171,81 @@ class GazPricingImporter:
             if value is not None:
                 record["height_mm"] = value
                 mapped = True
+        elif label_text == "передний свес, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["front_overhang_mm"] = value
+                mapped = True
+        elif label_text == "задний свес, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_overhang_mm"] = value
+                mapped = True
+        elif label_text == "Ширина проема боковой двери, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["side_door_opening_width_mm"] = value
+                mapped = True
+        elif label_text == "Высота проема боковой двери, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["side_door_opening_height_mm"] = value
+                mapped = True
+        elif label_text == "Высота проема задних дверей, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_door_opening_height_mm"] = value
+                mapped = True
+        elif label_text == "Ширина проема задних дверей, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_door_opening_width_mm"] = value
+                mapped = True
+        elif label_text == "Погруз-я высота, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["loading_height_mm"] = value
+                mapped = True
+        elif label_text == "Длина грузового/грузопассажирского отсека, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["cargo_compartment_length_mm"] = value
+                mapped = True
+        elif label_text == "Ширина грузового/грузопассажирского отсека, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["cargo_compartment_width_mm"] = value
+                mapped = True
+        elif label_text == "Высота грузового/грузопассажирского отсека, мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["cargo_compartment_height_mm"] = value
+                mapped = True
+        elif label_text == "Объем грузового/грузопассажирского отсека, м³":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["cargo_compartment_volume_m3"] = value
+                mapped = True
+        elif label_text == "Мин. радиус разворота, м":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["turning_radius_m"] = value
+                mapped = True
         elif label_text == "Дорожный просвет, мм":
             value = primary_numeric_value(raw_value)
             if value is not None:
                 record["ground_clearance_mm"] = value
                 mapped = True
+        elif label_text == "Глкбина преодолеваемого брода, до мм":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["fording_depth_mm"] = value
+                mapped = True
         elif label_text == "Двигатель":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine"] = value
+                mapped = True
         elif label_text == "Топливо":
             value = clean_text(raw_value)
             if value:
@@ -3150,6 +4264,29 @@ class GazPricingImporter:
             if kw is not None:
                 record["engine_power_kw"] = kw
                 mapped = True
+        elif label_text == "при об. мин.":
+            value = clean_text(raw_value)
+            if value is not None:
+                if record.get("engine_power_rpm") is None:
+                    record["engine_power_rpm"] = value
+                else:
+                    record["engine_torque_rpm"] = value
+                mapped = True
+        elif label_text == "Крутящий момент":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_torque"] = value
+                mapped = True
+        elif label_text == "Экологический класс":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["ecology_class"] = value
+                mapped = True
+        elif label_text == "Ключ зажигания":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["engine_start"] = value
+                mapped = True
         elif label_text == "КПП":
             transmission_type, gears = parse_transmission(raw_value)
             if transmission_type is not None:
@@ -3157,6 +4294,36 @@ class GazPricingImporter:
                 mapped = True
             if gears is not None:
                 record["transmission_gears"] = gears
+                mapped = True
+        elif label_text == "Раздаточная коробка":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["transfer_case"] = value
+                mapped = True
+        elif label_text == "Передаточное число понижающей передачи":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["low_range_ratio"] = value
+                mapped = True
+        elif label_text == "Тормозное управление":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["brake_system"] = value
+                mapped = True
+        elif label_text == "Тормозные механизмы":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["brake_mechanisms"] = value
+                mapped = True
+        elif label_text == "Электронная тормозная система":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["electronic_brake_system"] = value
+                mapped = True
+        elif label_text == "Стояночный тормоз":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["parking_brake"] = value
                 mapped = True
         elif label_text == "Топливный бак, л":
             value = primary_numeric_value(raw_value)
@@ -3170,6 +4337,26 @@ class GazPricingImporter:
                 mapped = True
             if wheel_formula is not None:
                 record["wheel_formula"] = wheel_formula
+                mapped = True
+        elif label_text == "Ошиновка":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["tire_configuration"] = value
+                mapped = True
+        elif label_text == "Размер шин передних":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["front_tire_size"] = value
+                mapped = True
+        elif label_text == "задних":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["rear_tire_size"] = value
+                mapped = True
+        elif label_text == "Диски":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["discs"] = value
                 mapped = True
         elif label_text == "Гарантия общая, мес./пробег тыс. км":
             months, km = parse_combined_warranty_value(raw_value)
@@ -3186,10 +4373,47 @@ class GazPricingImporter:
             if value is not None:
                 record["service_interval_km"] = value
                 mapped = True
+        elif label_text == "Гарантия от сквозной коррозии":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["corrosion_warranty_years"] = value
+                mapped = True
+        elif label_text == "Первое ТО":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["first_maintenance"] = value
+                mapped = True
+        elif label_text == "Эксклюзивные опции":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["exclusive_options"] = value
+                mapped = True
+        elif label_text == "Конструктивные особенности":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["design_features"] = value
+                mapped = True
         elif label_text == "Средний расход топлива фактический, л/100 км":
             value = primary_numeric_value(raw_value)
             if value is not None:
                 record["fuel_consumption_l100km"] = value
+                mapped = True
+        elif label_text == "Цена а/м":
+            mapped = self.set_price(record, raw_value, label_text) or mapped
+        elif label_text == "Страховка+налоги за период":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["insurance_taxes_period"] = value
+                mapped = True
+        elif label_text == "Cтоимость ТО за период":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["maintenance_cost_period"] = value
+                mapped = True
+        elif label_text == "Стоимость б/и запчастей":
+            value = clean_text(raw_value)
+            if value is not None:
+                record["used_spare_parts_cost"] = value
                 mapped = True
         elif label_text == "Затраты на 1 км пробега":
             value = primary_numeric_value(raw_value)
@@ -3205,7 +4429,10 @@ class GazPricingImporter:
         label_text = clean_text(label)
 
         if label_text == "Цена без учета скидок и акций, руб.":
-            mapped = self.set_price(record, raw_value, label_text) or mapped
+            value = clean_text(raw_value)
+            if value is not None:
+                record["price_without_discounts_rub"] = value
+                mapped = True
         elif label_text == "Колесная база, мм":
             value = primary_numeric_value(raw_value)
             if value is not None:
@@ -3419,6 +4646,7 @@ class GazPricingImporter:
         ws = ctx["ws"]
         records_by_col = {record["column_index"]: record for record in records}
         option_rows = [
+            (58, "Функциональность / Зимний пакет"),
             (59, "Функциональность / Зимний пакет"),
             (60, "Функциональность / Зимний пакет"),
             (61, "Функциональность / Зимний пакет"),
@@ -3485,7 +4713,6 @@ class GazPricingImporter:
             (132, "Пассажирский салон"),
             (133, "Пассажирский салон"),
             (134, "Пассажирский салон"),
-            (143, "Дополнительно / Эксклюзивные опции"),
         ]
         for row_index, option_group in option_rows:
             option_name = clean_text(ws.cell(row_index, 1).value)
@@ -3495,6 +4722,9 @@ class GazPricingImporter:
                 raw_value = clean_text(ws.cell(row_index, column_index).value)
                 if raw_value is None:
                     continue
+                field = MINIVAN_OPTION_FIELD_BY_ROW.get(row_index)
+                if field is not None:
+                    record[field] = raw_value
                 self.insert_option_row(
                     ctx,
                     record=record,
@@ -4288,7 +5518,12 @@ class GazPricingImporter:
                 raw_value = clean_text(ws.cell(row_index, column_index).value)
                 if raw_value is None:
                     continue
-                parse_status, parse_comment, value_num = self.apply_paz_expanded_exact_label(record, label, raw_value)
+                parse_status, parse_comment, value_num = self.apply_paz_expanded_exact_label(
+                    record,
+                    label,
+                    raw_value,
+                    row_index=row_index,
+                )
                 raw_row = self.raw_row(
                     ctx,
                     sheet_type="technical",
@@ -4322,15 +5557,32 @@ class GazPricingImporter:
             vehicle_type="truck",
             body_type="flatbed",
         )
-        self.ingest_model_matrix(
-            ctx,
-            sheet_type="technical",
-            records=records,
-            label_col=1,
-            row_start=4,
-            row_end=ws.max_row,
-            apply_label=self.apply_bort_ttx_label,
-        )
+        for record in records:
+            record["level"] = clean_text(ws.cell(1, record["column_index"]).value)
+        for row_index in range(4, ws.max_row + 1):
+            label = clean_text(ws.cell(row_index, 1).value)
+            if not label:
+                continue
+            for record in records:
+                column_index = record["column_index"]
+                raw_value = clean_text(ws.cell(row_index, column_index).value)
+                if raw_value is None:
+                    continue
+                parse_status, parse_comment = self.apply_bort_ttx_label(record, label, raw_value, row_index=row_index)
+                self.insert_raw(
+                    self.raw_row(
+                        ctx,
+                        sheet_type="technical",
+                        record_scope="model",
+                        param_name_raw=label,
+                        value_raw=raw_value,
+                        row_order=row_index,
+                        column_order=column_index,
+                        comp_record=record,
+                        parse_status=parse_status,
+                        parse_comment=parse_comment,
+                    )
+                )
         for record in records:
             self.insert_normalized(record)
 
@@ -4349,15 +5601,32 @@ class GazPricingImporter:
             vehicle_type="van",
             body_type="panel_van",
         )
-        self.ingest_model_matrix(
-            ctx,
-            sheet_type="technical",
-            records=records,
-            label_col=1,
-            row_start=4,
-            row_end=ws.max_row,
-            apply_label=self.apply_cmf_ttx_label,
-        )
+        for record in records:
+            record["level"] = clean_text(ws.cell(1, record["column_index"]).value)
+        for row_index in range(4, ws.max_row + 1):
+            label = clean_text(ws.cell(row_index, 1).value)
+            if not label:
+                continue
+            for record in records:
+                column_index = record["column_index"]
+                raw_value = clean_text(ws.cell(row_index, column_index).value)
+                if raw_value is None:
+                    continue
+                parse_status, parse_comment = self.apply_cmf_ttx_label(record, label, raw_value, row_index=row_index)
+                self.insert_raw(
+                    self.raw_row(
+                        ctx,
+                        sheet_type="technical",
+                        record_scope="model",
+                        param_name_raw=label,
+                        value_raw=raw_value,
+                        row_order=row_index,
+                        column_order=column_index,
+                        comp_record=record,
+                        parse_status=parse_status,
+                        parse_comment=parse_comment,
+                    )
+                )
         for record in records:
             self.insert_normalized(record)
 
@@ -4500,6 +5769,7 @@ class GazPricingImporter:
             36: "Экологический класс",
             37: "КПП",
             38: "Задний блокируемый дифференциал",
+            39: "Тормозное управление",
             40: "Тормозные механизмы",
             41: "Электронная тормозная система",
             42: "Стояночный тормоз",
@@ -4523,7 +5793,12 @@ class GazPricingImporter:
                 raw_value = clean_text(ws.cell(row_index, column_index).value)
                 if raw_value is None:
                     continue
-                parse_status, parse_comment, _ = self.apply_bus_ttx_exact_label(record, expected_label, raw_value)
+                parse_status, parse_comment, _ = self.apply_bus_ttx_exact_label(
+                    record,
+                    expected_label,
+                    raw_value,
+                    row_index=row_index,
+                )
                 self.insert_raw(
                     self.raw_row(
                         ctx,
@@ -4546,7 +5821,7 @@ class GazPricingImporter:
             raw_price = clean_text(ws.cell(120, column_index).value)
             if raw_price is None:
                 continue
-            parse_status, parse_comment, _ = self.apply_bus_ttx_exact_label(record, "Цена", raw_price)
+            parse_status, parse_comment, _ = self.apply_bus_ttx_exact_label(record, "Цена", raw_price, row_index=120)
             self.insert_raw(
                 self.raw_row(
                     ctx,

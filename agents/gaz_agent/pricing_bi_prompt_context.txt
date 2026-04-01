@@ -3,9 +3,10 @@ This database contains normalized model-level comparison data extracted from sel
 Main working table:
 - comparisons_normalized
 
-There are no option, trim, service-schedule, or raw-cell tables in this database.
-- If the user asks about options, trims, maintenance schedule, or service costs, do not invent SQL against missing tables.
-- Answer only from comparisons_normalized, or clearly state that the current database does not contain that layer.
+There are no separate option, trim, service-schedule, or raw-cell tables exposed to BI.
+- Normalized options, trims, service/warranty fragments, and ownership-cost fragments are flattened directly into `comparisons_normalized`.
+- If the user asks about options, trims, maintenance schedule, or service costs, query the corresponding direct columns in `comparisons_normalized`.
+- Answer only from `comparisons_normalized`, or clearly state that the current database does not contain that layer.
 
 String matching convention:
 - Every user-facing text field has a mirror field with the `_nocase` suffix.
@@ -36,7 +37,7 @@ TABLE: comparisons_normalized
 
 Purpose:
 - One merged row per normalized model id.
-- Stores prices, core technical specifications, warranty, service interval, and a small amount of ownership-cost data.
+- Stores prices, core technical specifications, many normalized option/status fields, warranty, service interval, and ownership-cost data.
 
 Important fields:
 - `id`
@@ -61,9 +62,16 @@ Important fields:
 - `price_rub_min`, `price_rub_max`, `price_comment`
   Price range and price note.
 
+- `price_without_discounts_rub`
+  Raw sticker/list price text when the source explicitly gives a price without discounts/promotions.
+  This is distinct from `price_rub_min` / `price_rub_max`, which represent the normalized current comparable price fields.
+
 - `vehicle_type`, `body_type`
   Structured vehicle category fields.
   `body_type` uses normalized English values such as `flatbed`, `panel_van`, `chassis`, `bus`, `minivan`.
+
+- `license_category`, `vehicle_category`
+  Driving-license and vehicle-category fields when the source provides them.
 
 - `passenger_capacity`, `seat_count`, `cab_seat_count`
   Seating and passenger capacity fields.
@@ -71,8 +79,14 @@ Important fields:
 - `engine_fuel_type`, `engine_power_hp`, `engine_power_kw`, `engine_volume_l`
   Engine characteristics.
 
+- `engine`, `engine_power_rpm`, `engine_torque`, `engine_torque_rpm`, `ecology_class`, `neutralization_system`, `adblue_system`, `engine_start`, `transfer_case`, `low_range_ratio`
+  Additional powertrain, emissions, start-system, and transfer-case fields.
+
 - `transmission_type`, `transmission_gears`, `drive_type`, `wheel_formula`
   Drivetrain and transmission characteristics.
+
+- `brake_system`, `brake_mechanisms`, `electronic_brake_system`, `parking_brake`, `engine_brake`, `locking_differential`, `rear_locking_differential`
+  Brake-system and differential fields.
 
 - `gross_weight_kg`, `curb_weight_kg`, `payload_kg`
   Lower-bound legacy weight metrics. When the source has multiple numeric values, these scalar columns keep the lower bound.
@@ -83,17 +97,41 @@ Important fields:
 - `length_mm`, `width_mm`, `height_mm`, `wheelbase_mm`, `ground_clearance_mm`
   Dimensions.
 
+- `front_overhang_mm`, `rear_overhang_mm`, `side_door_opening_width_mm`, `side_door_opening_height_mm`, `rear_door_opening_height_mm`, `rear_door_opening_width_mm`
+  Additional dimension and opening-size fields, usually stored as text.
+
+- `chassis_dimensions`, `cargo_platform_dimensions`, `cargo_compartment_length_mm`, `cargo_compartment_width_mm`, `cargo_compartment_height_mm`, `cargo_compartment_volume_m3`, `loading_height_mm`, `pallet_capacity`
+  Chassis/platform/cargo-compartment/loading fields.
+
+- `turning_radius_m`, `fording_depth_mm`, `front_track_mm`
+  Turning radius, wading depth, and front-track fields.
+
 - `fuel_tank_l`, `fuel_consumption_l100km`
   Fuel metrics.
+
+- `fuel_consumption_per_100km`, `max_speed_kmh`, `gas_cylinder_capacity_m3`
+  Additional consumption, speed, and gas-cylinder-capacity fields used by bus/PAZ sheets.
 
 - `service_interval_km`, `service_interval_months`
   Service interval data when present in source.
 
-- `ownership_cost_rub_km`
-  Ownership cost per km when present.
+- `insurance_taxes_leasing_period`, `insurance_taxes_period`, `maintenance_cost_period`, `used_spare_parts_cost`, `maintenance_and_used_spare_parts_cost`, `ownership_cost_total_rub`, `ownership_cost_rub_km`
+  Ownership-cost components plus total/per-km metrics.
 
 - `warranty_months`, `warranty_km`
   Warranty period and mileage.
+
+- `corrosion_warranty_years`, `first_maintenance`
+  Corrosion warranty and first-maintenance fields.
+
+- Options are flattened into direct text columns in `comparisons_normalized`.
+  Typical examples:
+  `cruise_control`, `light_rain_sensor`, `tire_pressure_monitoring`, `air_conditioner`, `preheater`, `windshield_heating`, `driver_seat_heating`, `passenger_seat_heating`, `airbag`, `seat_belts`, `seat_belt_reminder`, `central_lock`, `alarm`, `immobilizer`, `mirror_heating`, `mirror_electric_adjustment`, `power_windows`, `radio_1din`, `radio_2din`, `rear_view_camera`, `parking_sensors`, `keyless_entry`, `era_glonass`, `headlights`, `daytime_running_lights`, `fog_lights`, `steering_wheel`, `steering_column_adjustment`, `driver_seat`, `passenger_seats`, `passenger_salon_seats`, `seat_upholstery`, `floor_protective_covering`, `roof_ventilation_hatch`, `window_vents`, `passenger_compartment_heater`, `passenger_compartment_air_conditioner`, `additional_independent_electric_heater`.
+  Values are usually status/value texts such as `база`, `опция`, `+`, `-`, or short descriptive strings.
+
+- Additional minivan/LDT/bus/PAZ-specific text fields may appear directly in the table, for example:
+  `winter_package`, `steering_wheel_heating`, `blind_spot_monitoring`, `lockers`, `mudguards`, `engine_protection`, `usb_connectors`, `center_console_between_seats`, `wireless_charging`, `airflow_distribution`, `interior_trim_materials`, `luggage_net`, `additional_usb_type_a_sockets`, `cup_holders`, `production_start`, `bus_class`, `service_doors`, `floor_level`, `luggage_volume_m3`, `ventilation_system`.
+  These are valid query targets when the user explicitly asks about those attributes.
 
 - `notes`
   Residual technical notes that were not mapped to structured fields.
@@ -102,7 +140,10 @@ Practical SQL rules:
 - For exact model answers, aggregate by `id`.
 - For fuzzy user input, first find candidates with `LIKE` on `comp_full_name_nocase`, `comp_brand_nocase`, and `comp_model_nocase`.
 - If the user asks for prices, prefer `MIN(price_rub_min)` and `MAX(price_rub_max)` across the matched ids.
+- If the user asks specifically for price without discounts/promotions, use `price_without_discounts_rub` when present.
 - If the user asks for technical specs, select the requested structured fields from the matched ids and ignore rows where those fields are null.
+- If the user asks about option availability or equipment, query the corresponding direct option columns from `comparisons_normalized`.
+- For descriptive text columns, return the stored text as-is; do not try to coerce `+`, `-`, `база`, `опция`, or mixed descriptive values into a stricter enum unless the SQL explicitly needs that.
 - `base_model` is canonical for filtering; `comp_brand` is an equivalent mirror.
 - Ignore provenance/order fields in normal business answers unless the user asks about data source.
 
@@ -116,6 +157,7 @@ Typical body_type mapping:
 
 Anti-patterns:
 - Do not query missing tables such as `comparison_model_options`, `comparison_service_groups`, or `comparisons_raw_params`.
+- Do not assume options live in a separate table; they are flattened into direct columns of `comparisons_normalized`.
 - Do not assume `base_model` identifies the requested model by itself.
 - Do not use case-sensitive matching when `_nocase` exists.
 - Do not search `body_type_nocase` with Russian substrings; map business words to normalized English values first.
