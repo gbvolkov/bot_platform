@@ -75,7 +75,10 @@ Important fields:
   Drivetrain and transmission characteristics.
 
 - `gross_weight_kg`, `curb_weight_kg`, `payload_kg`
-  Weight metrics.
+  Lower-bound legacy weight metrics. When the source has multiple numeric values, these scalar columns keep the lower bound.
+
+- `gross_weight_kg_min`, `gross_weight_kg_max`, `curb_weight_kg_min`, `curb_weight_kg_max`, `payload_kg_min`, `payload_kg_max`
+  Weight metric bounds. Prefer these columns when the user asks for exact ranges, min/max values, or when the source may contain values like `2400 - 2600`, `2490 / 3500`, or `575 / 1585 - 955`.
 
 - `length_mm`, `width_mm`, `height_mm`, `wheelbase_mm`, `ground_clearance_mm`
   Dimensions.

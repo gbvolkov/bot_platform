@@ -41,8 +41,14 @@ NORMALIZED_COLUMNS = [
     "drive_type",
     "wheel_formula",
     "gross_weight_kg",
+    "gross_weight_kg_min",
+    "gross_weight_kg_max",
     "curb_weight_kg",
+    "curb_weight_kg_min",
+    "curb_weight_kg_max",
     "payload_kg",
+    "payload_kg_min",
+    "payload_kg_max",
     "length_mm",
     "width_mm",
     "height_mm",
@@ -251,8 +257,14 @@ REAL_FIELDS = {
     "engine_power_kw",
     "engine_volume_l",
     "gross_weight_kg",
+    "gross_weight_kg_min",
+    "gross_weight_kg_max",
     "curb_weight_kg",
+    "curb_weight_kg_min",
+    "curb_weight_kg_max",
     "payload_kg",
+    "payload_kg_min",
+    "payload_kg_max",
     "length_mm",
     "width_mm",
     "height_mm",
@@ -295,6 +307,12 @@ SERVICE_COLUMNS = with_nocase_columns(SERVICE_COLUMNS, SERVICE_TEXT_COLUMNS)
 OPTION_COLUMNS = with_nocase_columns(OPTION_COLUMNS, OPTION_TEXT_COLUMNS)
 RAW_COLUMNS = with_nocase_columns(RAW_COLUMNS, RAW_TEXT_COLUMNS)
 NORMALIZED_BASE_COLUMNS = [column for column in NORMALIZED_COLUMNS if not column.endswith("_nocase")]
+
+BOUNDED_NUMERIC_FIELDS = (
+    "gross_weight_kg",
+    "curb_weight_kg",
+    "payload_kg",
+)
 
 
 def normalize_label(value: Any) -> str:
@@ -553,6 +571,150 @@ def parse_mass_pair(raw: str | None) -> tuple[float | None, float | None]:
     if len(parts) < 2:
         return None, None
     return first_number(parts[0]), first_number(parts[1])
+
+
+def parse_numeric_bounds(raw: str | None, *, scale_small_values: bool = False) -> tuple[float | None, float | None]:
+    values = number_tokens(raw)
+    if not values:
+        return None, None
+    if scale_small_values:
+        values = [value * 1000.0 if value < 50 else value for value in values]
+    return min(values), max(values)
+
+
+def parse_primary_numeric_bounds(raw: str | None, *, scale_small_values: bool = False) -> tuple[float | None, float | None]:
+    text = clean_text(raw)
+    if not text:
+        return None, None
+    head = clean_text(text.split("(", 1)[0])
+    if head and head != text:
+        values = number_tokens(head)
+        if values:
+            if scale_small_values:
+                values = [value * 1000.0 if value < 50 else value for value in values]
+            return min(values), max(values)
+    return parse_numeric_bounds(text, scale_small_values=scale_small_values)
+
+
+def parse_slash_pair_bounds(raw: str | None) -> tuple[tuple[float | None, float | None], tuple[float | None, float | None]]:
+    text = clean_text(raw)
+    if not text or "/" not in text:
+        return (None, None), (None, None)
+    left, right = [clean_text(part) for part in text.split("/", 1)]
+    return parse_numeric_bounds(left), parse_numeric_bounds(right)
+
+
+def assign_numeric_range(record: dict[str, Any], field: str, lower: float | None, upper: float | None, *, overwrite: bool = False) -> bool:
+    if lower is None or upper is None:
+        return False
+    min_key = f"{field}_min"
+    max_key = f"{field}_max"
+    if overwrite or record.get(min_key) is None:
+        record[min_key] = lower
+    if overwrite or record.get(max_key) is None:
+        record[max_key] = upper
+    if overwrite or record.get(field) is None:
+        record[field] = lower
+    return True
+
+
+def assign_numeric_range_from_raw(
+    record: dict[str, Any],
+    field: str,
+    raw: str | None,
+    *,
+    overwrite: bool = False,
+    prefer_existing: bool = False,
+    scale_small_values: bool = False,
+) -> bool:
+    min_key = f"{field}_min"
+    max_key = f"{field}_max"
+    if prefer_existing and any(record.get(key) is not None for key in (field, min_key, max_key)):
+        return False
+    lower, upper = parse_numeric_bounds(raw, scale_small_values=scale_small_values)
+    return assign_numeric_range(record, field, lower, upper, overwrite=overwrite)
+
+
+def assign_primary_numeric_range_from_raw(
+    record: dict[str, Any],
+    field: str,
+    raw: str | None,
+    *,
+    overwrite: bool = False,
+    prefer_existing: bool = False,
+    scale_small_values: bool = False,
+) -> bool:
+    min_key = f"{field}_min"
+    max_key = f"{field}_max"
+    if prefer_existing and any(record.get(key) is not None for key in (field, min_key, max_key)):
+        return False
+    lower, upper = parse_primary_numeric_bounds(raw, scale_small_values=scale_small_values)
+    return assign_numeric_range(record, field, lower, upper, overwrite=overwrite)
+
+
+def assign_numeric_lower_from_raw(
+    record: dict[str, Any],
+    field: str,
+    raw: str | None,
+    *,
+    overwrite: bool = False,
+    scale_small_values: bool = False,
+) -> bool:
+    lower, _ = parse_numeric_bounds(raw, scale_small_values=scale_small_values)
+    if lower is None:
+        return False
+    min_key = f"{field}_min"
+    max_key = f"{field}_max"
+    if overwrite or record.get(min_key) is None:
+        record[min_key] = lower
+    if overwrite or record.get(max_key) is None:
+        record[max_key] = lower
+    if overwrite or record.get(field) is None:
+        record[field] = lower
+    return True
+
+
+def assign_numeric_upper_from_raw(
+    record: dict[str, Any],
+    field: str,
+    raw: str | None,
+    *,
+    overwrite: bool = False,
+    scale_small_values: bool = False,
+) -> bool:
+    _, upper = parse_numeric_bounds(raw, scale_small_values=scale_small_values)
+    if upper is None:
+        return False
+    min_key = f"{field}_min"
+    max_key = f"{field}_max"
+    if overwrite or record.get(max_key) is None:
+        record[max_key] = upper
+    if overwrite or record.get(min_key) is None:
+        record[min_key] = upper
+    if overwrite or record.get(field) is None:
+        record[field] = record.get(min_key) or upper
+    return True
+
+
+def normalize_bounded_numeric_fields(row: dict[str, Any]) -> None:
+    for field in BOUNDED_NUMERIC_FIELDS:
+        min_key = f"{field}_min"
+        max_key = f"{field}_max"
+        lower = row.get(min_key)
+        upper = row.get(max_key)
+        value = row.get(field)
+        if lower is None and value is not None:
+            lower = value
+        if upper is None and value is not None:
+            upper = value
+        if lower is None and upper is not None:
+            lower = upper
+        if upper is None and lower is not None:
+            upper = lower
+        if lower is not None:
+            row[field] = lower
+            row[min_key] = lower
+            row[max_key] = upper
 
 
 def parse_power(raw: str | None, label: str) -> tuple[float | None, float | None]:
@@ -1075,6 +1237,7 @@ class GazPricingImporter:
                 existing.get("comp_model"),
             )
             existing["base_model"] = existing.get("comp_brand")
+            normalize_bounded_numeric_fields(existing)
         merged_rows = [merged_by_id[row_id] for row_id in sorted(merged_by_id)]
         self.stats["merged_rows"] = len(merged_rows)
         return merged_rows
@@ -1102,6 +1265,7 @@ class GazPricingImporter:
 
     def insert_normalized(self, row: dict[str, Any]) -> None:
         staged_row = {column: row.get(column) for column in NORMALIZED_BASE_COLUMNS}
+        normalize_bounded_numeric_fields(staged_row)
         staged_row["comp_brand"], staged_row["comp_model"], staged_row["comp_full_name"], staged_row["id"] = canonicalize_identity_parts(
             staged_row.get("comp_brand"),
             staged_row.get("comp_model"),
@@ -1391,13 +1555,14 @@ class GazPricingImporter:
                 record["wheel_formula"] = raw_value
                 mapped = True
         elif label_text == "Полная / снаряженная массы, кг":
-            gross_weight, curb_weight = parse_paz_mass_pair(raw_value)
-            if gross_weight is not None:
-                record["gross_weight_kg"] = gross_weight
+            gross_bounds, curb_bounds = parse_slash_pair_bounds(raw_value)
+            if assign_numeric_range(record, "gross_weight_kg", *gross_bounds):
                 mapped = True
-            if curb_weight is not None:
-                record["curb_weight_kg"] = curb_weight
+                value_num = record.get("gross_weight_kg")
+            if assign_numeric_range(record, "curb_weight_kg", *curb_bounds):
                 mapped = True
+                if value_num is None:
+                    value_num = record.get("curb_weight_kg")
         elif label_text == "Кол-во служебных дверей":
             self.append_note(record, f"{label_text}: {raw_value}")
         elif label_text == "Пассажировместимость общая":
@@ -1639,13 +1804,14 @@ class GazPricingImporter:
                 record["wheel_formula"] = raw_value
                 mapped = True
         elif label_text == "Полная / снаряженная массы, кг":
-            gross_weight, curb_weight = parse_paz_mass_pair(raw_value)
-            if gross_weight is not None:
-                record["gross_weight_kg"] = gross_weight
+            gross_bounds, curb_bounds = parse_slash_pair_bounds(raw_value)
+            if assign_numeric_range(record, "gross_weight_kg", *gross_bounds):
                 mapped = True
-            if curb_weight is not None:
-                record["curb_weight_kg"] = curb_weight
+                value_num = record.get("gross_weight_kg")
+            if assign_numeric_range(record, "curb_weight_kg", *curb_bounds):
                 mapped = True
+                if value_num is None:
+                    value_num = record.get("curb_weight_kg")
         elif label_text == "Кол-во служебных дверей":
             self.append_note(record, f"{label_text}: {raw_value}")
         elif label_text == "Пассажировместимость общая":
@@ -1963,27 +2129,25 @@ class GazPricingImporter:
                 mapped = True
                 value_num = float(value)
         elif label_text == "Полная масса":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
+            if assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value):
                 mapped = True
-                value_num = value
+                value_num = record.get("gross_weight_kg")
         elif label_text == "Снаряженная масса min, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
+            if assign_numeric_lower_from_raw(record, "curb_weight_kg", raw_value):
                 mapped = True
-                value_num = value
+                value_num = record.get("curb_weight_kg_min")
         elif label_text == "Снаряженная масса max, кг":
-            self.append_note(record, f"{label_text}: {raw_value}")
-        elif label_text == "Грузоподьемность min, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
+            if assign_numeric_upper_from_raw(record, "curb_weight_kg", raw_value):
                 mapped = True
-                value_num = value
+                value_num = record.get("curb_weight_kg_max")
+        elif label_text == "Грузоподьемность min, кг":
+            if assign_numeric_lower_from_raw(record, "payload_kg", raw_value):
+                mapped = True
+                value_num = record.get("payload_kg_min")
         elif label_text == "Грузоподьемность max, кг":
-            self.append_note(record, f"{label_text}: {raw_value}")
+            if assign_numeric_upper_from_raw(record, "payload_kg", raw_value):
+                mapped = True
+                value_num = record.get("payload_kg_max")
         elif label_text == "Длина, мм":
             value = strict_single_number(raw_value)
             if value is not None:
@@ -2222,23 +2386,17 @@ class GazPricingImporter:
         elif label_text == 'Модификация "спальник" или "двухрядка"':
             self.append_note(record, f"{label_text}: {raw_value}")
         elif label_text == "Полная масса, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
+            if assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value):
                 mapped = True
-                value_num = value
+                value_num = record.get("gross_weight_kg")
         elif label_text == "Снаряженная масса шасси, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
+            if assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value):
                 mapped = True
-                value_num = value
+                value_num = record.get("curb_weight_kg")
         elif label_text == "Грузоподъемность шасси, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
+            if assign_numeric_range_from_raw(record, "payload_kg", raw_value):
                 mapped = True
-                value_num = value
+                value_num = record.get("payload_kg")
         elif label_text == "Габаритные размеры шасси, мм (ДхШхВ)":
             length, width, height = parse_ldt_dimensions(raw_value)
             if length is not None:
@@ -2477,9 +2635,11 @@ class GazPricingImporter:
             mapped = self.set_price(record, raw_value, label) or mapped
 
         if "полная" in norm and "снаряж" in norm:
-            gross, curb = parse_mass_pair(raw_value)
-            assign("gross_weight_kg", gross)
-            assign("curb_weight_kg", curb)
+            gross_bounds, curb_bounds = parse_slash_pair_bounds(raw_value)
+            if assign_numeric_range(record, "gross_weight_kg", *gross_bounds):
+                mapped = True
+            if assign_numeric_range(record, "curb_weight_kg", *curb_bounds):
+                mapped = True
             return mapped, None
 
         if "габарит" in norm or "дхшхв" in norm:
@@ -2506,11 +2666,11 @@ class GazPricingImporter:
         elif "пассажировмест" in norm:
             assign("passenger_capacity", parse_additive_count(raw_value) or (int(first_number(raw_value)) if first_number(raw_value) is not None else None))
         elif norm.startswith("полная масса"):
-            assign("gross_weight_kg", first_number(raw_value))
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif "снаряженная масса" in norm:
-            assign("curb_weight_kg", first_number(raw_value))
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif "грузопод" in norm:
-            assign("payload_kg", first_number(raw_value))
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif "колесная формула" in norm:
             drive_type, wheel_formula = parse_drive(raw_value)
             assign("drive_type", drive_type)
@@ -2581,10 +2741,7 @@ class GazPricingImporter:
         if "цен" in norm:
             mapped = self.set_price(record, raw_value, label) or mapped
         elif "грузопод" in norm:
-            value = first_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value * 1000.0 if value < 50 else value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value, scale_small_values=True) or mapped
         elif "мощность" in norm:
             hp, kw = parse_power(raw_value, label)
             if hp is not None:
@@ -2622,10 +2779,7 @@ class GazPricingImporter:
                 record["engine_power_kw"] = kw
                 mapped = True
         elif label_text == "Грузоподъёмность":
-            value = first_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value * 1000.0 if value < 50 else value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value, scale_small_values=True) or mapped
         elif label_text == "Средний расход топлива фактический, л/100 км":
             value = first_number(raw_value)
             if value is not None:
@@ -2720,21 +2874,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса а/м":
-            value = single_numeric_value(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса а/м, кг":
-            value = single_numeric_value(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text in {"Грузоподьемность а/м, кг", "грузоподьемность шасси, кг"}:
-            if record.get("payload_kg") is None:
-                value = single_numeric_value(raw_value)
-                if value is not None:
-                    record["payload_kg"] = value
-                    mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value, prefer_existing=True) or mapped
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length, width, height = parse_dimensions(raw_value)
             if length is not None:
@@ -2851,20 +2995,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса":
-            value = single_numeric_value(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса, кг":
-            value = single_numeric_value(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность, кг":
-            value = single_numeric_value(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Длина, мм":
             value = single_numeric_value(raw_value)
             if value is not None:
@@ -2970,20 +3105,11 @@ class GazPricingImporter:
                 record["passenger_capacity"] = int(value)
                 mapped = True
         elif label_text == "Полная масса":
-            value = primary_numeric_value(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_primary_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса, кг":
-            value = primary_numeric_value(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_primary_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность, кг":
-            value = primary_numeric_value(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_primary_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Длина, мм":
             value = primary_numeric_value(raw_value)
             if value is not None:
@@ -3096,20 +3222,11 @@ class GazPricingImporter:
                 record["passenger_capacity"] = int(value)
                 mapped = True
         elif label_text == "Полная масса":
-            value = primary_numeric_value(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_primary_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса, кг":
-            value = primary_numeric_value(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_primary_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность, кг":
-            value = primary_numeric_value(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_primary_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Длина, мм":
             value = primary_numeric_value(raw_value)
             if value is not None:
@@ -4481,20 +4598,11 @@ class GazPricingImporter:
                 record["wheel_formula"] = f"{formula_match.group(1)}x{formula_match.group(2)}"
                 mapped = True
         elif label_text == "Полная масса, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса шасси, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподъемность шасси, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text in {
             "Коэффициент PL/GVW",
             "Допустимая нагрузка на переднюю / заднюю оси, кг",
@@ -4726,20 +4834,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса а/м":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса а/м, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность а/м, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length_mm, width_mm, height_mm = self.parse_bort_short_dimensions(raw_value)
             if length_mm is not None and width_mm is not None and height_mm is not None:
@@ -5050,20 +5149,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса":
-            value = None if "/" in raw_value else strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса, кг":
-            value = None if "/" in raw_value else strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность, кг":
-            value = None if "/" in raw_value else strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length_mm, width_mm, height_mm = self.parse_cmf_short_dimensions(raw_value)
             if length_mm is not None and width_mm is not None and height_mm is not None:
@@ -5352,10 +5442,7 @@ class GazPricingImporter:
                 record["passenger_capacity"] = value
                 mapped = True
         elif label_text == "Полная масса":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length_mm, width_mm, height_mm = self.parse_bus_short_dimensions(raw_value)
             if length_mm is not None and width_mm is not None and height_mm is not None:
@@ -5587,20 +5674,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса шасси, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподъемность шасси, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text in {
             "Габаритные размеры шасси, мм (ДхШхВ)",
             "Мин. радиус разворота, м",
@@ -5834,20 +5912,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса а/м":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса а/м, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность а/м, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length_mm, width_mm, height_mm = parse_dimensions(raw_value)
             if length_mm is not None:
@@ -6162,20 +6231,11 @@ class GazPricingImporter:
                 record["cab_seat_count"] = value
                 mapped = True
         elif label_text == "Полная масса":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["gross_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "gross_weight_kg", raw_value) or mapped
         elif label_text == "Снаряженная масса, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["curb_weight_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "curb_weight_kg", raw_value) or mapped
         elif label_text == "Грузоподьемность, кг":
-            value = strict_single_number(raw_value)
-            if value is not None:
-                record["payload_kg"] = value
-                mapped = True
+            mapped = assign_numeric_range_from_raw(record, "payload_kg", raw_value) or mapped
         elif label_text == "Габариты а/м (ДхШхВ), мм":
             length_mm, width_mm, height_mm = self.parse_cmf_short_dimensions(raw_value)
             if length_mm is not None and width_mm is not None and height_mm is not None:
