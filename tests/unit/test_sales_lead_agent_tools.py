@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,9 @@ from agents.sales_lead_agent.tools import (
     DocSearchResponse,
     PreparedDocument,
     PreparedDocumentEntities,
+    ProcurementCatalogService,
     ProcurementQueryBuilder,
+    PurchaseRequestSpec,
     PurchaseSearchItem,
     RunWorkspace,
     SalesLeadAgentDependencies,
@@ -59,6 +62,12 @@ def _document_service_stub(**overrides):
         "shared_index_id": SHARED_INDEX_ID,
         "purchase_exists": lambda purchase_id: False,
         "source_exists": lambda source_id: False,
+        "purchase_document_summary": lambda purchase_id: {
+            "indexed_documents_count": 0,
+            "prepared_document_ids": [],
+            "last_indexed_at": None,
+            "source_url": None,
+        },
         "prepare_files": lambda **kwargs: [],
         "save_text_artifact": lambda **kwargs: "",
         "search": lambda **kwargs: DocSearchResponse(index_id=SHARED_INDEX_ID, matches=[]),
@@ -86,6 +95,13 @@ def _runtime_with_state(*, thread_id: str = "conv-1", **state) -> SimpleNamespac
 
 def _command_payload(command) -> dict[str, object]:
     return json.loads(command.update["messages"][0].content)
+
+
+def _tool_by_name(deps, name: str):
+    for candidate in build_sales_lead_tools(deps):
+        if candidate.name == name:
+            return candidate
+    raise AssertionError(f"Tool {name} not found")
 
 
 def _retrieval_snapshot(
@@ -789,7 +805,7 @@ def test_purchase_search_tool_returns_run_index_and_prepared_documents(tmp_path:
         open_source_max_concurrency=4,
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     result = purchase_tool.func(query_texts=["страх имущества"])
 
     assert result["run_id"] == "run-1"
@@ -827,7 +843,7 @@ def test_purchase_search_tool_preserves_missing_crawl_timestamp_as_null(tmp_path
         open_source_max_concurrency=4,
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     result = purchase_tool.func(query_texts=["страх имущества"])
 
     assert result["items"][0]["crawl_ts_utc"] is None
@@ -862,7 +878,7 @@ def test_purchase_search_tool_returns_already_indexed_hit_without_repreparing(tm
         open_source_max_concurrency=4,
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     result = purchase_tool.func(query_texts=["страхование"])
 
     assert len(result["items"]) == 1
@@ -870,19 +886,17 @@ def test_purchase_search_tool_returns_already_indexed_hit_without_repreparing(tm
     assert result["prepared_documents"] == []
 
 
-def test_purchase_search_tool_creates_background_retrieval_and_updates_state(tmp_path: Path):
+def test_purchase_search_tool_stages_confirmation_before_background_retrieval(tmp_path: Path):
     workspace = _workspace(tmp_path)
-    created: dict[str, object] = {}
-    snapshot = _retrieval_snapshot(
-        status="queued",
-        stage="queued",
-        message="Procurement retrieval queued for 1 search target(s).",
-    )
+    calls = {"submit": 0}
 
     class RetrievalClient:
         async def submit_purchase_search(self, **kwargs):
-            created["submit"] = kwargs
-            return snapshot
+            calls["submit"] += 1
+            raise AssertionError("submit_purchase_search must not run before confirmation")
+
+        async def get_latest_for_conversation(self, **kwargs):
+            return None
 
     deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
@@ -904,7 +918,7 @@ def test_purchase_search_tool_creates_background_retrieval_and_updates_state(tmp
         retrieval_client=RetrievalClient(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     command = asyncio.run(
         purchase_tool.coroutine(
             query_texts=["страх имущество"],
@@ -914,20 +928,181 @@ def test_purchase_search_tool_creates_background_retrieval_and_updates_state(tmp
     )
     result = _command_payload(command)
 
-    assert result["run_id"] == "run-1"
+    assert result["status"] == "confirmation_required"
     assert result["index_id"] == SHARED_INDEX_ID
-    assert result["retrieval_status"] == "queued"
     assert result["search_urls"] == ["https://example.test/search"]
+    assert result["record_from"] == 7
+    assert result["request_hash"] == "hash-1"
+    assert command.update["pending_crawl_request"]["query_texts"] == ["страх имущество"]
+    assert command.update["pending_crawl_request_hash"] == "hash-1"
+    assert command.update["pending_crawl_query_preview"] == ["https://example.test/search"]
+    assert calls["submit"] == 0
+
+
+def test_purchase_search_tool_accepts_injected_runtime_argument_via_ainvoke(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+
+    class RetrievalClient:
+        async def get_latest_for_conversation(self, **kwargs):
+            return None
+
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
+        document_service=_document_service_stub(),
+        purchase_adapter=SimpleNamespace(
+            build_request_spec=lambda **kwargs: PurchaseRequestSpec(
+                request_hash="hash-ainvoke",
+                search_urls=["https://example.test/search"],
+                request_payload={
+                    "search_url": None,
+                    "query_texts": ["страх имущество"],
+                    "search_urls": ["https://example.test/search"],
+                    "max_pages": 5,
+                },
+            )
+        ),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+        retrieval_client=RetrievalClient(),
+    )
+
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
+    runtime = ToolRuntime(
+        state={},
+        context=None,
+        config={"configurable": {"thread_id": "conv-1"}},
+        stream_writer=lambda *_args, **_kwargs: None,
+        tool_call_id="call-1",
+        store=None,
+    )
+
+    command = asyncio.run(
+        purchase_tool.ainvoke(
+            {
+                "query_texts": ["страх имущество"],
+                "max_pages": 5,
+                "runtime": runtime,
+            }
+        )
+    )
+    result = _command_payload(command)
+
+    assert result["status"] == "confirmation_required"
+    assert result["request_hash"] == "hash-ainvoke"
+    assert command.update["pending_crawl_request"]["query_texts"] == ["страх имущество"]
+
+
+def test_purchase_lookup_tool_filters_out_irrelevant_generic_insurance_hits(tmp_path: Path):
+    settings = _counterparty_settings(tmp_path)
+    settings.work_root.mkdir(parents=True, exist_ok=True)
+    settings.permanent_index_root.mkdir(parents=True, exist_ok=True)
+    document_service = _document_service_stub()
+    catalog = ProcurementCatalogService(settings=settings, document_service=document_service)
+    catalog.upsert_item(
+        PurchaseSearchItem(
+            bundle_id="0301300247626000156",
+            registry_number="0301300247626000156",
+            law="44-FZ",
+            purchase_title="Оказание услуг по обязательному страхованию гражданской ответственности владельцев автотранспортных средств",
+            customer_name="МКУ Центр закупок",
+            price_text="183 725,13",
+            published_at="2026-03-23",
+            updated_at=None,
+            submission_deadline="2026-03-31",
+            detail_url="https://zakupki.gov.ru/epz/order/notice/ea20/view/common-info.html?regNumber=0301300247626000156",
+            common_info_url=None,
+            documents_url=None,
+            document_urls=["https://zakupki.gov.ru/file-1"],
+            downloaded_files=[
+                r"C:\cache\0301300247626000156\Проект контракта.docx",
+                r"C:\cache\0301300247626000156\Требования к заявке.docx",
+            ],
+            prepared_document_ids=["doc-1", "doc-2"],
+            indexed_documents_count=2,
+            last_indexed_at="2026-03-28T19:48:45.429251Z",
+            documents_json=None,
+            common_info_json=None,
+            lots_json=None,
+            crawl_status="cached",
+            crawl_error=None,
+            crawl_ts_utc=None,
+        )
+    )
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: _workspace(tmp_path), get=lambda run_id: _workspace(tmp_path)),
+        document_service=document_service,
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+        procurement_catalog=catalog,
+    )
+
+    purchase_lookup_tool = _tool_by_name(deps, "purchase_lookup_tool")
+    result = purchase_lookup_tool.func(query="геостационарный спутник страхование ответственности")
+
     assert result["items"] == []
-    assert result["record_from"] == 0
     assert result["returned_records"] == 0
     assert result["total_ready_records"] == 0
-    assert result["next_record_from"] is None
-    assert "prepared_documents" not in result
-    assert command.update["active_retrieval_id"] == "ret-1"
-    assert created["submit"]["conversation_id"] == "conv-1"
-    assert created["submit"]["requested_run_id"] is None
-    assert "record_from" not in created["submit"]
+
+
+def test_purchase_lookup_tool_returns_lightweight_card_payload(tmp_path: Path):
+    settings = _counterparty_settings(tmp_path)
+    settings.work_root.mkdir(parents=True, exist_ok=True)
+    settings.permanent_index_root.mkdir(parents=True, exist_ok=True)
+    document_service = _document_service_stub()
+    catalog = ProcurementCatalogService(settings=settings, document_service=document_service)
+    catalog.upsert_item(
+        PurchaseSearchItem(
+            bundle_id="32615846691",
+            registry_number="32615846691",
+            law="223-FZ",
+            purchase_title="Оказание услуг по добровольному страхованию транспортных средств",
+            customer_name="ООО ТЕПЛОЭНЕРГО",
+            price_text="4 387 445,00",
+            published_at="2026-03-26",
+            updated_at=None,
+            submission_deadline="2026-04-07",
+            detail_url="https://zakupki.gov.ru/epz/order/notice/notice223/common-info.html?noticeInfoId=19573074",
+            common_info_url="https://zakupki.gov.ru/epz/order/notice/notice223/common-info.html?noticeInfoId=19573074",
+            documents_url="https://zakupki.gov.ru/epz/order/notice/notice223/documents.html?noticeInfoId=19573074",
+            document_urls=[
+                "https://zakupki.gov.ru/file/a",
+                "https://zakupki.gov.ru/file/b",
+            ],
+            downloaded_files=[
+                r"C:\cache\32615846691\Извещение о закупке.docx",
+                r"C:\cache\32615846691\Документация о ЗП.docx",
+            ],
+            prepared_document_ids=["doc-a", "doc-b"],
+            indexed_documents_count=2,
+            last_indexed_at="2026-03-28T19:48:45.429251Z",
+            documents_json=None,
+            common_info_json=None,
+            lots_json=None,
+            crawl_status="cached",
+            crawl_error=None,
+            crawl_ts_utc=None,
+        )
+    )
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(create_run=lambda: _workspace(tmp_path), get=lambda run_id: _workspace(tmp_path)),
+        document_service=document_service,
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+        procurement_catalog=catalog,
+    )
+
+    purchase_lookup_tool = _tool_by_name(deps, "purchase_lookup_tool")
+    result = purchase_lookup_tool.func(registry_number="32615846691")
+
+    assert result["returned_records"] == 1
+    assert result["items"][0]["downloaded_files"] == [
+        "Извещение о закупке.docx",
+        "Документация о ЗП.docx",
+    ]
+    assert result["items"][0]["document_urls"] == []
+    assert result["items"][0]["prepared_document_ids"] == []
 
 
 def test_purchase_search_tool_refreshes_same_running_request_with_partial_subset(tmp_path: Path):
@@ -974,7 +1149,7 @@ def test_purchase_search_tool_refreshes_same_running_request_with_partial_subset
     )
 
     class RetrievalClient:
-        async def submit_purchase_search(self, **kwargs):
+        async def get_latest_for_conversation(self, **kwargs):
             return partial_snapshot
 
     deps = SalesLeadAgentDependencies(
@@ -992,7 +1167,7 @@ def test_purchase_search_tool_refreshes_same_running_request_with_partial_subset
         retrieval_client=RetrievalClient(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     command = asyncio.run(
         purchase_tool.coroutine(query_texts=["страх имущество"], runtime=_runtime())
     )
@@ -1063,7 +1238,7 @@ def test_purchase_search_tool_reuses_active_retrieval_while_another_request_is_s
         retrieval_client=RetrievalStore(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
 
     command = asyncio.run(
             purchase_tool.coroutine(query_texts=["страхование"], runtime=_runtime())
@@ -1080,35 +1255,32 @@ def test_purchase_search_tool_converts_retrieval_user_input_error(tmp_path: Path
     workspace = _workspace(tmp_path)
 
     class RetrievalClient:
-        async def get_retrieval(self, **kwargs):
-            return None
-
         async def get_latest_for_conversation(self, **kwargs):
             return None
-
-        async def submit_purchase_search(self, **kwargs):
-            raise RetrievalServiceUserInputError(
-                RetrievalUserInputErrorResponse(
-                    code="INVALID_SEARCH_URL",
-                    message="search_url must be a valid EIS procurement search URL.",
-                    suggestion="Provide a valid EIS extended search URL and call the tool again.",
-                    input_field="search_url",
-                )
-            )
 
     deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
         document_service=_document_service_stub(),
-        purchase_adapter=SimpleNamespace(),
+        purchase_adapter=SimpleNamespace(
+            build_request_spec=lambda **kwargs: PurchaseRequestSpec(
+                request_hash="hash-invalid",
+                search_urls=["https://example.test/search"],
+                request_payload={"search_url": "https://invalid.example"},
+            )
+        ),
         counterparty_clients=SimpleNamespace(),
         open_source_max_concurrency=4,
         retrieval_client=RetrievalClient(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
+    command = asyncio.run(
+        purchase_tool.coroutine(search_url="https://invalid.example", runtime=_runtime())
+    )
+    result = _command_payload(command)
 
-    with pytest.raises(ToolUserCorrectableError, match="valid EIS procurement search URL"):
-        asyncio.run(purchase_tool.coroutine(search_url="https://invalid.example", runtime=_runtime()))
+    assert result["status"] == "confirmation_required"
+    assert result["request_hash"] == "hash-invalid"
 
 
 def test_purchase_search_tool_refreshes_existing_snapshot_when_search_input_is_empty(tmp_path: Path):
@@ -1144,7 +1316,7 @@ def test_purchase_search_tool_refreshes_existing_snapshot_when_search_input_is_e
         retrieval_client=RetrievalClient(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     command = asyncio.run(
         purchase_tool.coroutine(
             runtime=_runtime_with_state(active_retrieval_id="ret-1"),
@@ -1174,7 +1346,7 @@ def test_purchase_search_tool_wraps_unexpected_retrieval_errors(tmp_path: Path):
         retrieval_client=RetrievalClient(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="retrieval boom") as exc_info:
         asyncio.run(purchase_tool.coroutine(query_texts=["осаго"], runtime=_runtime()))
@@ -1183,29 +1355,27 @@ def test_purchase_search_tool_wraps_unexpected_retrieval_errors(tmp_path: Path):
 
 def test_purchase_search_tool_reads_requested_run_id_from_state(tmp_path: Path):
     workspace = _workspace(tmp_path)
-    created: dict[str, object] = {}
-    snapshot = _retrieval_snapshot(
-        run_id="run-state-1",
-        status="queued",
-        stage="queued",
-        message="Procurement retrieval queued for 1 search target(s).",
-    )
 
     class RetrievalClient:
-        async def submit_purchase_search(self, **kwargs):
-            created["submit"] = kwargs
-            return snapshot
+        async def get_latest_for_conversation(self, **kwargs):
+            return None
 
     deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
         document_service=_document_service_stub(),
-        purchase_adapter=SimpleNamespace(),
+        purchase_adapter=SimpleNamespace(
+            build_request_spec=lambda **kwargs: PurchaseRequestSpec(
+                request_hash="hash-state-1",
+                search_urls=["https://example.test/state-search"],
+                request_payload={"search_urls": ["https://example.test/state-search"]},
+            )
+        ),
         counterparty_clients=SimpleNamespace(),
         open_source_max_concurrency=4,
         retrieval_client=RetrievalClient(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     command = asyncio.run(
         purchase_tool.coroutine(
             query_texts=["страх транспорт"],
@@ -1214,8 +1384,8 @@ def test_purchase_search_tool_reads_requested_run_id_from_state(tmp_path: Path):
     )
     result = _command_payload(command)
 
-    assert result["run_id"] == "run-state-1"
-    assert created["submit"]["requested_run_id"] == "run-state-1"
+    assert result["status"] == "confirmation_required"
+    assert command.update["pending_crawl_request_hash"] == "hash-state-1"
 
 
 def test_retrieval_api_returns_400_for_user_correctable_request_error():
@@ -1231,39 +1401,12 @@ def test_retrieval_api_returns_400_for_user_correctable_request_error():
     assert payload["input_field"] == "query_texts"
 
 
-def test_purchase_search_tool_handles_create_job_race_by_returning_matching_snapshot(tmp_path: Path):
+def test_purchase_search_tool_reuses_existing_pending_request_with_same_hash(tmp_path: Path):
     workspace = _workspace(tmp_path)
-    matching_snapshot = _retrieval_snapshot(
-        request_hash="hash-1",
-        status="in_progress",
-        stage="starting",
-        message="Procurement retrieval worker started.",
-        progress={
-            "total_queries": 1,
-            "completed_queries": 0,
-            "total_purchases": 0,
-            "processed_purchases": 0,
-            "total_files": 0,
-            "processed_files": 0,
-            "prepared_documents": 0,
-            "indexed_segments": 0,
-        },
-    )
-
-    class CreateRaceError(Exception):
-        def __init__(self, snapshot):
-            super().__init__("duplicate insert")
-            self.snapshot = snapshot
 
     class RetrievalStore:
-        async def submit_purchase_search(self, **kwargs):
-            return matching_snapshot
-
-        async def lookup_submission(self, **kwargs):
-            return SimpleNamespace(active=None, matching=None)
-
-        async def create_job(self, **kwargs):
-            raise CreateRaceError(matching_snapshot)
+        async def get_latest_for_conversation(self, **kwargs):
+            return None
 
     deps = SalesLeadAgentDependencies(
         workspace_manager=SimpleNamespace(create_run=lambda: workspace, get=lambda run_id: workspace),
@@ -1279,15 +1422,21 @@ def test_purchase_search_tool_handles_create_job_race_by_returning_matching_snap
         open_source_max_concurrency=4,
         retrieval_client=RetrievalStore(),
     )
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
     command = asyncio.run(
-        purchase_tool.coroutine(query_texts=["insurance"], runtime=_runtime())
+        purchase_tool.coroutine(
+            query_texts=["insurance"],
+            runtime=_runtime_with_state(
+                pending_crawl_request={"search_url": None, "query_texts": ["insurance"], "max_pages": None},
+                pending_crawl_request_hash="hash-1",
+            ),
+        )
     )
 
     result = _command_payload(command)
 
-    assert result["retrieval_status"] == "in_progress"
-    assert result["message"] == "Procurement retrieval worker started."
+    assert result["status"] == "confirmation_required"
+    assert command.update["pending_crawl_request"]["query_texts"] == ["insurance"]
 
 
 def test_purchase_search_tool_returns_completed_snapshot_without_requeueing(tmp_path: Path):
@@ -1321,6 +1470,9 @@ def test_purchase_search_tool_returns_completed_snapshot_without_requeueing(tmp_
     )
 
     class RetrievalStore:
+        async def get_retrieval(self, **kwargs):
+            return completed_snapshot
+
         async def submit_purchase_search(self, **kwargs):
             return completed_snapshot
 
@@ -1345,11 +1497,14 @@ def test_purchase_search_tool_returns_completed_snapshot_without_requeueing(tmp_
         retrieval_client=RetrievalStore(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
+    refresh_command = asyncio.run(
+        purchase_tool.coroutine(runtime=_runtime_with_state(active_retrieval_id="ret-1"))
+    )
     command = asyncio.run(
         purchase_tool.coroutine(query_texts=["страх имущество"], runtime=_runtime())
     )
-    result = _command_payload(command)
+    result = _command_payload(refresh_command)
 
     assert result["retrieval_status"] == "completed"
     assert result["items"][0]["registry_number"] == "123"
@@ -1389,6 +1544,9 @@ def test_purchase_search_tool_pages_completed_snapshot_to_five_records(tmp_path:
     )
 
     class RetrievalStore:
+        async def get_retrieval(self, **kwargs):
+            return completed_snapshot
+
         async def submit_purchase_search(self, **kwargs):
             return completed_snapshot
 
@@ -1410,11 +1568,14 @@ def test_purchase_search_tool_pages_completed_snapshot_to_five_records(tmp_path:
         retrieval_client=RetrievalStore(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
+    refresh_command = asyncio.run(
+        purchase_tool.coroutine(runtime=_runtime_with_state(active_retrieval_id="ret-1"))
+    )
     command = asyncio.run(
         purchase_tool.coroutine(query_texts=["insurance"], runtime=_runtime())
     )
-    result = _command_payload(command)
+    result = _command_payload(refresh_command)
 
     assert result["retrieval_status"] == "completed"
     assert len(result["items"]) == 5
@@ -1449,6 +1610,9 @@ def test_purchase_search_tool_pages_completed_snapshot_from_record_offset(tmp_pa
     )
 
     class RetrievalStore:
+        async def get_retrieval(self, **kwargs):
+            return completed_snapshot
+
         async def submit_purchase_search(self, **kwargs):
             return completed_snapshot
 
@@ -1470,11 +1634,17 @@ def test_purchase_search_tool_pages_completed_snapshot_from_record_offset(tmp_pa
         retrieval_client=RetrievalStore(),
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
+    refresh_command = asyncio.run(
+        purchase_tool.coroutine(
+            record_from=5,
+            runtime=_runtime_with_state(active_retrieval_id="ret-1"),
+        )
+    )
     command = asyncio.run(
         purchase_tool.coroutine(query_texts=["insurance"], record_from=5, runtime=_runtime())
     )
-    result = _command_payload(command)
+    result = _command_payload(refresh_command)
 
     assert len(result["items"]) == 2
     assert result["record_from"] == 5
@@ -1501,7 +1671,7 @@ def test_doc_search_tool_requires_explicit_index_lookup(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    doc_search_tool = build_sales_lead_tools(deps)[2]
+    doc_search_tool = _tool_by_name(deps, "doc_search_tool")
     result = doc_search_tool.func(index_id=SHARED_INDEX_ID, query="страхование")
 
     assert captured["index_id"] == SHARED_INDEX_ID
@@ -1523,7 +1693,7 @@ def test_doc_search_tool_forwards_purchase_and_source_filters(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    doc_search_tool = build_sales_lead_tools(deps)[2]
+    doc_search_tool = _tool_by_name(deps, "doc_search_tool")
     doc_search_tool.func(
         index_id=SHARED_INDEX_ID,
         query="страхование",
@@ -1548,7 +1718,7 @@ def test_purchase_search_tool_propagates_adapter_errors(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    purchase_tool = build_sales_lead_tools(deps)[0]
+    purchase_tool = _tool_by_name(deps, "purchase_search_tool")
 
     with pytest.raises(RuntimeError, match="crawler boom"):
         purchase_tool.func(query_texts=["страх имущества"])
@@ -1576,7 +1746,7 @@ def test_doc_search_tool_propagates_invalid_index_errors(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    doc_search_tool = build_sales_lead_tools(deps)[2]
+    doc_search_tool = _tool_by_name(deps, "doc_search_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="unknown index"):
         doc_search_tool.func(index_id="missing", query="страхование")
@@ -1597,7 +1767,7 @@ def test_doc_search_tool_wraps_unexpected_search_errors(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    doc_search_tool = build_sales_lead_tools(deps)[2]
+    doc_search_tool = _tool_by_name(deps, "doc_search_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="doc search boom") as exc_info:
         doc_search_tool.func(index_id="idx-1", query="страхование")
@@ -1683,6 +1853,45 @@ def test_read_cached_document_tool_wraps_unexpected_errors(tmp_path: Path):
     with pytest.raises(ToolUserCorrectableError, match="cache read boom") as exc_info:
         asyncio.run(read_tool.coroutine(index_id=SHARED_INDEX_ID, document_id="doc-1"))
     assert exc_info.value.code == "READ_CACHED_DOCUMENT_FAILED"
+
+
+def test_read_cached_document_tool_returns_unavailable_payload_for_normal_resolution_errors(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(
+            create_run=lambda: workspace,
+            get=lambda run_id: workspace,
+        ),
+        document_service=_document_service_stub(
+            read_cached_document=lambda **kwargs: (_ for _ in ()).throw(
+                ToolUserCorrectableError(
+                    code="FILE_NOT_DOWNLOADED",
+                    message="Файл ещё не скачан.",
+                    suggestion="Откройте другой уже скачанный файл или дождитесь завершения загрузки.",
+                    input_field="file_name",
+                )
+            )
+        ),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+    )
+
+    read_tool = next(
+        tool_item for tool_item in build_sales_lead_tools(deps) if tool_item.name == "read_cached_document_tool"
+    )
+
+    result = asyncio.run(
+        read_tool.coroutine(
+            bundle_id="0245100001626000175",
+            file_name="Приложение 4. Требования к содержанию, составу заявки и инструкция.docx",
+        )
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["error_code"] == "FILE_NOT_DOWNLOADED"
+    assert result["bundle_id"] == "0245100001626000175"
+    assert result["file_name"] == "Приложение 4. Требования к содержанию, составу заявки и инструкция.docx"
 
 
 def test_read_cached_document_tool_uses_bundle_and_file_name_with_active_run(tmp_path: Path):
@@ -1796,7 +2005,7 @@ def test_read_cached_document_tool_reuses_shared_index_when_index_id_is_omitted(
     assert result["index_id"] == SHARED_INDEX_ID
 
 
-def test_read_cached_document_tool_accepts_runtime_in_ainvoke_payload(tmp_path: Path):
+def test_read_cached_document_tool_accepts_injected_runtime_argument(tmp_path: Path):
     workspace = _workspace(tmp_path)
     captured = {}
     deps = SalesLeadAgentDependencies(
@@ -1847,15 +2056,13 @@ def test_read_cached_document_tool_accepts_runtime_in_ainvoke_payload(tmp_path: 
     )
 
     result = asyncio.run(
-        read_tool.ainvoke(
-            {
-                "index_id": SHARED_INDEX_ID,
-                "bundle_id": "32615846691",
-                "file_name": "Документация о ЗП.docx",
-                "offset": 0,
-                "max_chars": 12000,
-                "runtime": runtime,
-            }
+        read_tool.coroutine(
+            index_id=SHARED_INDEX_ID,
+            bundle_id="32615846691",
+            file_name="Документация о ЗП.docx",
+            offset=0,
+            max_chars=12000,
+            runtime=runtime,
         )
     )
 
@@ -1864,6 +2071,115 @@ def test_read_cached_document_tool_accepts_runtime_in_ainvoke_payload(tmp_path: 
     assert captured["bundle_id"] == "32615846691"
     assert captured["file_name"] == "Документация о ЗП.docx"
     assert result["content"] == "criteria"
+
+
+def test_read_cached_document_tool_indexes_local_purchase_file_when_missing_from_index(tmp_path: Path):
+    workspace = _workspace(tmp_path)
+    captured_prepare = {}
+    cached_path = tmp_path / "permanent_index" / "purchase_downloads" / "32615840717" / "Документация о закупке (КАСКО)_2.doc"
+    cached_path.parent.mkdir(parents=True, exist_ok=True)
+    cached_path.write_text("cached text", encoding="utf-8")
+
+    deps = SalesLeadAgentDependencies(
+        workspace_manager=SimpleNamespace(
+            create_run=lambda: workspace,
+            get=lambda run_id: workspace,
+            get_by_index=lambda index_id: workspace,
+        ),
+        document_service=_document_service_stub(
+            read_cached_document=lambda **kwargs: sales_tools.ReadCachedDocumentResponse(
+                index_id=SHARED_INDEX_ID,
+                document_id="doc_9b3429223d7bb1b2",
+                bundle_id="32615840717",
+                purchase_id="32615840717",
+                source_id="src-doc-1",
+                parsed_at_utc=None,
+                file_path=str(cached_path),
+                file_name="Документация о закупке (КАСКО)_2.doc",
+                source_kind="purchase",
+                source_url=None,
+                content_source="local_file",
+                total_chars=11,
+                offset=0,
+                returned_chars=11,
+                next_offset=None,
+                truncated=False,
+                content="cached text",
+            ),
+            source_exists=lambda source_id: False,
+            prepare_files=lambda **kwargs: captured_prepare.update(kwargs) or [],
+            _purchase_cached_relative_hint=lambda **kwargs: "32615840717/Документация о закупке (КАСКО)_2.doc",
+        ),
+        purchase_adapter=SimpleNamespace(),
+        counterparty_clients=SimpleNamespace(),
+        open_source_max_concurrency=4,
+    )
+
+    read_tool = next(
+        tool_item for tool_item in build_sales_lead_tools(deps) if tool_item.name == "read_cached_document_tool"
+    )
+    runtime = ToolRuntime(
+        state={"active_retrieval_run_id": "run-1", "index_id": SHARED_INDEX_ID},
+        context=None,
+        config={"configurable": {"thread_id": "conv-1"}},
+        stream_writer=lambda *_args, **_kwargs: None,
+        tool_call_id="call-1",
+        store=None,
+    )
+
+    result = asyncio.run(
+        read_tool.coroutine(
+            index_id=SHARED_INDEX_ID,
+            document_id="doc_9b3429223d7bb1b2",
+            offset=0,
+            max_chars=9000,
+            runtime=runtime,
+        )
+    )
+
+    assert result["content"] == "cached text"
+    assert captured_prepare["workspace"] == workspace
+    assert captured_prepare["origin"] == "purchase"
+    assert captured_prepare["bundle_id"] == "32615840717"
+    assert captured_prepare["registry_number"] == "32615840717"
+    assert captured_prepare["file_paths"] == [str(cached_path)]
+    assert (
+        captured_prepare["provenance_by_path"][str(cached_path)]["artifact_relpath"]
+        == "32615840717/Документация о закупке (КАСКО)_2.doc"
+    )
+
+
+def test_document_preparation_service_clamps_oversized_max_chars(monkeypatch, tmp_path: Path):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "32615840717"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = download_dir / "Документация о закупке (КАСКО)_2.doc"
+    cached_file.write_text("x" * 40000, encoding="utf-8")
+
+    monkeypatch.setattr(
+        service,
+        "_load_docs",
+        lambda path: [
+            sales_tools.Document(
+                id="raw-1",
+                page_content="x" * 40000,
+                metadata={"source": str(path)},
+            )
+        ],
+    )
+
+    response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        workspace=None,
+        bundle_id="32615840717",
+        file_name="Документация о закупке (КАСКО)_2.doc",
+        offset=0,
+        max_chars=120000,
+    )
+
+    assert response.returned_chars == 30000
+    assert response.next_offset == 30000
+    assert response.truncated is True
 
 
 def test_retrieve_page_tool_prepares_pages_and_attachments(monkeypatch, tmp_path: Path):
@@ -1939,7 +2255,7 @@ def test_retrieve_page_tool_prepares_pages_and_attachments(monkeypatch, tmp_path
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
     result = asyncio.run(
         retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime())
     )
@@ -1986,7 +2302,7 @@ def test_retrieve_page_tool_skips_already_indexed_page_without_repreparing(monke
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
     result = asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime()))
 
     assert result["index_id"] == SHARED_INDEX_ID
@@ -2039,7 +2355,7 @@ def test_retrieve_page_tool_uses_fixed_internal_loader_settings(monkeypatch, tmp
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
     asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime()))
 
     assert captured["depth"] == 0
@@ -2101,7 +2417,7 @@ def test_retrieve_page_tool_ignores_scope_filter_warnings_when_docs_were_fetched
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
     result = asyncio.run(retrieve_page_tool.coroutine(url="https://egrul.nalog.ru/index.html", runtime=_runtime()))
 
     assert result["index_id"] == SHARED_INDEX_ID
@@ -2130,7 +2446,7 @@ def test_retrieve_page_tool_wraps_loader_errors_as_user_correctable(monkeypatch,
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="loader boom") as exc_info:
         asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime()))
@@ -2157,7 +2473,7 @@ def test_retrieve_page_tool_wraps_auth_required_loader_errors(monkeypatch, tmp_p
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="Authentication required") as exc_info:
         asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/protected", runtime=_runtime()))
@@ -2187,7 +2503,7 @@ def test_retrieve_page_tool_wraps_html_parser_errors_as_user_correctable(
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="HTML table has no rows") as exc_info:
         asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime()))
@@ -2244,7 +2560,7 @@ def test_web_search_tool_parses_ranked_results_and_unwraps_urls(monkeypatch, tmp
         open_source_max_concurrency=4,
     )
 
-    web_search_tool = build_sales_lead_tools(deps)[5]
+    web_search_tool = _tool_by_name(deps, "web_search")
     result = web_search_tool.func(search_string="6663003127")
 
     assert captured["url"] == "https://html.duckduckgo.com/html/"
@@ -2277,7 +2593,7 @@ def test_web_search_tool_rejects_empty_search_string(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    web_search_tool = build_sales_lead_tools(deps)[5]
+    web_search_tool = _tool_by_name(deps, "web_search")
 
     with pytest.raises(ToolUserCorrectableError, match="non-empty search_string") as exc_info:
         web_search_tool.func(search_string="  ")
@@ -2309,7 +2625,7 @@ def test_web_search_tool_wraps_unexpected_errors(monkeypatch, tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    web_search_tool = build_sales_lead_tools(deps)[5]
+    web_search_tool = _tool_by_name(deps, "web_search")
 
     with pytest.raises(ToolUserCorrectableError, match="web boom") as exc_info:
         web_search_tool.func(search_string="6663003127")
@@ -2328,7 +2644,7 @@ def test_sales_lead_tools_use_project_wide_yandex_search_tool(monkeypatch, tmp_p
         open_source_max_concurrency=4,
     )
 
-    web_search_tool = build_sales_lead_tools(deps)[5]
+    web_search_tool = _tool_by_name(deps, "web_search")
 
     assert isinstance(web_search_tool, sales_tools.YandexSearchTool)
     assert web_search_tool.name == "web_search"
@@ -2357,7 +2673,7 @@ def test_sales_lead_yandex_search_tool_invocation_uses_shared_contract(monkeypat
         open_source_max_concurrency=4,
     )
 
-    web_search_tool = build_sales_lead_tools(deps)[5]
+    web_search_tool = _tool_by_name(deps, "web_search")
     result = web_search_tool.invoke({"query": "6663003127"})
 
     assert captured["endpoint"] == "https://searchapi.api.cloud.yandex.net/v2/web/search"
@@ -2383,7 +2699,7 @@ def test_sales_lead_yandex_search_tool_returns_failure_text(monkeypatch, tmp_pat
         open_source_max_concurrency=4,
     )
 
-    web_search_tool = build_sales_lead_tools(deps)[5]
+    web_search_tool = _tool_by_name(deps, "web_search")
     result = web_search_tool.invoke({"query": "6663003127"})
 
     assert result == "Yandex Search failed: web boom"
@@ -2404,8 +2720,8 @@ def test_counterparty_tools_surface_scoring_errors_as_user_correctable_and_softe
         open_source_max_concurrency=4,
     )
 
-    scoring_tool = build_sales_lead_tools(deps)[3]
-    fssp_tool = build_sales_lead_tools(deps)[4]
+    scoring_tool = _tool_by_name(deps, "counterparty_scoring_tool")
+    fssp_tool = _tool_by_name(deps, "counterparty_fssp_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="scoring boom") as exc_info:
         scoring_tool.func(inn="7707083893")
@@ -2537,7 +2853,7 @@ def test_counterparty_lookup_tool_forwards_include_branches(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    lookup_tool = build_sales_lead_tools(deps)[6]
+    lookup_tool = _tool_by_name(deps, "counterparty_lookup_tool")
     result = lookup_tool.func(inn="6663003127", include_branches=True)
 
     assert captured == {"inn": "6663003127", "include_branches": True}
@@ -2558,7 +2874,7 @@ def test_counterparty_lookup_tool_wraps_unexpected_errors(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    lookup_tool = build_sales_lead_tools(deps)[6]
+    lookup_tool = _tool_by_name(deps, "counterparty_lookup_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="lookup boom") as exc_info:
         lookup_tool.func(inn="6663003127")
@@ -2958,7 +3274,7 @@ def test_counterparty_fssp_tool_uses_grouped_contract_only(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    fssp_tool = build_sales_lead_tools(deps)[4]
+    fssp_tool = _tool_by_name(deps, "counterparty_fssp_tool")
     result = fssp_tool.func(inn="7707083893", from_date="2024-01-01")
 
     assert captured == {
@@ -2994,7 +3310,7 @@ def test_retrieve_page_tool_raises_on_empty_fetched_content(monkeypatch, tmp_pat
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="Fetched empty content"):
         asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime()))
@@ -3028,7 +3344,7 @@ def test_retrieve_page_tool_wraps_unexpected_preparation_errors(monkeypatch, tmp
         open_source_max_concurrency=4,
     )
 
-    retrieve_page_tool = build_sales_lead_tools(deps)[1]
+    retrieve_page_tool = _tool_by_name(deps, "retrieve_page_tool")
 
     with pytest.raises(ToolUserCorrectableError, match="prepare boom") as exc_info:
         asyncio.run(retrieve_page_tool.coroutine(url="https://example.test/page", runtime=_runtime()))
@@ -3610,10 +3926,158 @@ def test_doc_search_tool_preserves_explicit_zero_top_k(tmp_path: Path):
         open_source_max_concurrency=4,
     )
 
-    doc_search_tool = build_sales_lead_tools(deps)[2]
+    doc_search_tool = _tool_by_name(deps, "doc_search_tool")
     doc_search_tool.func(index_id=SHARED_INDEX_ID, query="страхование", top_k=0)
 
     assert captured["top_k"] == 0
+
+
+def test_document_preparation_service_search_uses_vector_store_lock(monkeypatch, tmp_path: Path):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    lock_state = {"held": False, "entered": 0}
+
+    @contextlib.contextmanager
+    def fake_lock():
+        lock_state["entered"] += 1
+        lock_state["held"] = True
+        try:
+            yield
+        finally:
+            lock_state["held"] = False
+
+    class FakeVectorStore:
+        def similarity_search_with_relevance_scores(self, query, **kwargs):
+            assert lock_state["held"] is True
+            return []
+
+    monkeypatch.setattr(service, "_vector_store_operation_lock", fake_lock)
+    monkeypatch.setattr(service, "_open_vector_store", lambda embeddings=None: (None, FakeVectorStore()))
+
+    response = service.search(
+        index_id=SHARED_INDEX_ID,
+        query="требования к заявке",
+        top_k=5,
+        source_kind="purchase",
+        bundle_id="0245100001626000175",
+        purchase_id="0245100001626000175",
+    )
+
+    assert response.matches == []
+    assert lock_state["entered"] == 1
+
+
+def test_document_preparation_service_indexes_batches_under_vector_store_lock(monkeypatch, tmp_path: Path):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    lock_state = {"held": False, "entered": 0}
+    processed_batch_sizes: list[int] = []
+
+    @contextlib.contextmanager
+    def fake_lock():
+        lock_state["entered"] += 1
+        lock_state["held"] = True
+        try:
+            yield
+        finally:
+            lock_state["held"] = False
+
+    class FakeIndexer:
+        def __init__(self, *, vector_store, embeddings):
+            self.vector_store = vector_store
+            self.embeddings = embeddings
+
+        def _process_batch(self, batch):
+            assert lock_state["held"] is True
+            processed_batch_sizes.append(len(batch))
+
+    monkeypatch.setattr(service, "_vector_store_operation_lock", fake_lock)
+    monkeypatch.setattr(service, "_create_embeddings", lambda: "emb")
+    monkeypatch.setattr(service, "_open_vector_store", lambda embeddings=None: (embeddings, object()))
+    monkeypatch.setattr(sales_tools, "Indexer", FakeIndexer)
+
+    segments = [
+        sales_tools.Segment(
+            segment_id=f"seg-{index}",
+            content=f"content {index}",
+            metadata={"chunk_index": index},
+        )
+        for index in range(65)
+    ]
+
+    service._index_documents(segments=segments)
+
+    assert processed_batch_sizes == [32, 32, 1]
+    assert lock_state["entered"] == 3
+
+
+def test_document_preparation_service_search_retries_retryable_vector_errors(monkeypatch, tmp_path: Path):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    calls = {"count": 0}
+
+    class FlakyVectorStore:
+        def similarity_search_with_relevance_scores(self, query, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("Error executing plan: Internal error: Error finding id")
+            return []
+
+    monkeypatch.setattr(service, "_open_vector_store", lambda embeddings=None: (None, FlakyVectorStore()))
+
+    response = service.search(
+        index_id=SHARED_INDEX_ID,
+        query="ИНН",
+        top_k=5,
+        source_kind="purchase",
+        bundle_id="0245100001626000175",
+        purchase_id="0245100001626000175",
+    )
+
+    assert response.matches == []
+    assert calls["count"] == 2
+
+
+def test_document_preparation_service_search_falls_back_to_local_purchase_files_on_retryable_vector_error(
+    monkeypatch,
+    tmp_path: Path,
+):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "0245100001626000175"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = download_dir / "requirements.txt"
+    cached_file.write_text(
+        "ИНН заказчика: 7802114044\nТребования к заявке и состав документов.",
+        encoding="utf-8",
+    )
+
+    class BrokenVectorStore:
+        def similarity_search_with_relevance_scores(self, query, **kwargs):
+            raise RuntimeError("Error executing plan: Internal error: Error finding id")
+
+    monkeypatch.setattr(service, "_open_vector_store", lambda embeddings=None: (None, BrokenVectorStore()))
+    monkeypatch.setattr(
+        service,
+        "_load_docs",
+        lambda path: [
+            sales_tools.Document(
+                id="raw-1",
+                page_content=Path(path).read_text(encoding="utf-8"),
+                metadata={"source": str(path)},
+            )
+        ],
+    )
+
+    response = service.search(
+        index_id=SHARED_INDEX_ID,
+        query="ИНН",
+        top_k=5,
+        source_kind="purchase",
+        bundle_id="0245100001626000175",
+        purchase_id="0245100001626000175",
+    )
+
+    assert len(response.matches) == 1
+    assert response.matches[0].file_path == str(cached_file)
+    assert response.matches[0].locator.startswith("local_fallback")
+    assert "ИНН заказчика" in response.matches[0].snippet
 
 
 def test_document_preparation_service_reads_cached_document_from_local_file(monkeypatch, tmp_path: Path):
@@ -3746,6 +4210,43 @@ def test_document_preparation_service_reads_cached_purchase_file_from_download_c
     assert response.content == "criteria and requirements"
 
 
+def test_document_preparation_service_reads_cached_purchase_file_from_download_cache_without_workspace(
+    monkeypatch,
+    tmp_path: Path,
+):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "32615846691"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = download_dir / "Документация о ЗП.docx"
+    cached_file.write_text("criteria and requirements", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service,
+        "_load_docs",
+        lambda path: [
+            sales_tools.Document(
+                id="raw-1",
+                page_content="criteria and requirements",
+                metadata={"source": str(path)},
+            )
+        ],
+    )
+
+    response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        workspace=None,
+        bundle_id="32615846691",
+        file_name="Документация о ЗП.docx",
+        max_chars=100,
+    )
+
+    assert response.content_source == "local_file"
+    assert response.bundle_id == "32615846691"
+    assert response.file_name == "Документация о ЗП.docx"
+    assert response.file_path == str(cached_file)
+    assert response.content == "criteria and requirements"
+
+
 def test_document_preparation_service_reads_cached_purchase_file_by_downloaded_path(
     monkeypatch,
     tmp_path: Path,
@@ -3818,6 +4319,198 @@ def test_document_preparation_service_reads_cached_purchase_file_by_unique_hint(
     assert response.content_source == "local_file"
     assert response.file_name == "Ð”Ð¾ÐºÑƒÐ¼ÐµÐ½Ñ‚Ð°Ñ†Ð¸Ñ Ð¾ Ð—ÐŸ.docx"
     assert response.content == "criteria and requirements"
+
+
+def test_document_preparation_service_reads_cached_archive_as_listing_and_member_without_workspace(
+    monkeypatch,
+    tmp_path: Path,
+):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "32615846691"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    archive_file = download_dir / "Приложения к документации.zip"
+    archive_file.write_text("zip placeholder", encoding="utf-8")
+
+    extracted_dir = (
+        tmp_path
+        / "runs"
+        / "run_cached"
+        / "artifacts"
+        / "32615846691"
+        / "archive_Приложения к документации"
+        / "Приложения к документации"
+    )
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    criteria_file = extracted_dir / "5. Критерии и порядок оценки.docx"
+    criteria_file.write_text("criteria text from archive", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service,
+        "_load_docs",
+        lambda path: [
+            sales_tools.Document(
+                id="raw-1",
+                page_content="criteria text from archive",
+                metadata={"source": str(path)},
+            )
+        ],
+    )
+
+    archive_response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        workspace=None,
+        bundle_id="32615846691",
+        file_name="Приложения к документации.zip",
+        max_chars=4000,
+    )
+
+    assert archive_response.content_source == "archive_listing"
+    assert archive_response.file_name == "Приложения к документации.zip"
+    assert "5. Критерии и порядок оценки.docx" in archive_response.content
+    assert "Чтобы прочитать конкретный документ из архива" in archive_response.content
+
+    member_response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        workspace=None,
+        bundle_id="32615846691",
+        file_name="5. Критерии и порядок оценки.docx",
+        max_chars=4000,
+    )
+
+    assert member_response.content_source == "local_file"
+    assert member_response.file_name == "5. Критерии и порядок оценки.docx"
+    assert member_response.content == "criteria text from archive"
+
+
+def test_document_preparation_service_continues_nonindexed_local_file_by_document_id(
+    monkeypatch,
+    tmp_path: Path,
+):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "32615840717"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = download_dir / "Документация о закупке (КАСКО)_2.doc"
+    cached_file.write_text("0123456789abcdef", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service,
+        "_load_docs",
+        lambda path: [
+            sales_tools.Document(
+                id="raw-1",
+                page_content="0123456789abcdef",
+                metadata={"source": str(path)},
+            )
+        ],
+    )
+
+    first_response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        workspace=None,
+        bundle_id="32615840717",
+        file_name="Документация о закупке (КАСКО)_2.doc",
+        offset=0,
+        max_chars=8,
+    )
+
+    second_response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        document_id=first_response.document_id,
+        offset=8,
+        max_chars=8,
+    )
+
+    assert first_response.content_source == "local_file"
+    assert first_response.content == "01234567"
+    assert first_response.next_offset == 8
+    assert second_response.content_source == "local_file"
+    assert second_response.file_name == "Документация о закупке (КАСКО)_2.doc"
+    assert second_response.content == "89abcdef"
+    assert second_response.next_offset is None
+
+
+def test_document_preparation_service_continues_archive_listing_by_document_id(
+    tmp_path: Path,
+):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "32615846691"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    archive_file = download_dir / "Приложения к документации.zip"
+    archive_file.write_text("zip placeholder", encoding="utf-8")
+
+    extracted_dir = (
+        tmp_path
+        / "runs"
+        / "run_cached"
+        / "artifacts"
+        / "32615846691"
+        / "archive_Приложения к документации"
+        / "Приложения к документации"
+    )
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    (extracted_dir / "5. Критерии и порядок оценки.docx").write_text("criteria", encoding="utf-8")
+    (extracted_dir / "7. Обоснование НМЦ.xlsx").write_text("nmc", encoding="utf-8")
+
+    first_response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        workspace=None,
+        bundle_id="32615846691",
+        file_name="Приложения к документации.zip",
+        offset=0,
+        max_chars=120,
+    )
+
+    second_response = service.read_cached_document(
+        index_id=SHARED_INDEX_ID,
+        document_id=first_response.document_id,
+        offset=120,
+        max_chars=500,
+    )
+
+    assert first_response.content_source == "archive_listing"
+    assert first_response.next_offset == 120
+    assert second_response.content_source == "archive_listing"
+    assert second_response.file_name == "Приложения к документации.zip"
+    assert "5. Критерии и порядок оценки.docx" in first_response.content + second_response.content
+
+
+def test_document_preparation_service_reports_undownloaded_exact_file_without_fuzzy_ambiguity(
+    tmp_path: Path,
+):
+    service = sales_tools.DocumentPreparationService(_counterparty_settings(tmp_path))
+    download_dir = tmp_path / "permanent_index" / "purchase_downloads" / "0245100001626000175"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    (download_dir / "Приложение 1. Обоснование НСЦЕУТ.docx").write_text("one", encoding="utf-8")
+    (download_dir / "Приложение №1 к ТЗ Перечень ЗЧ Фольксваген.xlsx").write_text("two", encoding="utf-8")
+
+    artifact_dir = tmp_path / "runs" / "run_cached" / "artifacts" / "0245100001626000175"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "documents_json.json").write_text(
+        json.dumps(
+            [
+                {
+                    "display_name": "Приложение 4. Требования к содержанию, составу заявки и инструкция.docx",
+                    "source_filename": "Приложение 4. Требования к содержанию, составу заявки и инструкция.docx",
+                    "downloaded": False,
+                    "local_path": None,
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ToolUserCorrectableError) as exc_info:
+        service.read_cached_document(
+            index_id=SHARED_INDEX_ID,
+            workspace=None,
+            bundle_id="0245100001626000175",
+            file_name="Приложение 4. Требования к содержанию, составу заявки и инструкция.docx",
+            max_chars=12000,
+        )
+
+    assert exc_info.value.code == "FILE_NOT_DOWNLOADED"
+    assert "has not been downloaded yet" in str(exc_info.value)
 
 
 def test_document_preparation_service_falls_back_to_indexed_chunks_for_missing_local_file(

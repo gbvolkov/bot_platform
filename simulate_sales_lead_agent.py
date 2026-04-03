@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import locale
+import shlex
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command
 
 try:
     import termios
@@ -23,6 +25,7 @@ from langchain_core.messages import (
     HumanMessage,
     message_chunk_to_message,
 )
+from langchain_core.messages.base import message_to_dict
 
 from agents.sales_lead_agent.agent import initialize_agent
 from agents.utils import ModelType, extract_text
@@ -32,6 +35,7 @@ DEFAULT_PROVIDER = ModelType.GPT.value
 HELP_TEXT = """
 Commands:
   /scenario <name>  switch scripted scenario
+  /export [path] [--no-tools]  export messages from current agent state
   /reset            start a fresh dialog session
   /help             show commands
   /exit             leave the simulator
@@ -43,12 +47,27 @@ _MULTILINE_END = "/end"
 _INPUT_FALLBACK_ENCODINGS = ("utf-8", "cp1251", "cp866", "latin-1")
 
 
+def _configure_utf8_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+
 def _simulator_checkpointer_path() -> Path:
     return Path(__file__).resolve().parent / "data" / "sales_lead_agent" / "simulator_checkpoints.sqlite"
 
 
 def _simulator_session_path() -> Path:
     return Path(__file__).resolve().parent / "data" / "sales_lead_agent" / "simulator_session.json"
+
+
+def _simulator_export_root() -> Path:
+    return Path(__file__).resolve().parent / "data" / "simulator_transcripts"
 
 
 def _persistent_checkpoint_saver():
@@ -81,6 +100,8 @@ class TurnOutcome:
     reply: str
     result: dict[str, Any]
     thread_id: str
+    agent_status: str = "completed"
+    interrupt_payload: dict[str, Any] | None = None
 
 
 SCENARIOS: dict[str, list[ScenarioStep]] = {
@@ -270,6 +291,26 @@ def _latest_ai_text(result: dict[str, Any]) -> str:
     return ""
 
 
+def _coerce_interrupt_payload(raw_value: Any) -> dict[str, Any] | None:
+    payload = getattr(raw_value, "value", raw_value)
+    return payload if isinstance(payload, dict) else None
+
+
+def _extract_interrupt_payload(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    interrupts = result.get("__interrupt__") or []
+    if not interrupts:
+        return None
+    return _coerce_interrupt_payload(interrupts[-1])
+
+
+def _interrupt_question(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("question") or payload.get("content") or "").strip()
+
+
 def _print_progress_event(payload: Any) -> None:
     if not isinstance(payload, dict):
         return
@@ -305,6 +346,9 @@ def _decode_console_bytes(raw_value: bytes) -> str:
 
 
 def _read_raw_console_input(prompt: str) -> str:
+    is_tty = getattr(sys.stdin, "isatty", None)
+    if callable(is_tty) and is_tty():
+        return input(prompt)
     stdin_buffer = getattr(sys.stdin, "buffer", None)
     if stdin_buffer is None:
         return input(prompt)
@@ -358,8 +402,233 @@ def _handle_command(raw_text: str, *, scenario: str) -> tuple[bool, str, bool]:
     return True, scenario, False
 
 
-async def _invoke_agent(graph: Any, config: dict[str, Any], user_text: str | None) -> TurnOutcome:
-    payload = {} if user_text is None else {"messages": [HumanMessage(content=user_text)]}
+def _parse_export_command(command: str) -> tuple[str | None, bool]:
+    raw_args = command[len("/export") :].strip()
+    if not raw_args:
+        return None, False
+    parts = shlex.split(raw_args, posix=False)
+    no_tools = False
+    remaining: list[str] = []
+    for part in parts:
+        if part == "--no-tools":
+            no_tools = True
+            continue
+        remaining.append(part)
+    target_path = " ".join(remaining).strip() or None
+    return target_path, no_tools
+
+
+def _default_export_path(*, thread_id: str, no_tools: bool = False) -> Path:
+    safe_thread_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in thread_id).strip("_")
+    suffix = "_state_messages_human_ai" if no_tools else "_state_messages"
+    file_name = f"{safe_thread_id or 'dialog'}{suffix}.json"
+    root = _simulator_export_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root / file_name
+
+
+def _markdown_export_path_for(json_path: Path) -> Path:
+    return json_path.with_suffix(".md")
+
+
+async def _get_state_snapshot(graph: Any, config: dict[str, Any]) -> Any:
+    aget_state = getattr(graph, "aget_state", None)
+    if callable(aget_state):
+        return await aget_state(config)
+    get_state = getattr(graph, "get_state", None)
+    if callable(get_state):
+        return get_state(config)
+    return None
+
+
+def _serialize_state_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        try:
+            payload = message_to_dict(message)
+        except Exception:
+            payload = {
+                "type": getattr(message, "type", message.__class__.__name__),
+                "data": {
+                    "content": extract_text(message) if hasattr(message, "content") else str(message),
+                },
+            }
+        payload["index"] = index
+        serialized.append(payload)
+    return serialized
+
+
+def _filter_export_messages(messages: list[Any], *, no_tools: bool) -> list[Any]:
+    if not no_tools:
+        return list(messages)
+    return [message for message in messages if isinstance(message, (HumanMessage, AIMessage))]
+
+
+def _message_content_as_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text = str(item.get("text") or "").strip()
+                    if text:
+                        parts.append(text)
+                    continue
+                parts.append(json.dumps(item, ensure_ascii=False, indent=2))
+            else:
+                parts.append(str(item))
+        return "\n\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False, indent=2)
+    return str(content)
+
+
+def _message_heading(message_type: str) -> str:
+    normalized = str(message_type or "").strip().lower()
+    mapping = {
+        "human": "Human",
+        "ai": "AI",
+        "tool": "Tool",
+        "system": "System",
+    }
+    return mapping.get(normalized, normalized.title() or "Message")
+
+
+def _render_state_messages_markdown(
+    *,
+    thread_id: str,
+    state_keys: list[str],
+    messages: list[dict[str, Any]],
+    message_filter: str,
+) -> str:
+    lines = [
+        f"# Agent State Export",
+        "",
+        f"- Thread ID: `{thread_id}`",
+        f"- Message count: {len(messages)}",
+        f"- Message filter: {message_filter}",
+        f"- State keys: {', '.join(state_keys)}",
+        "",
+    ]
+    for message in messages:
+        index = message.get("index")
+        message_type = str(message.get("type") or "")
+        data = message.get("data") if isinstance(message.get("data"), dict) else {}
+        lines.append(f"## {index}. {_message_heading(message_type)}")
+        tool_name = str(data.get("name") or "").strip()
+        tool_call_id = str(data.get("tool_call_id") or "").strip()
+        if tool_name:
+            lines.append(f"- Name: `{tool_name}`")
+        if tool_call_id:
+            lines.append(f"- Tool call id: `{tool_call_id}`")
+        lines.append("")
+        content = _message_content_as_text(data.get("content"))
+        if content:
+            lines.append(content)
+        else:
+            lines.append("(empty content)")
+        additional_kwargs = data.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict) and additional_kwargs:
+            lines.extend(
+                [
+                    "",
+                    "### additional_kwargs",
+                    "```json",
+                    json.dumps(additional_kwargs, ensure_ascii=False, indent=2),
+                    "```",
+                ]
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+async def _export_dialog_state(
+    *,
+    graph: Any,
+    config: dict[str, Any],
+    target_path: str | None = None,
+    no_tools: bool = False,
+) -> tuple[Path, Path]:
+    snapshot = await _get_state_snapshot(graph, config)
+    values = getattr(snapshot, "values", None)
+    state = values if isinstance(values, dict) else {}
+    messages = state.get("messages")
+    message_list = _filter_export_messages(messages if isinstance(messages, list) else [], no_tools=no_tools)
+    thread_id = str(config.get("configurable", {}).get("thread_id") or "").strip()
+    export_path = Path(target_path).expanduser() if target_path else _default_export_path(thread_id=thread_id, no_tools=no_tools)
+    if not export_path.is_absolute():
+        export_path = Path.cwd() / export_path
+    if export_path.suffix.lower() == ".md":
+        markdown_path = export_path
+        export_path = export_path.with_suffix(".json")
+    else:
+        if export_path.suffix.lower() != ".json":
+            export_path = export_path.with_suffix(".json")
+        markdown_path = _markdown_export_path_for(export_path)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    state_keys = sorted(state.keys())
+    serialized_messages = _serialize_state_messages(message_list)
+    payload = {
+        "thread_id": thread_id,
+        "message_filter": "human_ai" if no_tools else "all",
+        "message_count": len(message_list),
+        "state_keys": state_keys,
+        "messages": serialized_messages,
+    }
+    export_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_path.write_text(
+        _render_state_messages_markdown(
+            thread_id=thread_id,
+            state_keys=state_keys,
+            messages=serialized_messages,
+            message_filter="human_ai" if no_tools else "all",
+        ),
+        encoding="utf-8",
+    )
+    return export_path, markdown_path
+
+
+async def _handle_runtime_command(
+    raw_text: str,
+    *,
+    graph: Any,
+    config: dict[str, Any],
+    scenario: str,
+) -> tuple[bool, str, bool]:
+    command = raw_text.strip()
+    lowered = command.lower()
+    if lowered == "/export" or lowered.startswith("/export "):
+        target_path, no_tools = _parse_export_command(command)
+        export_path, markdown_path = await _export_dialog_state(
+            graph=graph,
+            config=config,
+            target_path=target_path,
+            no_tools=no_tools,
+        )
+        label = "human/ai state messages" if no_tools else "state messages"
+        print(
+            f"\n[Simulator] {label} exported to:\n- JSON: {export_path}\n- MD:   {markdown_path}\n"
+        )
+        return True, scenario, False
+    return _handle_command(raw_text, scenario=scenario)
+
+
+async def _invoke_agent(
+    graph: Any,
+    config: dict[str, Any],
+    user_text: str | None,
+    *,
+    resume_text: str | None = None,
+) -> TurnOutcome:
+    if resume_text is not None:
+        payload: Any = Command(resume=resume_text)
+    else:
+        payload = {} if user_text is None else {"messages": [HumanMessage(content=user_text)]}
     result: dict[str, Any] | None = None
     merged_chunk: AIMessageChunk | None = None
     last_ai_message: AIMessage | None = None
@@ -400,12 +669,72 @@ async def _invoke_agent(graph: Any, config: dict[str, Any], user_text: str | Non
     if result is None:
         result = {}
 
+    interrupt_payload = _extract_interrupt_payload(result)
+    reply = _interrupt_question(interrupt_payload) if interrupt_payload else _latest_ai_text(result)
     return TurnOutcome(
-        user_text=user_text or "",
-        reply=_latest_ai_text(result),
+        user_text=user_text or resume_text or "",
+        reply=reply,
         result=result,
         thread_id=str(config["configurable"]["thread_id"]),
+        agent_status="interrupted" if interrupt_payload else "completed",
+        interrupt_payload=interrupt_payload,
     )
+
+
+async def _get_pending_interrupt_payload(graph: Any, config: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot = await _get_state_snapshot(graph, config)
+    if snapshot is None:
+        return None
+    interrupts = getattr(snapshot, "interrupts", None) or []
+    if interrupts:
+        return _coerce_interrupt_payload(interrupts[-1])
+    values = getattr(snapshot, "values", None)
+    return _extract_interrupt_payload(values if isinstance(values, dict) else None)
+
+
+def _save_interactive_transcript(transcript: list[tuple[str, str]]) -> None:
+    markdown = "\n".join(f"## {speaker}\n{text}\n" for speaker, text in transcript)
+    _save_transcript(_transcript_path("interactive_last"), markdown)
+
+
+async def _resume_pending_interrupts(
+    *,
+    graph: Any,
+    config: dict[str, Any],
+    transcript: list[tuple[str, str]],
+    current_scenario: str,
+    initial_payload: dict[str, Any],
+    already_announced: bool = False,
+) -> tuple[str, bool]:
+    payload = initial_payload
+    question = _interrupt_question(payload)
+    if question and not already_announced:
+        print(f"\nAgent: {question}\n")
+        transcript.append(("agent", question))
+        _save_interactive_transcript(transcript)
+    while True:
+        raw_text = _read_text_input("User> ")
+        handled, current_scenario, should_reset = await _handle_runtime_command(
+            raw_text,
+            graph=graph,
+            config=config,
+            scenario=current_scenario,
+        )
+        if should_reset:
+            return current_scenario, True
+        if handled:
+            continue
+        resume_text = raw_text.strip()
+        if not resume_text:
+            continue
+        transcript.append(("user", resume_text))
+        outcome = await _invoke_agent(graph, config, None, resume_text=resume_text)
+        _save_persistent_interactive_session(config=config, scenario=current_scenario)
+        print(f"\nAgent: {outcome.reply}\n")
+        transcript.append(("agent", outcome.reply))
+        _save_interactive_transcript(transcript)
+        if outcome.agent_status != "interrupted" or not outcome.interrupt_payload:
+            return current_scenario, False
 
 
 def _transcript_path(name: str | None = None) -> Path:
@@ -658,9 +987,31 @@ async def run_interactive(*, provider: ModelType, scenario: str) -> None:
             print("[Simulator] restored previous dialog session.")
         print(HELP_TEXT)
 
+        pending_interrupt = await _get_pending_interrupt_payload(graph, config)
+        if pending_interrupt:
+            print("[Simulator] restored pending confirmation for this dialog.")
+            current_scenario, should_reset = await _resume_pending_interrupts(
+                graph=graph,
+                config=config,
+                transcript=transcript,
+                current_scenario=current_scenario,
+                initial_payload=pending_interrupt,
+                already_announced=False,
+            )
+            if should_reset:
+                config = _new_config()
+                _save_persistent_interactive_session(config=config, scenario=current_scenario)
+                transcript = []
+                print(f"\n[Simulator] new dialog session started: {config['configurable']['thread_id']}\n")
+
         while True:
             raw_text = _read_text_input("User> ", allow_multiline=True)
-            handled, current_scenario, should_reset = _handle_command(raw_text, scenario=current_scenario)
+            handled, current_scenario, should_reset = await _handle_runtime_command(
+                raw_text,
+                graph=graph,
+                config=config,
+                scenario=current_scenario,
+            )
             if should_reset:
                 config = _new_config()
                 _save_persistent_interactive_session(config=config, scenario=current_scenario)
@@ -678,8 +1029,21 @@ async def run_interactive(*, provider: ModelType, scenario: str) -> None:
             _save_persistent_interactive_session(config=config, scenario=current_scenario)
             print(f"\nAgent: {outcome.reply}\n")
             transcript.append(("agent", outcome.reply))
-            markdown = "\n".join(f"## {speaker}\n{text}\n" for speaker, text in transcript)
-            _save_transcript(_transcript_path("interactive_last"), markdown)
+            _save_interactive_transcript(transcript)
+            if outcome.agent_status == "interrupted" and outcome.interrupt_payload:
+                current_scenario, should_reset = await _resume_pending_interrupts(
+                    graph=graph,
+                    config=config,
+                    transcript=transcript,
+                    current_scenario=current_scenario,
+                    initial_payload=outcome.interrupt_payload,
+                    already_announced=True,
+                )
+                if should_reset:
+                    config = _new_config()
+                    _save_persistent_interactive_session(config=config, scenario=current_scenario)
+                    transcript = []
+                    print(f"\n[Simulator] new dialog session started: {config['configurable']['thread_id']}\n")
 
 
 async def run_all_scenarios(*, provider: ModelType) -> list[Path]:
@@ -690,6 +1054,7 @@ async def run_all_scenarios(*, provider: ModelType) -> list[Path]:
 
 
 def main() -> None:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Simulator for sales_lead_agent.")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER)
     parser.add_argument("--scenario", choices=sorted(SCENARIOS.keys()))

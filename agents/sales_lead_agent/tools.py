@@ -11,22 +11,27 @@ import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
+import threading
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from types import SimpleNamespace
+from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 import config
 from agents.tools.yandex_search import YandexSearchTool
 from langchain.tools import ToolRuntime, tool
+from langchain_core.tools import InjectedToolArg
 from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
@@ -54,11 +59,7 @@ from rag_lib.loaders.pptx import PPTXLoader
 from rag_lib.loaders.web_async import AsyncWebLoader
 from rag_lib.summarizers.table_llm import LLMTableSummarizer
 from rag_lib.vectors.factory import create_vector_store
-from services.sales_lead_retrieval.client import (
-    RetrievalServiceConflictError,
-    RetrievalServiceUserInputError,
-    get_retrieval_service_client,
-)
+from services.sales_lead_retrieval.client import get_retrieval_service_client
 
 
 ToolStatus = Literal["success"]
@@ -323,7 +324,7 @@ def _normalize_cached_document_window(
             input_field="offset",
         )
     normalized_max_chars = _READ_CACHED_DOCUMENT_DEFAULT_MAX_CHARS if max_chars is None else int(max_chars)
-    if normalized_max_chars <= 0 or normalized_max_chars > _READ_CACHED_DOCUMENT_MAX_CHARS:
+    if normalized_max_chars <= 0:
         raise ToolUserCorrectableError(
             code="INVALID_MAX_CHARS",
             message=(
@@ -333,6 +334,8 @@ def _normalize_cached_document_window(
             suggestion="Retry with a smaller positive max_chars window.",
             input_field="max_chars",
         )
+    if normalized_max_chars > _READ_CACHED_DOCUMENT_MAX_CHARS:
+        normalized_max_chars = _READ_CACHED_DOCUMENT_MAX_CHARS
     return normalized_offset, normalized_max_chars
 
 
@@ -348,6 +351,57 @@ def _normalize_purchase_record_from(record_from: int | None) -> int:
     return normalized
 
 
+def _normalize_purchase_lookup_inputs(
+    *,
+    query: str | None,
+    registry_number: str | None,
+) -> tuple[str | None, str | None]:
+    normalized_query = _normalize_optional_selector(query)
+    normalized_registry = _normalize_optional_selector(registry_number)
+    if normalized_registry:
+        return normalized_query, normalized_registry
+    if normalized_query:
+        return normalized_query, None
+    raise ToolUserCorrectableError(
+        code="MISSING_LOOKUP_INPUT",
+        message="purchase_lookup_tool requires either query or registry_number.",
+        suggestion="Pass a procurement number or a short procurement search query.",
+        input_field="query",
+    )
+
+
+def _normalize_russian_key(value: Any) -> str:
+    raw = str(value or "").casefold().replace("ё", "е")
+    return " ".join(re.sub(r"[^0-9a-zа-я]+", " ", raw).split())
+
+
+def _purchase_query_tokens(value: str | None) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw_token in _QUERY_TOKEN_RE.findall(str(value or "")):
+        normalized = _normalize_russian_key(raw_token)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        tokens.append(normalized)
+    return tokens
+
+
+def _is_generic_purchase_query_token(token: str) -> bool:
+    normalized = _normalize_russian_key(token)
+    if not normalized or normalized.isdigit() or len(normalized) < 4:
+        return True
+    return normalized in _PURCHASE_QUERY_GENERIC_TOKENS
+
+
+def _display_purchase_file_name(value: str) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    candidate = Path(normalized).name
+    return candidate or normalized
+
+
 def _normalize_optional_selector(value: str | None) -> str | None:
     normalized = str(value or "").strip()
     return normalized or None
@@ -359,6 +413,15 @@ def _selector_basename(value: str) -> str:
         return ""
     normalized = stripped.replace("\\", "/").rstrip("/")
     return normalized.rsplit("/", 1)[-1]
+
+
+def _selector_looks_like_explicit_file_name(value: str) -> bool:
+    stripped = str(value or "").strip().strip("\"'")
+    if not stripped:
+        return False
+    normalized = stripped.replace("\\", "/").rstrip("/")
+    basename = normalized.rsplit("/", 1)[-1]
+    return "/" in normalized or bool(Path(basename).suffix)
 
 
 def _normalize_file_selector_text(value: str) -> str:
@@ -434,6 +497,35 @@ _COMPANY_RE = re.compile(
     r'\b(?:ООО|АО|ПАО|ИП|ФГБУ|ФГУП|ГБУ|МУП|ОАО)\s+"?[A-Za-zА-Яа-яЁё0-9 .,-]+"?'
 )
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+")
+_PURCHASE_QUERY_GENERIC_TOKENS = {
+    "закупк",
+    "поставк",
+    "договор",
+    "контракт",
+    "услуг",
+    "услуга",
+    "оказан",
+    "оказание",
+    "электрон",
+    "форма",
+    "форме",
+    "заявк",
+    "предлож",
+    "запрос",
+    "котиров",
+    "тендер",
+    "страх",
+    "страхов",
+    "страховк",
+    "страхован",
+    "страхование",
+    "ответствен",
+    "гражданск",
+    "владел",
+    "обязател",
+    "средств",
+    "средство",
+}
 _WEB_SEARCH_LINK_RE = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,
@@ -560,12 +652,32 @@ class PurchaseSearchItem(StrictBaseModel):
     document_urls: list[str] = Field(default_factory=list)
     downloaded_files: list[str] = Field(default_factory=list)
     prepared_document_ids: list[str] = Field(default_factory=list)
+    indexed_documents_count: int = 0
+    last_indexed_at: str | None = None
     documents_json: str | None = None
     common_info_json: str | None = None
     lots_json: str | None = None
     crawl_status: str
     crawl_error: str | None = None
     crawl_ts_utc: str | None = None
+
+
+def _tool_visible_purchase_item(item: PurchaseSearchItem) -> PurchaseSearchItem:
+    visible_downloads: list[str] = []
+    seen_files: set[str] = set()
+    for raw_value in item.downloaded_files:
+        display_name = _display_purchase_file_name(raw_value)
+        if not display_name or display_name in seen_files:
+            continue
+        seen_files.add(display_name)
+        visible_downloads.append(display_name)
+    return item.model_copy(
+        update={
+            "document_urls": [],
+            "downloaded_files": visible_downloads,
+            "prepared_document_ids": [],
+        }
+    )
 
 
 class PurchaseSearchRequest(StrictBaseModel):
@@ -575,7 +687,7 @@ class PurchaseSearchRequest(StrictBaseModel):
     query_texts: list[str] | None = None
     max_pages: int | None = None
     record_from: int | None = None
-    runtime: ToolRuntime
+    runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None
 
 
 class RetrievalProgress(StrictBaseModel):
@@ -606,6 +718,25 @@ class PurchaseSearchResponse(StrictBaseModel):
     items: list[PurchaseSearchItem] = Field(default_factory=list)
 
 
+class PurchaseLookupRequest(StrictBaseModel):
+    query: str | None = None
+    registry_number: str | None = None
+    record_from: int | None = None
+
+
+class PurchaseLookupResponse(StrictBaseModel):
+    source: Literal["procurement_catalog"] = "procurement_catalog"
+    index_id: str
+    status: ToolStatus = "success"
+    query: str | None = None
+    registry_number: str | None = None
+    record_from: int = 0
+    returned_records: int = 0
+    total_ready_records: int = 0
+    next_record_from: int | None = None
+    items: list[PurchaseSearchItem] = Field(default_factory=list)
+
+
 class WebSearchRequest(StrictBaseModel):
     search_string: str
 
@@ -628,7 +759,7 @@ class RetrievePageRequest(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     url: str
-    runtime: ToolRuntime
+    runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None
 
 
 class RetrievedPage(StrictBaseModel):
@@ -688,11 +819,12 @@ class ReadCachedDocumentRequest(StrictBaseModel):
     file_name: str | None = None
     offset: int | None = None
     max_chars: int | None = None
-    runtime: ToolRuntime | None = None
+    runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None
 
 
 class ReadCachedDocumentResponse(StrictBaseModel):
     source: Literal["prepared_document_cache"] = "prepared_document_cache"
+    status: Literal["success"] = "success"
     index_id: str
     document_id: str
     bundle_id: str
@@ -703,13 +835,26 @@ class ReadCachedDocumentResponse(StrictBaseModel):
     file_name: str
     source_kind: SourceKind
     source_url: str | None = None
-    content_source: Literal["local_file", "indexed_chunks"]
+    content_source: Literal["local_file", "indexed_chunks", "archive_listing"]
     total_chars: int
     offset: int
     returned_chars: int
     next_offset: int | None = None
     truncated: bool = False
     content: str
+
+
+class ReadCachedDocumentUnavailableResponse(StrictBaseModel):
+    source: Literal["prepared_document_cache"] = "prepared_document_cache"
+    status: Literal["unavailable"] = "unavailable"
+    index_id: str
+    document_id: str | None = None
+    bundle_id: str | None = None
+    file_name: str | None = None
+    error_code: str
+    message: str
+    suggestion: str | None = None
+    input_field: str | None = None
 
 
 class TopFactor(StrictBaseModel):
@@ -1173,6 +1318,7 @@ class PurchaseAdapter:
         max_pages: int | None,
         progress_callback: ProgressCallback | None = None,
         item_callback: Callable[[PurchaseSearchItem], None] | None = None,
+        batch_callback: Callable[[list[PurchaseSearchItem], dict[str, Any]], None] | None = None,
     ) -> tuple[list[str], list[PurchaseSearchItem]]:
         resolved_search_urls = self.resolve_search_urls(search_url=search_url, query_texts=query_texts)
         scrape_purchases = self._import_scraper()
@@ -1251,6 +1397,7 @@ class PurchaseAdapter:
                     raw_procurements=len(raw_items),
                 )
 
+            batch_items: list[PurchaseSearchItem] = []
             for raw in raw_items:
                 registry_number = str(raw.registry_number)
                 if registry_number in seen_registry_numbers:
@@ -1284,6 +1431,18 @@ class PurchaseAdapter:
                 )
                 if item_callback is not None:
                     item_callback(items[-1].model_copy(deep=True))
+                batch_items.append(items[-1].model_copy(deep=True))
+            if batch_callback is not None and batch_items:
+                batch_callback(
+                    batch_items,
+                    {
+                        "stage": "crawler_query_batch",
+                        "search_url": resolved_search_url,
+                        "query_text": query_text,
+                        "current": url_index,
+                        "total": total_urls,
+                    },
+                )
         if progress_callback is not None:
             progress_callback(
                 stage="crawler_complete",
@@ -1373,6 +1532,11 @@ class DocumentPreparationService:
 
     def _vector_store(self):
         embeddings = self._create_embeddings()
+        return self._open_vector_store(embeddings=embeddings)
+
+    def _open_vector_store(self, *, embeddings: Any | None = None):
+        if embeddings is None:
+            embeddings = self._create_embeddings()
         with self._vector_env():
             vector_store = create_vector_store(
                 provider="chroma",
@@ -1382,6 +1546,80 @@ class DocumentPreparationService:
             )
         return embeddings, vector_store
 
+    def _vector_lock_path(self) -> Path:
+        return self._settings.permanent_index_root / ".vector_store.lock"
+
+    @contextlib.contextmanager
+    def _vector_store_operation_lock(self):
+        lock_path = self._vector_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock_file:
+            with contextlib.suppress(Exception):
+                if lock_file.tell() == 0:
+                    lock_file.write(b"0")
+                    lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.01)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _is_retryable_vector_store_error(exc: Exception) -> bool:
+        normalized = str(exc or "").lower()
+        return (
+            "error finding id" in normalized
+            or "database is locked" in normalized
+            or "temporary directory access error" in normalized
+        )
+
+    def _run_locked_vector_store_operation(
+        self,
+        operation: Callable[[Any, Any], Any],
+        *,
+        embeddings: Any | None = None,
+        retry_attempts: int = 1,
+    ) -> Any:
+        attempts = max(1, retry_attempts)
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            with self._vector_store_operation_lock():
+                resolved_embeddings, vector_store = self._open_vector_store(embeddings=embeddings)
+                try:
+                    return operation(vector_store, resolved_embeddings)
+                except Exception as exc:
+                    if attempt >= attempts or not self._is_retryable_vector_store_error(exc):
+                        raise
+                    last_exc = exc
+                    logger.warning(
+                        "Retryable vector store failure attempt=%s/%s reason=%s",
+                        attempt,
+                        attempts,
+                        exc,
+                    )
+            time.sleep(min(0.05 * attempt, 0.2))
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Vector store operation failed without a concrete exception.")
+
     def _collection_get(
         self,
         *,
@@ -1389,19 +1627,21 @@ class DocumentPreparationService:
         limit: int | None = 1,
         include: list[str] | None = None,
     ) -> dict[str, Any]:
-        _embeddings, vector_store = self._vector_store()
-        collection = vector_store._collection
         kwargs: dict[str, Any] = {"where": where}
         if limit is not None:
             kwargs["limit"] = limit
         if include is not None:
             kwargs["include"] = include
-        return collection.get(**kwargs)
+        return self._run_locked_vector_store_operation(
+            lambda vector_store, _embeddings: vector_store._collection.get(**kwargs),
+            retry_attempts=3,
+        )
 
     def _collection_delete(self, *, where: dict[str, Any]) -> None:
-        _embeddings, vector_store = self._vector_store()
-        collection = vector_store._collection
-        collection.delete(where=where)
+        self._run_locked_vector_store_operation(
+            lambda vector_store, _embeddings: vector_store._collection.delete(where=where),
+            retry_attempts=3,
+        )
 
     def purchase_exists(self, purchase_id: str) -> bool:
         result = self._collection_get(where={"purchase_id": purchase_id}, limit=1)
@@ -1410,6 +1650,41 @@ class DocumentPreparationService:
     def source_exists(self, source_id: str) -> bool:
         result = self._collection_get(where={"source_id": source_id}, limit=1)
         return bool(result.get("ids"))
+
+    def purchase_document_summary(self, purchase_id: str) -> dict[str, Any]:
+        normalized_purchase_id = str(purchase_id or "").strip()
+        if not normalized_purchase_id:
+            return {
+                "indexed_documents_count": 0,
+                "prepared_document_ids": [],
+                "last_indexed_at": None,
+                "source_url": None,
+            }
+        raw = self._collection_get(
+            where={"purchase_id": normalized_purchase_id},
+            limit=None,
+            include=["metadatas"],
+        )
+        metadatas = list(raw.get("metadatas") or [])
+        document_ids: set[str] = set()
+        last_indexed_at: str | None = None
+        source_url: str | None = None
+        for metadata in metadatas:
+            row = dict(metadata or {})
+            document_id = str(row.get("document_id") or "").strip()
+            if document_id:
+                document_ids.add(document_id)
+            parsed_at = _optional_string(row.get("parsed_at_utc"))
+            if parsed_at and (last_indexed_at is None or parsed_at > last_indexed_at):
+                last_indexed_at = parsed_at
+            if source_url is None:
+                source_url = _optional_string(row.get("source_url"))
+        return {
+            "indexed_documents_count": len(document_ids),
+            "prepared_document_ids": sorted(document_ids),
+            "last_indexed_at": last_indexed_at,
+            "source_url": source_url,
+        }
 
     def _read_indexed_document_segments(
         self,
@@ -1481,7 +1756,7 @@ class DocumentPreparationService:
         file_path: str,
         source_kind: SourceKind,
         source_url: str | None,
-        content_source: Literal["local_file", "indexed_chunks"],
+        content_source: Literal["local_file", "indexed_chunks", "archive_listing"],
         content: str,
         offset: int,
         max_chars: int,
@@ -1511,17 +1786,315 @@ class DocumentPreparationService:
             content=window,
         )
 
+    def _cached_documents_manifest_paths(
+        self,
+        *,
+        workspace: RunWorkspace | None,
+        bundle_id: str,
+    ) -> list[Path]:
+        manifest_paths: list[Path] = []
+        candidate_paths: list[Path] = []
+        if workspace is not None:
+            candidate_paths.append(workspace.artifacts_dir / bundle_id / "documents_json.json")
+        for path in self._settings.work_root.glob(f"run_*/artifacts/{bundle_id}/documents_json.json"):
+            candidate_paths.append(path)
+        for path in candidate_paths:
+            if not path.exists() or not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved not in manifest_paths:
+                manifest_paths.append(resolved)
+        return manifest_paths
+
+    def _find_cached_purchase_manifest_entry(
+        self,
+        *,
+        workspace: RunWorkspace | None,
+        bundle_id: str,
+        file_name: str,
+    ) -> dict[str, Any] | None:
+        selector = str(file_name or "").strip()
+        selector_basename = _selector_basename(selector)
+        selector_keys = {
+            selector.casefold(),
+            selector_basename.casefold(),
+            selector.replace("\\", "/").rstrip("/").casefold(),
+            selector_basename.replace("\\", "/").rstrip("/").casefold(),
+        }
+        for manifest_path in self._cached_documents_manifest_paths(workspace=workspace, bundle_id=bundle_id):
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                logger.warning("Failed to parse cached procurement JSON from %s", manifest_path, exc_info=True)
+                continue
+            if not isinstance(payload, list):
+                continue
+            for entry in payload:
+                if not isinstance(entry, dict):
+                    continue
+                candidate_values = [
+                    _optional_string(entry.get("display_name")),
+                    _optional_string(entry.get("source_filename")),
+                    _optional_string(entry.get("local_path")),
+                ]
+                for candidate_value in candidate_values:
+                    if not candidate_value:
+                        continue
+                    candidate_basename = _selector_basename(candidate_value)
+                    candidate_keys = {
+                        candidate_value.casefold(),
+                        candidate_basename.casefold(),
+                        candidate_value.replace("\\", "/").rstrip("/").casefold(),
+                        candidate_basename.replace("\\", "/").rstrip("/").casefold(),
+                    }
+                    if selector_keys & candidate_keys:
+                        return dict(entry)
+        return None
+
+    def _rank_cached_purchase_match(
+        self,
+        *,
+        workspace: RunWorkspace | None,
+        bundle_id: str,
+        candidate_dirs: Sequence[Path],
+        path: Path,
+    ) -> tuple[int, int, str]:
+        resolved_path = path.resolve()
+        download_root = (self._settings.permanent_index_root / "purchase_downloads" / bundle_id).resolve()
+        workspace_root = (workspace.artifacts_dir / bundle_id).resolve() if workspace is not None else None
+        if resolved_path.is_relative_to(download_root):
+            root_priority = 0
+        elif workspace_root is not None and resolved_path.is_relative_to(workspace_root):
+            root_priority = 1
+        else:
+            root_priority = 2
+        relative_depths: list[int] = []
+        for base_dir in candidate_dirs:
+            if resolved_path.is_relative_to(base_dir):
+                relative_depths.append(len(resolved_path.relative_to(base_dir).parts))
+        depth = min(relative_depths) if relative_depths else len(resolved_path.parts)
+        return (root_priority, depth, str(resolved_path))
+
+    def _find_cached_archive_extraction_dirs(
+        self,
+        *,
+        workspace: RunWorkspace | None,
+        bundle_id: str,
+        archive_path: Path,
+    ) -> list[Path]:
+        candidates: list[Path] = []
+        if workspace is not None:
+            workspace_candidate = workspace.artifacts_dir / bundle_id / f"archive_{archive_path.stem}"
+            if workspace_candidate.exists() and workspace_candidate.is_dir():
+                candidates.append(workspace_candidate.resolve())
+        pattern = f"run_*/artifacts/{bundle_id}/archive_{archive_path.stem}"
+        for candidate in self._settings.work_root.glob(pattern):
+            if not candidate.exists() or not candidate.is_dir():
+                continue
+            resolved = candidate.resolve()
+            if resolved not in candidates:
+                candidates.append(resolved)
+        return candidates
+
+    def _purchase_cached_relative_hint(
+        self,
+        *,
+        workspace: RunWorkspace | None,
+        file_path: Path,
+    ) -> str:
+        resolved_absolute_path = file_path.resolve()
+        artifacts_root = workspace.artifacts_dir.resolve() if workspace is not None else None
+        downloads_root = (self._settings.permanent_index_root / "purchase_downloads").resolve()
+        if artifacts_root is not None and resolved_absolute_path.is_relative_to(artifacts_root):
+            return str(resolved_absolute_path.relative_to(artifacts_root)).replace("\\", "/")
+        if resolved_absolute_path.is_relative_to(downloads_root):
+            return str(resolved_absolute_path.relative_to(downloads_root)).replace("\\", "/")
+        for artifacts_dir in self._settings.work_root.glob("run_*/artifacts"):
+            resolved_artifacts_dir = artifacts_dir.resolve()
+            if resolved_absolute_path.is_relative_to(resolved_artifacts_dir):
+                return str(resolved_absolute_path.relative_to(resolved_artifacts_dir)).replace("\\", "/")
+        return file_path.name
+
+    @staticmethod
+    def _derived_document_id_from_source_id(source_id: str | None, file_path: Path) -> str:
+        return f"doc_{hashlib.sha1((source_id or str(file_path)).encode('utf-8')).hexdigest()[:16]}"
+
+    def _iter_cached_purchase_files(self) -> list[tuple[str, Path, RunWorkspace | None]]:
+        candidates: list[tuple[str, Path, RunWorkspace | None]] = []
+        downloads_root = self._settings.permanent_index_root / "purchase_downloads"
+        if downloads_root.exists() and downloads_root.is_dir():
+            for bundle_dir in downloads_root.iterdir():
+                if not bundle_dir.is_dir():
+                    continue
+                bundle_id = bundle_dir.name.strip()
+                if not bundle_id:
+                    continue
+                for file_path in sorted(path for path in bundle_dir.rglob("*") if path.is_file()):
+                    candidates.append((bundle_id, file_path.resolve(), None))
+
+        for run_dir in sorted(self._settings.work_root.glob("run_*")):
+            if not run_dir.is_dir():
+                continue
+            with contextlib.suppress(Exception):
+                workspace = RunWorkspaceManager(self._settings).get(run_dir.name)
+                for bundle_dir in workspace.artifacts_dir.iterdir():
+                    if not bundle_dir.is_dir():
+                        continue
+                    bundle_id = bundle_dir.name.strip()
+                    if not bundle_id:
+                        continue
+                    for file_path in sorted(path for path in bundle_dir.rglob("*") if path.is_file()):
+                        candidates.append((bundle_id, file_path.resolve(), workspace))
+        return candidates
+
+    def _resolve_cached_document_id_to_local_entry(
+        self,
+        *,
+        document_id: str,
+    ) -> tuple[str, Path, str | None, RunWorkspace | None] | None:
+        normalized_document_id = str(document_id or "").strip()
+        if not normalized_document_id:
+            return None
+        downloads_root = (self._settings.permanent_index_root / "purchase_downloads").resolve()
+        for bundle_id, file_path, workspace in self._iter_cached_purchase_files():
+            relative_hints: list[str] = [
+                self._purchase_cached_relative_hint(
+                    workspace=workspace,
+                    file_path=file_path,
+                )
+            ]
+            if not file_path.is_relative_to(downloads_root):
+                with contextlib.suppress(ValueError):
+                    relative_hints.append(str(file_path.relative_to(downloads_root)).replace("\\", "/"))
+            relative_hints.append(file_path.name)
+
+            seen_hints: set[str] = set()
+            for relative_hint in relative_hints:
+                cleaned_hint = str(relative_hint or "").strip()
+                if not cleaned_hint:
+                    continue
+                dedupe_key = cleaned_hint.replace("\\", "/").casefold()
+                if dedupe_key in seen_hints:
+                    continue
+                seen_hints.add(dedupe_key)
+                source_id = self._purchase_source_id(
+                    workspace=workspace,
+                    registry_number=bundle_id,
+                    file_path=file_path,
+                    provenance={
+                        "artifact_relpath": cleaned_hint,
+                        "original_file_name": file_path.name,
+                    },
+                )
+                derived_document_id = self._derived_document_id_from_source_id(source_id, file_path)
+                if derived_document_id == normalized_document_id:
+                    return bundle_id, file_path, source_id, workspace
+        return None
+
+    def _build_cached_archive_listing(
+        self,
+        *,
+        workspace: RunWorkspace | None,
+        bundle_id: str,
+        archive_path: Path,
+    ) -> str:
+        extracted_dirs = self._find_cached_archive_extraction_dirs(
+            workspace=workspace,
+            bundle_id=bundle_id,
+            archive_path=archive_path,
+        )
+        member_paths: list[str] = []
+        if extracted_dirs:
+            for extracted_dir in extracted_dirs:
+                for path in sorted(p for p in extracted_dir.rglob("*") if p.is_file()):
+                    relpath = str(path.relative_to(extracted_dir)).replace("\\", "/")
+                    if relpath not in member_paths:
+                        member_paths.append(relpath)
+        else:
+            with contextlib.suppress(Exception):
+                for member in self._list_archive_members(archive_path):
+                    relpath = str(member.get("Path") or "").strip().replace("\\", "/")
+                    if relpath and relpath not in member_paths:
+                        member_paths.append(relpath)
+
+        readable_extensions = _TEXT_EXTENSIONS | {".xlsx", ".xls", ".json"}
+        suggested_members = [
+            relpath
+            for relpath in member_paths
+            if Path(relpath).suffix.lower() in readable_extensions
+        ]
+
+        lines = [
+            f"Архив: {archive_path.name}",
+            f"Закупка: {bundle_id}",
+        ]
+        if extracted_dirs:
+            lines.append("Архив уже извлечён в кэш; ниже список доступных файлов из извлечённой папки.")
+        elif member_paths:
+            lines.append("Ниже список файлов, найденных внутри архива.")
+        else:
+            lines.append("Не удалось получить состав архива из кэша.")
+
+        if member_paths:
+            lines.append(f"Всего файлов: {len(member_paths)}")
+            lines.append("Содержимое архива:")
+            for relpath in member_paths[:50]:
+                lines.append(f"- {relpath}")
+            if len(member_paths) > 50:
+                lines.append(f"- ... и ещё {len(member_paths) - 50} файл(ов)")
+
+        if suggested_members:
+            lines.append("")
+            lines.append("Чтобы прочитать конкретный документ из архива, вызови read_cached_document_tool ещё раз с одним из таких file_name:")
+            for relpath in suggested_members[:20]:
+                lines.append(f"- {relpath}")
+        return "\n".join(lines)
+
     def _find_cached_purchase_artifact(
         self,
         *,
-        workspace: RunWorkspace,
+        workspace: RunWorkspace | None,
         bundle_id: str,
         file_name: str,
     ) -> Path:
-        artifact_bundle_dir = workspace.artifacts_dir / bundle_id
+        selector = str(file_name or "").strip()
+        explicit_file_selector = _selector_looks_like_explicit_file_name(selector)
+        artifact_bundle_dir = workspace.artifacts_dir / bundle_id if workspace is not None else None
         download_bundle_dir = self._settings.permanent_index_root / "purchase_downloads" / bundle_id
-        candidate_dirs = [path for path in (artifact_bundle_dir, download_bundle_dir) if path.exists() and path.is_dir()]
+        candidate_dirs: list[Path] = []
+        for path in (artifact_bundle_dir, download_bundle_dir):
+            if path is None or not path.exists() or not path.is_dir():
+                continue
+            resolved = path.resolve()
+            if resolved not in candidate_dirs:
+                candidate_dirs.append(resolved)
+        if artifact_bundle_dir is not None and artifact_bundle_dir.exists() and artifact_bundle_dir.is_dir():
+            for extracted_dir in artifact_bundle_dir.glob("archive_*"):
+                if not extracted_dir.is_dir():
+                    continue
+                resolved = extracted_dir.resolve()
+                if resolved not in candidate_dirs:
+                    candidate_dirs.append(resolved)
+        for extracted_dir in self._settings.work_root.glob(f"run_*/artifacts/{bundle_id}/archive_*"):
+            if not extracted_dir.exists() or not extracted_dir.is_dir():
+                continue
+            resolved = extracted_dir.resolve()
+            if resolved not in candidate_dirs:
+                candidate_dirs.append(resolved)
         if not candidate_dirs:
+            if explicit_file_selector:
+                manifest_entry = self._find_cached_purchase_manifest_entry(
+                    workspace=workspace,
+                    bundle_id=bundle_id,
+                    file_name=selector,
+                )
+                if manifest_entry is not None:
+                    raise ToolUserCorrectableError(
+                        code="FILE_NOT_DOWNLOADED",
+                        message=f"Cached file {file_name!r} is listed for bundle_id={bundle_id}, but it has not been downloaded yet.",
+                        suggestion="Reuse another downloaded file from purchase_lookup_tool, or wait until the document download finishes.",
+                        input_field="file_name",
+                    )
             raise ToolUserCorrectableError(
                 code="BUNDLE_NOT_FOUND",
                 message=f"No cached procurement bundle was found for bundle_id={bundle_id}.",
@@ -1529,7 +2102,6 @@ class DocumentPreparationService:
                 input_field="bundle_id",
             )
         candidate_files = [path for bundle_dir in candidate_dirs for path in bundle_dir.rglob("*") if path.is_file()]
-        selector = str(file_name or "").strip()
         selector_basename = _selector_basename(selector)
         selector_path = selector.replace("\\", "/").rstrip("/").casefold()
         basename_path = selector_basename.replace("\\", "/").rstrip("/").casefold()
@@ -1554,10 +2126,58 @@ class DocumentPreparationService:
         if len(exact_matches) == 1:
             return exact_matches[0]
         if len(exact_matches) > 1:
+            ranked_exact_matches = sorted(
+                exact_matches,
+                key=lambda path: self._rank_cached_purchase_match(
+                    workspace=workspace,
+                    bundle_id=bundle_id,
+                    candidate_dirs=candidate_dirs,
+                    path=path,
+                ),
+            )
+            if len(ranked_exact_matches) >= 2:
+                best_rank = self._rank_cached_purchase_match(
+                    workspace=workspace,
+                    bundle_id=bundle_id,
+                    candidate_dirs=candidate_dirs,
+                    path=ranked_exact_matches[0],
+                )
+                second_rank = self._rank_cached_purchase_match(
+                    workspace=workspace,
+                    bundle_id=bundle_id,
+                    candidate_dirs=candidate_dirs,
+                    path=ranked_exact_matches[1],
+                )
+                if best_rank < second_rank:
+                    return ranked_exact_matches[0]
             raise ToolUserCorrectableError(
                 code="AMBIGUOUS_FILE_NAME",
                 message=f"Multiple cached files matched selector {file_name!r} in bundle_id={bundle_id}.",
                 suggestion="Use document_id from doc_search_tool when multiple files share the same or matching names.",
+                input_field="file_name",
+            )
+        if explicit_file_selector:
+            manifest_entry = self._find_cached_purchase_manifest_entry(
+                workspace=workspace,
+                bundle_id=bundle_id,
+                file_name=selector,
+            )
+            if manifest_entry is not None:
+                manifest_local_path = _optional_string(manifest_entry.get("local_path"))
+                if manifest_local_path:
+                    manifest_path = Path(manifest_local_path)
+                    if manifest_path.exists() and manifest_path.is_file():
+                        return manifest_path.resolve()
+                raise ToolUserCorrectableError(
+                    code="FILE_NOT_DOWNLOADED",
+                    message=f"Cached file {file_name!r} is listed for bundle_id={bundle_id}, but it has not been downloaded yet.",
+                    suggestion="Reuse another downloaded file from purchase_lookup_tool, or wait until the document download finishes.",
+                    input_field="file_name",
+                )
+            raise ToolUserCorrectableError(
+                code="FILE_NOT_FOUND",
+                message=f"No cached file matching selector {file_name!r} was found in bundle_id={bundle_id}.",
+                suggestion="Use the exact downloaded file name, a downloaded file path, or document_id from doc_search_tool for that procurement.",
                 input_field="file_name",
             )
 
@@ -1638,35 +2258,15 @@ class DocumentPreparationService:
             max_chars=max_chars,
         )
         if normalized_document_id is None:
-            if workspace is None:
-                raise ToolUserCorrectableError(
-                    code="MISSING_RUN_CONTEXT",
-                    message="read_cached_document_tool needs active run context for bundle_id + file_name lookups.",
-                    suggestion="Retry in the same procurement conversation after purchase_search_tool has run.",
-                    input_field="bundle_id",
-                )
             resolved_path = self._find_cached_purchase_artifact(
                 workspace=workspace,
                 bundle_id=str(normalized_bundle_id),
                 file_name=str(normalized_file_name),
             )
-            content = self._read_document_content_from_local_file(str(resolved_path))
-            if not content:
-                raise ToolUserCorrectableError(
-                    code="DOCUMENT_CONTENT_UNAVAILABLE",
-                    message=f"Cached content is unavailable for file {normalized_file_name!r} in bundle_id={normalized_bundle_id}.",
-                    suggestion="Retry after the file finishes parsing, or choose another downloaded file.",
-                    input_field="file_name",
-                )
-            resolved_absolute_path = resolved_path.resolve()
-            artifacts_root = workspace.artifacts_dir.resolve()
-            downloads_root = (self._settings.permanent_index_root / "purchase_downloads").resolve()
-            if resolved_absolute_path.is_relative_to(artifacts_root):
-                relative_hint = str(resolved_absolute_path.relative_to(artifacts_root)).replace("\\", "/")
-            elif resolved_absolute_path.is_relative_to(downloads_root):
-                relative_hint = str(resolved_absolute_path.relative_to(downloads_root)).replace("\\", "/")
-            else:
-                relative_hint = resolved_path.name
+            relative_hint = self._purchase_cached_relative_hint(
+                workspace=workspace,
+                file_path=resolved_path,
+            )
             source_id = self._purchase_source_id(
                 workspace=workspace,
                 registry_number=str(normalized_bundle_id),
@@ -1676,7 +2276,39 @@ class DocumentPreparationService:
                     "original_file_name": resolved_path.name,
                 },
             )
-            derived_document_id = f"doc_{hashlib.sha1((source_id or str(resolved_path)).encode('utf-8')).hexdigest()[:16]}"
+            if resolved_path.suffix.lower() in _ARCHIVE_EXTENSIONS:
+                content = self._build_cached_archive_listing(
+                    workspace=workspace,
+                    bundle_id=str(normalized_bundle_id),
+                    archive_path=resolved_path,
+                )
+                derived_document_id = (
+                    f"doc_{hashlib.sha1((source_id or str(resolved_path)).encode('utf-8')).hexdigest()[:16]}"
+                )
+                return self._build_cached_document_response(
+                    index_id=resolved_index_id,
+                    document_id=derived_document_id,
+                    bundle_id=str(normalized_bundle_id),
+                    purchase_id=str(normalized_bundle_id),
+                    source_id=source_id,
+                    parsed_at_utc=None,
+                    file_path=str(resolved_path),
+                    source_kind="purchase",
+                    source_url=None,
+                    content_source="archive_listing",
+                    content=content,
+                    offset=normalized_offset,
+                    max_chars=normalized_max_chars,
+                )
+            content = self._read_document_content_from_local_file(str(resolved_path))
+            if not content:
+                raise ToolUserCorrectableError(
+                    code="DOCUMENT_CONTENT_UNAVAILABLE",
+                    message=f"Cached content is unavailable for file {normalized_file_name!r} in bundle_id={normalized_bundle_id}.",
+                    suggestion="Retry after the file finishes parsing, or choose another downloaded file.",
+                    input_field="file_name",
+                )
+            derived_document_id = self._derived_document_id_from_source_id(source_id, resolved_path)
             return self._build_cached_document_response(
                 index_id=resolved_index_id,
                 document_id=derived_document_id,
@@ -1695,11 +2327,58 @@ class DocumentPreparationService:
 
         indexed_segments = self._read_indexed_document_segments(document_id=normalized_document_id)
         if not indexed_segments:
-            raise ToolUserCorrectableError(
-                code="DOCUMENT_NOT_FOUND",
-                message=f"No cached document was found for document_id={normalized_document_id}.",
-                suggestion="Use doc_search_tool first to get a valid document_id from the current index.",
-                input_field="document_id",
+            local_entry = self._resolve_cached_document_id_to_local_entry(document_id=normalized_document_id)
+            if local_entry is None:
+                raise ToolUserCorrectableError(
+                    code="DOCUMENT_NOT_FOUND",
+                    message=f"No cached document was found for document_id={normalized_document_id}.",
+                    suggestion="Use doc_search_tool first to get a valid document_id from the current index.",
+                    input_field="document_id",
+                )
+            resolved_bundle_id, resolved_path, resolved_source_id, resolved_workspace = local_entry
+            if resolved_path.suffix.lower() in _ARCHIVE_EXTENSIONS:
+                content = self._build_cached_archive_listing(
+                    workspace=resolved_workspace,
+                    bundle_id=resolved_bundle_id,
+                    archive_path=resolved_path,
+                )
+                return self._build_cached_document_response(
+                    index_id=resolved_index_id,
+                    document_id=normalized_document_id,
+                    bundle_id=resolved_bundle_id,
+                    purchase_id=resolved_bundle_id,
+                    source_id=resolved_source_id,
+                    parsed_at_utc=None,
+                    file_path=str(resolved_path),
+                    source_kind="purchase",
+                    source_url=None,
+                    content_source="archive_listing",
+                    content=content,
+                    offset=normalized_offset,
+                    max_chars=normalized_max_chars,
+                )
+            content = self._read_document_content_from_local_file(str(resolved_path))
+            if not content:
+                raise ToolUserCorrectableError(
+                    code="DOCUMENT_CONTENT_UNAVAILABLE",
+                    message=f"Cached content is unavailable for document_id={normalized_document_id}.",
+                    suggestion="Re-run acquisition for this source or search for a different cached document.",
+                    input_field="document_id",
+                )
+            return self._build_cached_document_response(
+                index_id=resolved_index_id,
+                document_id=normalized_document_id,
+                bundle_id=resolved_bundle_id,
+                purchase_id=resolved_bundle_id,
+                source_id=resolved_source_id,
+                parsed_at_utc=None,
+                file_path=str(resolved_path),
+                source_kind="purchase",
+                source_url=None,
+                content_source="local_file",
+                content=content,
+                offset=normalized_offset,
+                max_chars=normalized_max_chars,
             )
 
         first_metadata = dict(indexed_segments[0][2] or {})
@@ -1809,7 +2488,7 @@ class DocumentPreparationService:
     def _purchase_source_id(
         self,
         *,
-        workspace: RunWorkspace,
+        workspace: RunWorkspace | None,
         registry_number: str | None,
         file_path: Path,
         provenance: dict[str, Any],
@@ -1817,7 +2496,7 @@ class DocumentPreparationService:
         if not registry_number:
             return None
         relative_hint = str(provenance.get("artifact_relpath") or "").strip()
-        if not relative_hint:
+        if not relative_hint and workspace is not None:
             with contextlib.suppress(ValueError):
                 relative_hint = str(
                     file_path.resolve().relative_to(workspace.artifacts_dir.resolve())
@@ -2199,8 +2878,149 @@ class DocumentPreparationService:
     def _index_documents(self, *, segments: list[Segment]) -> None:
         if not segments:
             return
-        embeddings, vector_store = self._vector_store()
-        Indexer(vector_store=vector_store, embeddings=embeddings).index(segments, batch_size=32)
+        embeddings = self._create_embeddings()
+        batch_size = 32
+        if not segments:
+            return
+        logger.info("Indexing %s segments with batch_size=%s", len(segments), batch_size)
+        for offset in range(0, len(segments), batch_size):
+            batch = segments[offset : offset + batch_size]
+            self._run_locked_vector_store_operation(
+                lambda vector_store, resolved_embeddings: Indexer(
+                    vector_store=vector_store,
+                    embeddings=resolved_embeddings,
+                )._process_batch(batch),
+                embeddings=embeddings,
+            )
+            logger.info("Indexed batch %s", offset // batch_size + 1)
+
+    @staticmethod
+    def _doc_search_query_terms(query: str) -> list[str]:
+        normalized_query = _clean_text(query).lower()
+        if not normalized_query:
+            return []
+        terms = [term for term in re.findall(r"\w+", normalized_query, flags=re.UNICODE) if len(term) >= 2]
+        if not terms:
+            return [normalized_query]
+        return list(dict.fromkeys(terms))
+
+    @staticmethod
+    def _score_cached_document_content(
+        *,
+        query: str,
+        content: str,
+    ) -> tuple[float, int | None]:
+        normalized_query = _clean_text(query).lower()
+        normalized_content = _clean_text(content).lower()
+        if not normalized_query or not normalized_content:
+            return 0.0, None
+        query_terms = DocumentPreparationService._doc_search_query_terms(normalized_query)
+        full_index = normalized_content.find(normalized_query)
+        full_hits = normalized_content.count(normalized_query) if len(normalized_query) >= 2 else 0
+        matched_terms = [term for term in query_terms if term in normalized_content]
+        if full_hits <= 0 and not matched_terms:
+            return 0.0, None
+        first_term_index = None
+        for term in matched_terms:
+            candidate_index = normalized_content.find(term)
+            if candidate_index >= 0 and (first_term_index is None or candidate_index < first_term_index):
+                first_term_index = candidate_index
+        first_index = full_index if full_index >= 0 else first_term_index
+        score = float(full_hits * 100 + len(matched_terms) * 10)
+        if first_index is not None:
+            score += max(0.0, 1.0 - min(first_index, 5000) / 5000)
+        return score, first_index
+
+    @staticmethod
+    def _extract_cached_search_snippet(content: str, *, hit_index: int | None) -> str:
+        normalized_content = _clean_text(content)
+        if not normalized_content:
+            return ""
+        if hit_index is None or hit_index < 0:
+            return normalized_content[:500]
+        start = max(0, hit_index - 180)
+        end = min(len(normalized_content), hit_index + 320)
+        snippet = normalized_content[start:end]
+        if start > 0:
+            snippet = f"...{snippet}"
+        if end < len(normalized_content):
+            snippet = f"{snippet}..."
+        return snippet[:500]
+
+    def _fallback_purchase_file_search(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        bundle_id: str | None,
+        purchase_id: str | None,
+        source_id: str | None,
+    ) -> list[DocSearchMatch]:
+        candidate_bundle_ids = {
+            value.strip()
+            for value in (bundle_id, purchase_id)
+            if isinstance(value, str) and value.strip()
+        }
+        if not candidate_bundle_ids and not (source_id or "").strip():
+            return []
+        matches: list[tuple[float, DocSearchMatch]] = []
+        seen_keys: set[str] = set()
+        for current_bundle_id, file_path, workspace in self._iter_cached_purchase_files():
+            if candidate_bundle_ids and current_bundle_id not in candidate_bundle_ids:
+                continue
+            relative_hint = self._purchase_cached_relative_hint(
+                workspace=workspace,
+                file_path=file_path,
+            )
+            current_source_id = self._purchase_source_id(
+                workspace=workspace,
+                registry_number=current_bundle_id,
+                file_path=file_path,
+                provenance={
+                    "artifact_relpath": relative_hint,
+                    "original_file_name": file_path.name,
+                },
+            )
+            if source_id and current_source_id != source_id:
+                continue
+            dedupe_key = current_source_id or str(file_path.resolve())
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            try:
+                content = self._read_document_content_from_local_file(str(file_path))
+            except Exception:
+                continue
+            if not content:
+                continue
+            score, hit_index = self._score_cached_document_content(query=query, content=content)
+            if score <= 0:
+                continue
+            document_id = self._derived_document_id_from_source_id(current_source_id, file_path)
+            matches.append(
+                (
+                    score,
+                    DocSearchMatch(
+                        document_id=document_id,
+                        bundle_id=current_bundle_id,
+                        purchase_id=current_bundle_id,
+                        source_id=current_source_id,
+                        parsed_at_utc=datetime.fromtimestamp(
+                            file_path.stat().st_mtime,
+                            tz=UTC,
+                        ).isoformat().replace("+00:00", "Z"),
+                        file_path=str(file_path),
+                        page=None,
+                        locator=f"local_fallback:char:{hit_index}" if hit_index is not None else "local_fallback",
+                        snippet=self._extract_cached_search_snippet(content, hit_index=hit_index),
+                        score=score,
+                        source_kind="purchase",
+                        source_url=None,
+                    ),
+                )
+            )
+        matches.sort(key=lambda item: (-item[0], item[1].file_path))
+        return [match for _score, match in matches[:top_k]]
 
     def save_text_artifact(
         self,
@@ -2522,13 +3342,36 @@ class DocumentPreparationService:
             metadata_clauses.append({"purchase_id": purchase_id})
         if source_id:
             metadata_clauses.append({"source_id": source_id})
-        _embeddings, vector_store = self._vector_store()
         kwargs: dict[str, Any] = {"k": top_k}
         if len(metadata_clauses) == 1:
             kwargs["filter"] = metadata_clauses[0]
         elif metadata_clauses:
             kwargs["filter"] = {"$and": metadata_clauses}
-        results = vector_store.similarity_search_with_relevance_scores(query, **kwargs)
+        try:
+            results = self._run_locked_vector_store_operation(
+                lambda vector_store, _embeddings: vector_store.similarity_search_with_relevance_scores(
+                    query,
+                    **kwargs,
+                ),
+                retry_attempts=3,
+            )
+        except Exception as exc:
+            if self._is_retryable_vector_store_error(exc):
+                fallback_matches = self._fallback_purchase_file_search(
+                    query=query,
+                    top_k=top_k,
+                    bundle_id=bundle_id,
+                    purchase_id=purchase_id,
+                    source_id=source_id,
+                )
+                if bundle_id or purchase_id or source_id:
+                    logger.warning(
+                        "Vector search failed for index_id=%s; returned %s fallback match(es) from cached purchase files.",
+                        index_id,
+                        len(fallback_matches),
+                    )
+                    return DocSearchResponse(index_id=self.shared_index_id, matches=fallback_matches)
+            raise
         matches: list[DocSearchMatch] = []
         for doc, score in results:
             metadata = dict(doc.metadata or {})
@@ -3075,6 +3918,579 @@ class CounterpartyClients:
         return self._normalize_dadata_party_payload(inn=inn, payload=payload)
 
 
+class ProcurementCatalogService:
+    """Persistent procurement-card catalog built over the permanent sales-lead index."""
+
+    _started_roots: set[str] = set()
+    _started_lock = threading.Lock()
+
+    def __init__(
+        self,
+        settings: SalesLeadAgentSettings,
+        document_service: DocumentPreparationService,
+    ) -> None:
+        self._settings = settings
+        self._document_service = document_service
+        self._db_path = self._settings.permanent_index_root / "procurement_catalog.sqlite"
+        self._ensure_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self._db_path,
+            timeout=30.0,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS procurement_catalog (
+                    registry_number TEXT PRIMARY KEY,
+                    bundle_id TEXT NOT NULL,
+                    law TEXT,
+                    purchase_title TEXT NOT NULL DEFAULT '',
+                    customer_name TEXT NOT NULL DEFAULT '',
+                    price_text TEXT,
+                    published_at TEXT,
+                    updated_at TEXT,
+                    submission_deadline TEXT,
+                    detail_url TEXT NOT NULL DEFAULT '',
+                    common_info_url TEXT,
+                    documents_url TEXT,
+                    document_urls_json TEXT NOT NULL DEFAULT '[]',
+                    downloaded_files_json TEXT NOT NULL DEFAULT '[]',
+                    prepared_document_ids_json TEXT NOT NULL DEFAULT '[]',
+                    crawl_status TEXT NOT NULL DEFAULT 'cached',
+                    crawl_error TEXT,
+                    crawl_ts_utc TEXT,
+                    indexed_documents_count INTEGER NOT NULL DEFAULT 0,
+                    last_indexed_at TEXT,
+                    catalog_updated_at TEXT NOT NULL
+                )
+                """
+            )
+
+    @staticmethod
+    def _json_dump(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    @staticmethod
+    def _json_load_list(value: Any) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item).strip()]
+        try:
+            payload = json.loads(str(value))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [str(item) for item in payload if str(item).strip()]
+
+    @staticmethod
+    def _merge_string_list(*values: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for value_list in values:
+            for raw in value_list:
+                normalized = str(raw or "").strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                merged.append(normalized)
+        return merged
+
+    @staticmethod
+    def _prefer_non_blank(*values: str | None) -> str | None:
+        for value in values:
+            normalized = _optional_string(value)
+            if normalized:
+                return normalized
+        return None
+
+    @staticmethod
+    def _row_to_item(row: sqlite3.Row | None) -> PurchaseSearchItem | None:
+        if row is None:
+            return None
+        return PurchaseSearchItem(
+            bundle_id=str(row["bundle_id"]),
+            registry_number=str(row["registry_number"]),
+            law=_optional_string(row["law"]),
+            purchase_title=str(row["purchase_title"] or ""),
+            customer_name=str(row["customer_name"] or ""),
+            price_text=_optional_string(row["price_text"]),
+            published_at=_optional_string(row["published_at"]),
+            updated_at=_optional_string(row["updated_at"]),
+            submission_deadline=_optional_string(row["submission_deadline"]),
+            detail_url=str(row["detail_url"] or ""),
+            common_info_url=_optional_string(row["common_info_url"]),
+            documents_url=_optional_string(row["documents_url"]),
+            document_urls=ProcurementCatalogService._json_load_list(row["document_urls_json"]),
+            downloaded_files=ProcurementCatalogService._json_load_list(row["downloaded_files_json"]),
+            prepared_document_ids=ProcurementCatalogService._json_load_list(row["prepared_document_ids_json"]),
+            indexed_documents_count=int(row["indexed_documents_count"] or 0),
+            last_indexed_at=_optional_string(row["last_indexed_at"]),
+            crawl_status=str(row["crawl_status"] or "cached"),
+            crawl_error=_optional_string(row["crawl_error"]),
+            crawl_ts_utc=_optional_string(row["crawl_ts_utc"]),
+            documents_json=None,
+            common_info_json=None,
+            lots_json=None,
+        )
+
+    def _load_existing_item(self, registry_number: str) -> PurchaseSearchItem | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM procurement_catalog WHERE registry_number = ?",
+                (registry_number,),
+            ).fetchone()
+        return self._row_to_item(row)
+
+    def get_by_registry(self, registry_number: str) -> PurchaseSearchItem | None:
+        normalized = str(registry_number or "").strip()
+        if not normalized:
+            return None
+        return self._load_existing_item(normalized)
+
+    def _purchase_summary(self, registry_number: str) -> dict[str, Any]:
+        return self._document_service.purchase_document_summary(registry_number)
+
+    def upsert_item(self, item: PurchaseSearchItem) -> PurchaseSearchItem:
+        existing = self._load_existing_item(item.registry_number)
+        summary = self._purchase_summary(item.registry_number)
+        merged_prepared_document_ids = self._merge_string_list(
+            existing.prepared_document_ids if existing else [],
+            item.prepared_document_ids,
+            list(summary.get("prepared_document_ids") or []),
+        )
+        merged_document_urls = self._merge_string_list(
+            existing.document_urls if existing else [],
+            item.document_urls,
+        )
+        merged_downloaded_files = self._merge_string_list(
+            existing.downloaded_files if existing else [],
+            item.downloaded_files,
+        )
+        indexed_documents_count = max(
+            existing.indexed_documents_count if existing else 0,
+            int(item.indexed_documents_count or 0),
+            int(summary.get("indexed_documents_count") or 0),
+            len(merged_prepared_document_ids),
+        )
+        last_indexed_at = self._prefer_non_blank(
+            item.last_indexed_at,
+            _optional_string(summary.get("last_indexed_at")),
+            existing.last_indexed_at if existing else None,
+        )
+        detail_url = self._prefer_non_blank(
+            item.detail_url,
+            _optional_string(summary.get("source_url")),
+            existing.detail_url if existing else None,
+            f"catalog://purchase/{item.registry_number}",
+        )
+        merged = PurchaseSearchItem(
+            bundle_id=item.bundle_id or item.registry_number,
+            registry_number=item.registry_number,
+            law=item.law or (existing.law if existing else None),
+            purchase_title=self._prefer_non_blank(item.purchase_title, existing.purchase_title if existing else None) or "",
+            customer_name=self._prefer_non_blank(item.customer_name, existing.customer_name if existing else None) or "",
+            price_text=self._prefer_non_blank(item.price_text, existing.price_text if existing else None),
+            published_at=self._prefer_non_blank(item.published_at, existing.published_at if existing else None),
+            updated_at=self._prefer_non_blank(item.updated_at, existing.updated_at if existing else None),
+            submission_deadline=self._prefer_non_blank(
+                item.submission_deadline,
+                existing.submission_deadline if existing else None,
+            ),
+            detail_url=detail_url or f"catalog://purchase/{item.registry_number}",
+            common_info_url=self._prefer_non_blank(
+                item.common_info_url,
+                existing.common_info_url if existing else None,
+                detail_url,
+            ),
+            documents_url=self._prefer_non_blank(item.documents_url, existing.documents_url if existing else None),
+            document_urls=merged_document_urls,
+            downloaded_files=merged_downloaded_files,
+            prepared_document_ids=merged_prepared_document_ids,
+            indexed_documents_count=indexed_documents_count,
+            last_indexed_at=last_indexed_at,
+            documents_json=item.documents_json or (existing.documents_json if existing else None),
+            common_info_json=item.common_info_json or (existing.common_info_json if existing else None),
+            lots_json=item.lots_json or (existing.lots_json if existing else None),
+            crawl_status=self._prefer_non_blank(item.crawl_status, existing.crawl_status if existing else None) or "cached",
+            crawl_error=self._prefer_non_blank(item.crawl_error, existing.crawl_error if existing else None),
+            crawl_ts_utc=self._prefer_non_blank(item.crawl_ts_utc, existing.crawl_ts_utc if existing else None),
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO procurement_catalog (
+                    registry_number,
+                    bundle_id,
+                    law,
+                    purchase_title,
+                    customer_name,
+                    price_text,
+                    published_at,
+                    updated_at,
+                    submission_deadline,
+                    detail_url,
+                    common_info_url,
+                    documents_url,
+                    document_urls_json,
+                    downloaded_files_json,
+                    prepared_document_ids_json,
+                    crawl_status,
+                    crawl_error,
+                    crawl_ts_utc,
+                    indexed_documents_count,
+                    last_indexed_at,
+                    catalog_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(registry_number) DO UPDATE SET
+                    bundle_id=excluded.bundle_id,
+                    law=excluded.law,
+                    purchase_title=excluded.purchase_title,
+                    customer_name=excluded.customer_name,
+                    price_text=excluded.price_text,
+                    published_at=excluded.published_at,
+                    updated_at=excluded.updated_at,
+                    submission_deadline=excluded.submission_deadline,
+                    detail_url=excluded.detail_url,
+                    common_info_url=excluded.common_info_url,
+                    documents_url=excluded.documents_url,
+                    document_urls_json=excluded.document_urls_json,
+                    downloaded_files_json=excluded.downloaded_files_json,
+                    prepared_document_ids_json=excluded.prepared_document_ids_json,
+                    crawl_status=excluded.crawl_status,
+                    crawl_error=excluded.crawl_error,
+                    crawl_ts_utc=excluded.crawl_ts_utc,
+                    indexed_documents_count=excluded.indexed_documents_count,
+                    last_indexed_at=excluded.last_indexed_at,
+                    catalog_updated_at=excluded.catalog_updated_at
+                """,
+                (
+                    merged.registry_number,
+                    merged.bundle_id,
+                    merged.law,
+                    merged.purchase_title,
+                    merged.customer_name,
+                    merged.price_text,
+                    merged.published_at,
+                    merged.updated_at,
+                    merged.submission_deadline,
+                    merged.detail_url,
+                    merged.common_info_url,
+                    merged.documents_url,
+                    self._json_dump(merged.document_urls),
+                    self._json_dump(merged.downloaded_files),
+                    self._json_dump(merged.prepared_document_ids),
+                    merged.crawl_status,
+                    merged.crawl_error,
+                    merged.crawl_ts_utc,
+                    merged.indexed_documents_count,
+                    merged.last_indexed_at,
+                    _utc_now_iso(),
+                ),
+            )
+        return merged
+
+    def search(
+        self,
+        *,
+        query: str | None,
+        registry_number: str | None,
+        record_from: int = 0,
+    ) -> PurchaseLookupResponse:
+        normalized_query, normalized_registry = _normalize_purchase_lookup_inputs(
+            query=query,
+            registry_number=registry_number,
+        )
+        if normalized_registry:
+            item = self.get_by_registry(normalized_registry)
+            items = [item] if item is not None else []
+        else:
+            tokens = _purchase_query_tokens(normalized_query)
+            significant_tokens = [token for token in tokens if not _is_generic_purchase_query_token(token)]
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM procurement_catalog
+                    ORDER BY catalog_updated_at DESC, registry_number DESC
+                    """
+                ).fetchall()
+            ranked: list[tuple[float, PurchaseSearchItem]] = []
+            for row in rows:
+                item = self._row_to_item(row)
+                if item is None:
+                    continue
+                haystacks = [
+                    item.registry_number,
+                    item.purchase_title,
+                    item.customer_name,
+                    item.price_text or "",
+                    item.law or "",
+                    *item.downloaded_files,
+                ]
+                normalized_haystacks = [_normalize_russian_key(value) for value in haystacks if value]
+                score = 0.0
+                whole_query = _normalize_russian_key(normalized_query or "")
+                whole_query_match = bool(
+                    whole_query
+                    and any(whole_query in haystack for haystack in normalized_haystacks)
+                )
+                if whole_query_match:
+                    score += 10.0
+                matched_tokens: set[str] = set()
+                matched_significant_tokens: set[str] = set()
+                for token in tokens:
+                    token_score = 0.0
+                    if token == _normalize_russian_key(item.registry_number):
+                        token_score = max(token_score, 12.0)
+                    if any(token in _normalize_russian_key(value) for value in [item.purchase_title]):
+                        token_score = max(token_score, 5.0)
+                    if any(token in _normalize_russian_key(value) for value in [item.customer_name]):
+                        token_score = max(token_score, 3.0)
+                    if any(token in haystack for haystack in normalized_haystacks):
+                        token_score = max(token_score, 1.0)
+                        matched_tokens.add(token)
+                        if token in significant_tokens:
+                            matched_significant_tokens.add(token)
+                    score += token_score
+                if significant_tokens:
+                    if not matched_significant_tokens and not whole_query_match:
+                        continue
+                    coverage = len(matched_significant_tokens) / len(significant_tokens)
+                    if len(significant_tokens) >= 2 and coverage < 0.5 and not whole_query_match:
+                        continue
+                    score += len(matched_significant_tokens) * 6.0 + coverage * 8.0
+                elif tokens and not matched_tokens and not whole_query_match:
+                    continue
+                if score > 0:
+                    ranked.append((score, item))
+            ranked.sort(
+                key=lambda pair: (
+                    pair[0],
+                    pair[1].indexed_documents_count,
+                    pair[1].last_indexed_at or "",
+                    pair[1].registry_number,
+                ),
+                reverse=True,
+            )
+            items = [item for _score, item in ranked]
+        total_ready_records = len(items)
+        safe_record_from = min(record_from, total_ready_records) if total_ready_records else 0
+        page_items = [
+            _tool_visible_purchase_item(item)
+            for item in items[safe_record_from : safe_record_from + _PURCHASE_SEARCH_PAGE_SIZE]
+        ]
+        next_record_from = safe_record_from + len(page_items)
+        if next_record_from >= total_ready_records:
+            next_record_from = None
+        return PurchaseLookupResponse(
+            index_id=self._settings.shared_index_id,
+            query=normalized_query,
+            registry_number=normalized_registry,
+            record_from=safe_record_from,
+            returned_records=len(page_items),
+            total_ready_records=total_ready_records,
+            next_record_from=next_record_from,
+            items=page_items,
+        )
+
+    def ensure_background_backfill_started(self) -> None:
+        root_key = str(self._settings.permanent_index_root)
+        with self._started_lock:
+            if root_key in self._started_roots:
+                return
+            self._started_roots.add(root_key)
+        thread = threading.Thread(
+            target=self._run_backfill,
+            name="sales_lead_catalog_backfill",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_backfill(self) -> None:
+        try:
+            self.backfill_from_cache()
+        except Exception:
+            logger.exception("Procurement catalog backfill failed")
+
+    def backfill_from_cache(self) -> None:
+        candidate_bundle_dirs: dict[str, Path | None] = {}
+        artifacts_root = self._settings.work_root
+        for path in artifacts_root.rglob("common_info_json.json"):
+            candidate_bundle_dirs[path.parent.name] = path.parent
+        for path in artifacts_root.rglob("documents_json.json"):
+            candidate_bundle_dirs.setdefault(path.parent.name, path.parent)
+        for path in artifacts_root.rglob("lots_json.json"):
+            candidate_bundle_dirs.setdefault(path.parent.name, path.parent)
+
+        downloads_root = self._settings.permanent_index_root / "purchase_downloads"
+        for download_dir in downloads_root.iterdir() if downloads_root.exists() else []:
+            if download_dir.is_dir():
+                candidate_bundle_dirs.setdefault(download_dir.name, None)
+
+        for bundle_id, artifact_dir in sorted(candidate_bundle_dirs.items()):
+            cached_item = self._build_item_from_cache(
+                bundle_id=bundle_id,
+                artifact_dir=artifact_dir,
+                downloads_root=downloads_root,
+            )
+            if cached_item is not None:
+                self.upsert_item(cached_item)
+
+    def _read_json_file(self, path: Path) -> Any:
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to parse cached procurement JSON from %s", path, exc_info=True)
+            return None
+
+    def _flatten_common_info(self, payload: Any) -> tuple[dict[str, str], list[str]]:
+        field_map: dict[str, str] = {}
+        links: list[str] = []
+        if not isinstance(payload, list):
+            return field_map, links
+        for section in payload:
+            if not isinstance(section, dict):
+                continue
+            for field in section.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+                title = _optional_string(field.get("title"))
+                value = _optional_string(field.get("value"))
+                if title and value:
+                    field_map[_normalize_russian_key(title)] = value
+                for link in field.get("links") or []:
+                    normalized = _optional_string(link)
+                    if normalized:
+                        links.append(normalized)
+        return field_map, links
+
+    @staticmethod
+    def _first_field(field_map: dict[str, str], *candidates: str) -> str | None:
+        for candidate in candidates:
+            normalized = _normalize_russian_key(candidate)
+            value = field_map.get(normalized)
+            if value:
+                return value
+        return None
+
+    def _build_item_from_cache(
+        self,
+        *,
+        bundle_id: str,
+        artifact_dir: Path | None,
+        downloads_root: Path,
+    ) -> PurchaseSearchItem | None:
+        common_info_payload = self._read_json_file(artifact_dir / "common_info_json.json") if artifact_dir else None
+        documents_payload = self._read_json_file(artifact_dir / "documents_json.json") if artifact_dir else None
+        lots_payload = self._read_json_file(artifact_dir / "lots_json.json") if artifact_dir else None
+        field_map, links = self._flatten_common_info(common_info_payload)
+        purchase_title = self._first_field(
+            field_map,
+            "Наименование объекта закупки",
+            "Наименование закупки",
+        ) or ""
+        customer_name = self._first_field(
+            field_map,
+            "Заказчик",
+            "Наименование заказчика",
+            "Организация, осуществляющая размещение",
+            "Размещение осуществляет",
+        ) or ""
+        price_text = self._first_field(
+            field_map,
+            "Начальная (максимальная) цена контракта",
+            "Максимальное значение цены контракта",
+            "Начальная цена договора",
+        )
+        submission_deadline = self._first_field(
+            field_map,
+            "Дата и время окончания срока подачи заявок",
+            "Дата окончания срока подачи заявок",
+            "Окончание подачи заявок",
+        )
+        documents_url = next(
+            (link for link in links if "documents" in link),
+            None,
+        )
+        common_info_url = next(
+            (
+                link
+                for link in links
+                if "common-info" in link or "view/common-info" in link
+            ),
+            None,
+        )
+        document_urls: list[str] = []
+        downloaded_files: list[str] = []
+        published_at: str | None = None
+        law: LawType | None = None
+        if isinstance(documents_payload, list):
+            for entry in documents_payload:
+                if not isinstance(entry, dict):
+                    continue
+                download_url = _optional_string(entry.get("download_url")) or _optional_string(entry.get("raw_href"))
+                if download_url:
+                    document_urls.append(download_url)
+                    if "/44fz/" in download_url:
+                        law = "44-FZ"
+                    elif "/223fz/" in download_url or "notice223" in download_url:
+                        law = "223-FZ"
+                local_path = _optional_string(entry.get("local_path"))
+                if local_path:
+                    downloaded_files.append(local_path)
+                posted_at = _optional_string(entry.get("posted_at"))
+                if posted_at and published_at is None:
+                    published_at = posted_at
+        download_dir = downloads_root / bundle_id
+        if download_dir.exists():
+            downloaded_files = self._merge_string_list(
+                downloaded_files,
+                [str(path) for path in download_dir.rglob("*") if path.is_file()],
+            )
+        summary = self._purchase_summary(bundle_id)
+        detail_url = _optional_string(summary.get("source_url")) or common_info_url or f"catalog://purchase/{bundle_id}"
+        if not purchase_title and not customer_name and not downloaded_files and not document_urls:
+            return None
+        return PurchaseSearchItem(
+            bundle_id=bundle_id,
+            registry_number=bundle_id,
+            law=law,
+            purchase_title=purchase_title,
+            customer_name=customer_name,
+            price_text=price_text,
+            published_at=published_at,
+            updated_at=None,
+            submission_deadline=submission_deadline,
+            detail_url=detail_url,
+            common_info_url=common_info_url or detail_url,
+            documents_url=documents_url,
+            document_urls=document_urls,
+            downloaded_files=downloaded_files,
+            prepared_document_ids=list(summary.get("prepared_document_ids") or []),
+            indexed_documents_count=int(summary.get("indexed_documents_count") or 0),
+            last_indexed_at=_optional_string(summary.get("last_indexed_at")),
+            documents_json=json.dumps(documents_payload, ensure_ascii=False) if documents_payload is not None else None,
+            common_info_json=json.dumps(common_info_payload, ensure_ascii=False) if common_info_payload is not None else None,
+            lots_json=json.dumps(lots_payload, ensure_ascii=False) if lots_payload is not None else None,
+            crawl_status="cached",
+            crawl_error=None,
+            crawl_ts_utc=None,
+        )
+
+
 @dataclass(frozen=True)
 class SalesLeadAgentDependencies:
     workspace_manager: RunWorkspaceManager
@@ -3083,12 +4499,54 @@ class SalesLeadAgentDependencies:
     counterparty_clients: CounterpartyClients
     open_source_max_concurrency: int
     retrieval_client: Any | None = None
+    procurement_catalog: ProcurementCatalogService | Any | None = None
+
+    def __post_init__(self) -> None:
+        if self.procurement_catalog is not None:
+            return
+        shared_index_id = getattr(
+            self.document_service,
+            "shared_index_id",
+            get_settings().shared_index_id,
+        )
+
+        def _empty_search(
+            *,
+            query: str | None = None,
+            registry_number: str | None = None,
+            record_from: int = 0,
+        ) -> PurchaseLookupResponse:
+            return PurchaseLookupResponse(
+                index_id=shared_index_id,
+                query=query,
+                registry_number=registry_number,
+                record_from=record_from,
+                returned_records=0,
+                total_ready_records=0,
+                next_record_from=None,
+                items=[],
+            )
+
+        object.__setattr__(
+            self,
+            "procurement_catalog",
+            SimpleNamespace(
+                search=_empty_search,
+                upsert_item=lambda item: item,
+                get_by_registry=lambda registry_number: None,
+                ensure_background_backfill_started=lambda: None,
+            ),
+        )
 
     @classmethod
     def from_settings(cls, settings: SalesLeadAgentSettings) -> "SalesLeadAgentDependencies":
+        document_service = DocumentPreparationService(settings)
+        procurement_catalog = ProcurementCatalogService(settings, document_service)
+        procurement_catalog.ensure_background_backfill_started()
         return cls(
             workspace_manager=RunWorkspaceManager(settings),
-            document_service=DocumentPreparationService(settings),
+            document_service=document_service,
+            procurement_catalog=procurement_catalog,
             purchase_adapter=PurchaseAdapter(
                 settings=settings,
                 query_builder=ProcurementQueryBuilder(settings.procurement_search_template),
@@ -3127,7 +4585,10 @@ def _purchase_response_from_snapshot(
     validated_items = [PurchaseSearchItem.model_validate(item) for item in raw_items]
     total_ready_records = len(validated_items)
     safe_record_from = min(record_from, total_ready_records) if total_ready_records else 0
-    page_items = validated_items[safe_record_from : safe_record_from + _PURCHASE_SEARCH_PAGE_SIZE]
+    page_items = [
+        _tool_visible_purchase_item(item)
+        for item in validated_items[safe_record_from : safe_record_from + _PURCHASE_SEARCH_PAGE_SIZE]
+    ]
     next_record_from = safe_record_from + len(page_items)
     if next_record_from >= total_ready_records:
         next_record_from = None
@@ -3173,15 +4634,50 @@ def build_sales_lead_tools(
     )
 
     @tool(
+        "purchase_lookup_tool",
+        args_schema=PurchaseLookupRequest,
+        description=(
+            "Search the persistent procurement catalog built over the shared sales-lead index. "
+            "Use this first when the user asks about procurements or provides a registry number. "
+            "The tool works only with already cached/indexed data and returns at most 5 cards per call."
+        ),
+    )
+    def purchase_lookup_tool(
+        *,
+        query: str | None = None,
+        registry_number: str | None = None,
+        record_from: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            normalized_record_from = _normalize_purchase_record_from(record_from)
+            response = deps.procurement_catalog.search(
+                query=query,
+                registry_number=registry_number,
+                record_from=normalized_record_from,
+            )
+        except ToolUserCorrectableError:
+            raise
+        except Exception as exc:
+            _raise_unexpected_tool_failure(
+                tool_name="purchase_lookup_tool",
+                code="PURCHASE_LOOKUP_FAILED",
+                message="Procurement catalog lookup is unavailable",
+                suggestion="Retry the procurement lookup or use a more specific registry number.",
+                exc=exc,
+                input_field="registry_number" if registry_number else "query",
+            )
+        return response.model_dump()
+
+    @tool(
         "purchase_search_tool",
         args_schema=PurchaseSearchRequest,
         description=(
-            "Start or refresh a conversation-scoped procurement retrieval on EIS. Use this tool "
-            "to submit a procurement search, inspect current retrieval progress, and get the "
-            "index_id needed for follow-up calls to doc_search_tool. Repeated calls with "
-            "the same normalized request return the latest ready subset while the background "
-            "retrieval continues. The tool always returns at most 5 procurement records per call; "
-            "use record_from to page through ready results."
+            "Request or refresh a conversation-scoped procurement crawl on EIS. "
+            "Use purchase_lookup_tool first. Call purchase_search_tool only when cached/indexed "
+            "data is insufficient and a fresh crawl is needed. New crawl requests are staged for "
+            "user confirmation first; only confirmed requests start the background retrieval. "
+            "Refresh calls return retrieval status/progress and, when available, a paged subset "
+            "of ready procurement records."
         ),
     )
     async def purchase_search_tool(
@@ -3190,7 +4686,7 @@ def build_sales_lead_tools(
         query_texts: list[str] | None = None,
         max_pages: int | None = None,
         record_from: int | None = None,
-        runtime: ToolRuntime,
+        runtime: Annotated[ToolRuntime, InjectedToolArg],
     ) -> Command:
         """Submit or refresh a background procurement retrieval for the current conversation.
 
@@ -3240,7 +4736,7 @@ def build_sales_lead_tools(
             normalized_record_from = _normalize_purchase_record_from(record_from)
             retrieval_client = deps.retrieval_client or get_retrieval_service_client()
             conversation_id = _thread_id_from_runtime(runtime)
-            requested_run_id = _requested_run_id_from_runtime(runtime)
+            state = _runtime_state(runtime)
             snapshot = await _resolve_existing_purchase_snapshot(
                 retrieval_client=retrieval_client,
                 conversation_id=conversation_id,
@@ -3250,12 +4746,34 @@ def build_sales_lead_tools(
                 response = _purchase_response_from_snapshot(snapshot, record_from=normalized_record_from)
                 return Command(
                     update={
+                        "conversation_id": conversation_id,
                         **_retrieval_state_from_snapshot(snapshot),
                         "messages": _tool_message(response.model_dump(), runtime),
                     }
                 )
             if not _has_purchase_search_inputs(search_url=search_url, query_texts=query_texts):
                 if snapshot is None:
+                    pending_request = state.get("pending_crawl_request")
+                    pending_hash = _normalize_optional_selector(state.get("pending_crawl_request_hash"))
+                    pending_preview = state.get("pending_crawl_query_preview")
+                    if isinstance(pending_request, dict) and pending_hash:
+                        return Command(
+                            update={
+                                "conversation_id": conversation_id,
+                                "messages": _tool_message(
+                                    {
+                                        "status": "confirmation_required",
+                                        "index_id": deps.document_service.shared_index_id,
+                                        "message": (
+                                            "Cached procurement data is insufficient. User confirmation is required before crawling EIS."
+                                        ),
+                                        "query_preview": pending_preview if isinstance(pending_preview, list) else [],
+                                        "request_hash": pending_hash,
+                                    },
+                                    runtime,
+                                ),
+                            }
+                        )
                     raise ToolUserCorrectableError(
                         code="MISSING_SEARCH_INPUT",
                         message="purchase_search_tool requires either search_url or query_texts.",
@@ -3268,42 +4786,49 @@ def build_sales_lead_tools(
                 response = _purchase_response_from_snapshot(snapshot, record_from=normalized_record_from)
                 return Command(
                     update={
+                        "conversation_id": conversation_id,
                         **_retrieval_state_from_snapshot(snapshot),
                         "messages": _tool_message(response.model_dump(), runtime),
                     }
                 )
-            try:
-                snapshot = await retrieval_client.submit_purchase_search(
-                    conversation_id=conversation_id,
-                    requested_run_id=requested_run_id,
-                    search_url=search_url,
-                    query_texts=query_texts,
-                    max_pages=max_pages,
-                    agent_id="sales_lead_agent",
-                )
-            except RetrievalServiceConflictError as exc:
-                raise ToolUserCorrectableError(
-                    code="RETRIEVAL_ALREADY_IN_PROGRESS",
-                    message=str(exc),
-                    suggestion=(
-                        "Ask about the current retrieval status or wait for it to finish before "
-                        "starting a different procurement search."
-                    ),
-                    input_field="query_texts" if query_texts is not None else "search_url",
-                ) from None
-            except RetrievalServiceUserInputError as exc:
-                raise ToolUserCorrectableError(
-                    code=exc.code,
-                    message=str(exc),
-                    suggestion=exc.suggestion,
-                    input_field=exc.input_field,
-                ) from None
-
-            response = _purchase_response_from_snapshot(snapshot, record_from=normalized_record_from)
+            request_spec = deps.purchase_adapter.build_request_spec(
+                search_url=search_url,
+                query_texts=query_texts,
+                max_pages=max_pages,
+            )
+            existing_pending_hash = _normalize_optional_selector(state.get("pending_crawl_request_hash"))
+            staged_request = {
+                "search_url": search_url,
+                "query_texts": list(query_texts or []),
+                "max_pages": max_pages,
+            }
+            if (
+                existing_pending_hash == request_spec.request_hash
+                and isinstance(state.get("pending_crawl_request"), dict)
+            ):
+                staged_request = dict(state.get("pending_crawl_request") or staged_request)
+            response = {
+                "status": "confirmation_required",
+                "index_id": deps.document_service.shared_index_id,
+                "message": (
+                    "Cached procurement data is insufficient. User confirmation is required before crawling EIS."
+                ),
+                "query_preview": [
+                    _search_string_from_url(value) or value
+                    for value in request_spec.search_urls
+                ],
+                "search_urls": request_spec.search_urls,
+                "request_hash": request_spec.request_hash,
+                "record_from": normalized_record_from,
+            }
             return Command(
                 update={
-                    **_retrieval_state_from_snapshot(snapshot),
-                    "messages": _tool_message(response.model_dump(), runtime),
+                    "conversation_id": conversation_id,
+                    "pending_crawl_request": staged_request,
+                    "pending_crawl_reason": "cached procurement data is insufficient",
+                    "pending_crawl_request_hash": request_spec.request_hash,
+                    "pending_crawl_query_preview": response["query_preview"],
+                    "messages": _tool_message(response, runtime),
                 }
             )
         except ToolUserCorrectableError:
@@ -3330,7 +4855,7 @@ def build_sales_lead_tools(
     async def retrieve_page_tool(
         *,
         url: str,
-        runtime: ToolRuntime,
+        runtime: Annotated[ToolRuntime, InjectedToolArg],
     ) -> dict[str, Any]:
         """Fetch one exact public page URL and its same-host attachments into a searchable run.
 
@@ -3650,7 +5175,7 @@ def build_sales_lead_tools(
         file_name: str | None = None,
         offset: int | None = None,
         max_chars: int | None = None,
-        runtime: ToolRuntime | None = None,
+        runtime: Annotated[ToolRuntime | None, InjectedToolArg] = None,
     ) -> dict[str, Any]:
         """Read cached content from one previously prepared document.
 
@@ -3676,18 +5201,18 @@ def build_sales_lead_tools(
             A dictionary with the cached content window plus `next_offset` when more content is
             available.
         """
+        requested_run_id = _requested_run_id_from_runtime(runtime)
+        resolved_index_id = (
+            _normalize_optional_selector(index_id)
+            or _requested_index_id_from_runtime(runtime)
+            or deps.document_service.shared_index_id
+        )
+        workspace = (
+            deps.workspace_manager.get(requested_run_id)
+            if isinstance(requested_run_id, str) and requested_run_id.strip()
+            else None
+        )
         try:
-            requested_run_id = _requested_run_id_from_runtime(runtime)
-            resolved_index_id = (
-                _normalize_optional_selector(index_id)
-                or _requested_index_id_from_runtime(runtime)
-                or deps.document_service.shared_index_id
-            )
-            workspace = (
-                deps.workspace_manager.get(requested_run_id)
-                if isinstance(requested_run_id, str) and requested_run_id.strip()
-                else None
-            )
             response = deps.document_service.read_cached_document(
                 index_id=resolved_index_id,
                 document_id=document_id,
@@ -3697,8 +5222,73 @@ def build_sales_lead_tools(
                 offset=offset,
                 max_chars=max_chars,
             )
-        except ToolUserCorrectableError:
-            raise
+            response_content_source = getattr(response, "content_source", None)
+            response_source_kind = getattr(response, "source_kind", None)
+            response_source_id = getattr(response, "source_id", None)
+            response_bundle_id = getattr(response, "bundle_id", None)
+            response_purchase_id = getattr(response, "purchase_id", None)
+            response_source_url = getattr(response, "source_url", None)
+            response_file_path = getattr(response, "file_path", None)
+            if (
+                response_content_source == "local_file"
+                and response_source_kind == "purchase"
+                and response_source_id
+                and response_bundle_id
+                and response_file_path
+                and not deps.document_service.source_exists(response_source_id)
+            ):
+                indexing_workspace = workspace
+                if indexing_workspace is None:
+                    with contextlib.suppress(Exception):
+                        indexing_workspace = deps.workspace_manager.get_by_index(resolved_index_id)
+                if indexing_workspace is None:
+                    indexing_workspace = deps.workspace_manager.create_run()
+                resolved_path = Path(str(response_file_path))
+                provenance_by_path = {
+                    str(resolved_path): {
+                        "artifact_relpath": deps.document_service._purchase_cached_relative_hint(
+                            workspace=indexing_workspace if resolved_path.is_relative_to(indexing_workspace.artifacts_dir.resolve()) else None,
+                            file_path=resolved_path,
+                        ),
+                        "original_file_name": resolved_path.name,
+                    }
+                }
+                try:
+                    deps.document_service.prepare_files(
+                        workspace=indexing_workspace,
+                        origin="purchase",
+                        bundle_id=str(response_bundle_id),
+                        registry_number=str(response_purchase_id or response_bundle_id),
+                        source_url=response_source_url,
+                        file_paths=[str(resolved_path)],
+                        provenance_by_path=provenance_by_path,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to index cached procurement document bundle_id=%s file=%s",
+                        response_bundle_id,
+                        response_file_path,
+                    )
+        except ToolUserCorrectableError as exc:
+            if exc.code not in {
+                "AMBIGUOUS_FILE_NAME",
+                "BUNDLE_NOT_FOUND",
+                "DOCUMENT_CONTENT_UNAVAILABLE",
+                "DOCUMENT_NOT_FOUND",
+                "FILE_NOT_DOWNLOADED",
+                "FILE_NOT_FOUND",
+            }:
+                raise
+            return ReadCachedDocumentUnavailableResponse(
+                index_id=resolved_index_id,
+                document_id=_normalize_optional_selector(document_id),
+                bundle_id=_normalize_optional_selector(bundle_id),
+                file_name=_normalize_optional_selector(file_name),
+                error_code=exc.code,
+                message=str(exc),
+                suggestion=exc.suggestion,
+                input_field=exc.input_field,
+            ).model_dump()
         except Exception as exc:
             selector = document_id or f"{bundle_id}:{file_name}"
             _raise_unexpected_tool_failure(
@@ -3855,6 +5445,7 @@ def build_sales_lead_tools(
         return response.model_dump()
 
     return [
+        purchase_lookup_tool,
         purchase_search_tool,
         retrieve_page_tool,
         doc_search_tool,

@@ -177,11 +177,11 @@ def test_retrieval_state_note_uses_agent_state_fields():
     )
 
     assert note is not None
-    assert "Background procurement retrieval context" in note
+    assert "Shared procurement index context" in note
+    assert "default_index_id: sales_lead_permanent" in note
     assert "retrieval_status: in_progress" in note
     assert "index_id: idx-1" in note
-    assert "ready snapshot: procurement_items 1" in note
-    assert "123: Transport insurance procurement" in note
+    assert "purchase_lookup_tool first" in note
     assert "Use the current index_id with doc_search_tool" in note
     assert "read_cached_document_tool" in note
     assert "short unique file hint" in note
@@ -243,7 +243,7 @@ def test_refresh_state_updates_agent_state_and_streams_progress(monkeypatch):
     class FakeClient:
         async def get_retrieval(self, *, retrieval_id: str, include_payloads: bool = False):
             assert retrieval_id == "ret-1"
-            assert include_payloads is True
+            assert include_payloads is False
             return snapshot
 
     monkeypatch.setattr(sales_agent, "get_retrieval_service_client", lambda: FakeClient())
@@ -258,9 +258,8 @@ def test_refresh_state_updates_agent_state_and_streams_progress(monkeypatch):
     assert update["active_retrieval_index_id"] == "idx-1"
     assert update["active_retrieval_progress"]["indexed_segments"] == 3
     assert update["active_run_id"] == "run-1"
+    assert update["default_index_id"] == "sales_lead_permanent"
     assert update["index_id"] == "idx-1"
-    assert update["purchase_search_result"]["items"][0]["registry_number"] == "123"
-    assert update["purchase_search_result"]["search_urls"] == ["https://zakupki.gov.ru/example"]
     assert update["prepared_documents"] == []
     assert events == [
         {
@@ -366,6 +365,24 @@ def test_finalize_agent_state_uses_refreshed_purchase_snapshot_without_new_tool_
                     "crawl_status": "success",
                     "crawl_error": None,
                     "crawl_ts_utc": None,
+                }
+            ],
+        },
+        last_purchase_lookup_result={
+            "index_id": "idx-1",
+            "record_from": 0,
+            "returned_records": 1,
+            "total_ready_records": 1,
+            "next_record_from": None,
+            "items": [
+                {
+                    "bundle_id": "123",
+                    "registry_number": "123",
+                    "law": "44-FZ",
+                    "purchase_title": "Transport insurance procurement",
+                    "customer_name": "Customer",
+                    "detail_url": "https://zakupki.gov.ru/item/123",
+                    "crawl_status": "success",
                 }
             ],
         },

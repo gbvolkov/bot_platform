@@ -17,18 +17,23 @@ from langfuse.langchain import CallbackHandler
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import config
 from agents.llm_utils import get_llm
 from agents.utils import ModelType, extract_text
-from services.sales_lead_retrieval.client import get_retrieval_service_client
+from services.sales_lead_retrieval.client import (
+    RetrievalServiceConflictError,
+    RetrievalServiceUserInputError,
+    get_retrieval_service_client,
+)
 
 from .prompts import build_system_prompt
 from .state import SalesLeadAgentState
 from .tools import (
     ToolUserCorrectableError,
+    get_settings,
     _purchase_response_from_snapshot,
     _retrieval_state_from_snapshot,
     build_sales_lead_tools,
@@ -39,26 +44,56 @@ logger = logging.getLogger(__name__)
 
 _VISIBLE_EVIDENCE_SOURCES = {"purchase", "document", "open_source", "scoring", "fssp", "dadata"}
 _VISIBLE_FACT_STATUSES = {"document", "external_api", "open_source", "not_found"}
+_CRAWL_CONFIRM_YES = {"да", "yes", "y", "ага", "ок", "okay", "запускай", "подтверждаю"}
+_CRAWL_CONFIRM_NO = {"нет", "no", "n", "не надо", "не нужно", "отмена", "cancel"}
+
+
+def _default_index_id() -> str:
+    return get_settings().shared_index_id
+
+
+def _parse_crawl_confirmation(value: Any) -> bool | None:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        return None
+    if normalized in _CRAWL_CONFIRM_YES or normalized.startswith("да ") or normalized.startswith("yes "):
+        return True
+    if normalized in _CRAWL_CONFIRM_NO or normalized.startswith("нет ") or normalized.startswith("no "):
+        return False
+    return None
 
 
 def _retrieval_state_note(state: Any) -> str | None:
     if not isinstance(state, dict):
         return None
     retrieval_status = str(state.get("active_retrieval_status") or "").strip()
-    if not retrieval_status:
-        return None
-    progress = (
-        state.get("active_retrieval_progress")
-        if isinstance(state.get("active_retrieval_progress"), dict)
+    default_index_id = str(state.get("default_index_id") or state.get("index_id") or _default_index_id()).strip()
+    lookup_result = (
+        state.get("last_purchase_lookup_result")
+        if isinstance(state.get("last_purchase_lookup_result"), dict)
         else {}
     )
-    purchase_result = (
-        state.get("purchase_search_result")
-        if isinstance(state.get("purchase_search_result"), dict)
-        else {}
-    )
-    ready_items = purchase_result.get("items") if isinstance(purchase_result.get("items"), list) else []
     lines = [
+        "Shared procurement index context:",
+        f"- default_index_id: {default_index_id}",
+        "- For procurement questions, use purchase_lookup_tool first.",
+        "- Use doc_search_tool and read_cached_document_tool against the shared index when you need details from cached documents.",
+    ]
+    lookup_items = lookup_result.get("items") if isinstance(lookup_result.get("items"), list) else []
+    if lookup_items:
+        lines.append(f"- last purchase lookup returned {len(lookup_items)} card(s).")
+    elif lookup_result:
+        lines.append(
+            "- If the user still needs procurement discovery after an empty purchase_lookup_tool result, stage crawl confirmation with purchase_search_tool before answering."
+        )
+    pending_request = state.get("pending_crawl_request") if isinstance(state.get("pending_crawl_request"), dict) else None
+    if pending_request:
+        lines.append("- A procurement crawl confirmation request is pending user approval.")
+    if not retrieval_status:
+        return "\n".join(lines)
+    progress = state.get("active_retrieval_progress") if isinstance(state.get("active_retrieval_progress"), dict) else {}
+    lines = [
+        *lines,
         "Background procurement retrieval context:",
         f"- retrieval_status: {retrieval_status}",
         f"- retrieval_stage: {str(state.get('active_retrieval_stage') or '')}",
@@ -72,32 +107,17 @@ def _retrieval_state_note(state: Any) -> str | None:
             f"prepared_documents {int(progress.get('prepared_documents', 0))}, "
             f"indexed_segments {int(progress.get('indexed_segments', 0))}"
         ),
-        f"- ready snapshot: procurement_items {len(ready_items)}",
     ]
-    if ready_items:
-        preview: list[str] = []
-        for raw_item in ready_items[:3]:
-            if not isinstance(raw_item, dict):
-                continue
-            registry_number = str(raw_item.get("registry_number") or "").strip()
-            title = str(raw_item.get("purchase_title") or raw_item.get("title") or "").strip()
-            if registry_number and title:
-                preview.append(f"{registry_number}: {title}")
-            elif title:
-                preview.append(title)
-            elif registry_number:
-                preview.append(registry_number)
-        if preview:
-            lines.append("- current procurement examples:")
-            lines.extend(f"  - {item}" for item in preview)
     if retrieval_status in {"queued", "in_progress"}:
         lines.extend(
             [
                 "- The procurement retrieval is still running in the background.",
+                "- Use purchase_lookup_tool to inspect already catalogued procurements while the crawl is still running.",
                 "- Use the current index_id with doc_search_tool for questions about the retrieved materials.",
                 "- If you already know an exact document_id, use read_cached_document_tool to read that cached file content without fetching anything new.",
                 "- read_cached_document_tool can reuse the current index context automatically; do not block on explicitly re-supplying index_id when the active procurement context is already present.",
                 "- If purchase_search_tool already exposed downloaded procurement files, read_cached_document_tool can read one by bundle_id + file_name before search matches appear. file_name may be the exact name, a downloaded file path, or a short unique file hint.",
+                "- If read_cached_document_tool returns status=unavailable, treat it as normal tool feedback and continue with another cached file or explain that the requested file is not downloaded yet.",
                 "- You may answer using only the materials already indexed so far.",
                 "- If you answer from partial materials, explicitly say retrieval is still in progress.",
                 "- Do not say retrieval is complete.",
@@ -111,6 +131,7 @@ def _retrieval_state_note(state: Any) -> str | None:
                 "- If you already know an exact document_id, use read_cached_document_tool to read that cached file content directly.",
                 "- read_cached_document_tool can reuse the current index context automatically; do not block on explicitly re-supplying index_id when the active procurement context is already present.",
                 "- If purchase_search_tool already exposed downloaded procurement files, read_cached_document_tool can read one by bundle_id + file_name. file_name may be the exact name, a downloaded file path, or a short unique file hint.",
+                "- If read_cached_document_tool returns status=unavailable, treat it as normal tool feedback and continue with another cached file or explain that the requested file is not downloaded yet.",
             ]
         )
     elif retrieval_status == "failed":
@@ -121,6 +142,7 @@ def _retrieval_state_note(state: Any) -> str | None:
                 "- If a document_id is already known from partial materials, read_cached_document_tool can still read its cached content.",
                 "- read_cached_document_tool can reuse the current index context automatically; do not block on explicitly re-supplying index_id when the active procurement context is already present.",
                 "- If purchase_search_tool already exposed downloaded procurement files, read_cached_document_tool can read one by bundle_id + file_name from the cached artifacts. file_name may be the exact name, a downloaded file path, or a short unique file hint.",
+                "- If read_cached_document_tool returns status=unavailable, treat it as normal tool feedback and continue with another cached file or explain that the requested file is not downloaded yet.",
                 "- You may still answer from indexed partial materials, but be explicit about the failure.",
             ]
         )
@@ -440,7 +462,8 @@ def _recommended_next_step(
 
 def _normalized_answer_type(
     *,
-    purchase_payload: dict[str, Any] | None,
+    purchase_lookup_payload: dict[str, Any] | None,
+    purchase_status_payload: dict[str, Any] | None,
     doc_search_payload: dict[str, Any] | None,
     counterparty_items: list[dict[str, Any]],
     previous_answer_type: str | None,
@@ -451,9 +474,9 @@ def _normalized_answer_type(
         return "comparison"
     if len(counterparty_items) == 1:
         return "company_check"
-    if purchase_payload and (purchase_payload.get("items") or []):
+    if purchase_lookup_payload and (purchase_lookup_payload.get("items") or []):
         return "lead_list"
-    if purchase_payload and str(purchase_payload.get("retrieval_status") or "").strip():
+    if purchase_status_payload and str(purchase_status_payload.get("retrieval_status") or "").strip():
         return "status_update"
     if previous_answer_type:
         return previous_answer_type
@@ -469,9 +492,12 @@ def _build_normalized_final_answer(state: SalesLeadAgentState) -> dict[str, Any]
         else {}
     )
 
-    purchase_payload = _latest_tool_payload(current_turn_messages, tool_name="purchase_search_tool")
-    if not purchase_payload and isinstance(state.get("purchase_search_result"), dict):
-        purchase_payload = dict(state.get("purchase_search_result") or {})
+    purchase_lookup_payload = _latest_tool_payload(current_turn_messages, tool_name="purchase_lookup_tool")
+    if not purchase_lookup_payload and isinstance(state.get("last_purchase_lookup_result"), dict):
+        purchase_lookup_payload = dict(state.get("last_purchase_lookup_result") or {})
+    purchase_status_payload = _latest_tool_payload(current_turn_messages, tool_name="purchase_search_tool")
+    if not purchase_status_payload and isinstance(state.get("purchase_search_result"), dict):
+        purchase_status_payload = dict(state.get("purchase_search_result") or {})
     retrieve_page_payload = _latest_tool_payload(current_turn_messages, tool_name="retrieve_page_tool")
     doc_search_payload = _latest_tool_payload(current_turn_messages, tool_name="doc_search_tool")
     if not doc_search_payload and isinstance(state.get("last_doc_search_result"), dict):
@@ -502,8 +528,8 @@ def _build_normalized_final_answer(state: SalesLeadAgentState) -> dict[str, Any]
         items = _doc_match_items_from_payload(doc_search_payload)
     elif counterparty_items:
         items = counterparty_items
-    elif purchase_payload and (purchase_payload.get("items") or []):
-        items = _purchase_items_from_payload(purchase_payload)
+    elif purchase_lookup_payload and (purchase_lookup_payload.get("items") or []):
+        items = _purchase_items_from_payload(purchase_lookup_payload)
     elif not current_turn_messages and isinstance(previous_normalized.get("items"), list):
         items = previous_normalized.get("items") or []
     elif not _tool_usage_from_messages(current_turn_messages) and isinstance(previous_normalized.get("items"), list):
@@ -512,12 +538,13 @@ def _build_normalized_final_answer(state: SalesLeadAgentState) -> dict[str, Any]
         items = []
 
     retrieval_status = str(
-        (purchase_payload or {}).get("retrieval_status")
+        (purchase_status_payload or {}).get("retrieval_status")
         or state.get("active_retrieval_status")
         or ""
     ).strip() or None
     answer_type = _normalized_answer_type(
-        purchase_payload=purchase_payload,
+        purchase_lookup_payload=purchase_lookup_payload,
+        purchase_status_payload=purchase_status_payload,
         doc_search_payload=doc_search_payload,
         counterparty_items=counterparty_items,
         previous_answer_type=str(previous_normalized.get("answer_type") or "").strip() or None,
@@ -555,8 +582,9 @@ def _build_normalized_final_answer(state: SalesLeadAgentState) -> dict[str, Any]
     }
     if retrieval_status:
         normalized["retrieval_status"] = retrieval_status
-    if purchase_payload and str(purchase_payload.get("message") or "").strip():
-        normalized["message"] = str(purchase_payload.get("message") or "").strip()
+    message_payload = purchase_status_payload or purchase_lookup_payload
+    if message_payload and str(message_payload.get("message") or "").strip():
+        normalized["message"] = str(message_payload.get("message") or "").strip()
     if recommended_next_step:
         normalized["recommended_next_step"] = recommended_next_step
     return normalized
@@ -579,11 +607,13 @@ def _build_turn_validation(
 
 def _finalize_agent_state(state: SalesLeadAgentState) -> dict[str, Any]:
     result = dict(state)
+    result["default_index_id"] = str(result.get("default_index_id") or _default_index_id())
     messages = _message_list(result.get("messages"))
     current_turn_messages = _current_turn_messages(messages)
 
     turn_tool_usage = _tool_usage_from_messages(current_turn_messages)
-    purchase_payload = _latest_tool_payload(current_turn_messages, tool_name="purchase_search_tool")
+    purchase_lookup_payload = _latest_tool_payload(current_turn_messages, tool_name="purchase_lookup_tool")
+    purchase_status_payload = _latest_tool_payload(current_turn_messages, tool_name="purchase_search_tool")
     retrieve_page_payload = _latest_tool_payload(current_turn_messages, tool_name="retrieve_page_tool")
     doc_search_payload = _latest_tool_payload(current_turn_messages, tool_name="doc_search_tool")
 
@@ -592,10 +622,18 @@ def _finalize_agent_state(state: SalesLeadAgentState) -> dict[str, Any]:
     else:
         result["turn_tool_usage"] = []
 
-    if purchase_payload:
-        result["purchase_search_result"] = purchase_payload
+    if purchase_lookup_payload:
+        result["last_purchase_lookup_result"] = purchase_lookup_payload
     else:
-        purchase_payload = (
+        purchase_lookup_payload = (
+            result.get("last_purchase_lookup_result")
+            if isinstance(result.get("last_purchase_lookup_result"), dict)
+            else None
+        )
+    if purchase_status_payload:
+        result["purchase_search_result"] = purchase_status_payload
+    else:
+        purchase_status_payload = (
             result.get("purchase_search_result")
             if isinstance(result.get("purchase_search_result"), dict)
             else None
@@ -615,16 +653,18 @@ def _finalize_agent_state(state: SalesLeadAgentState) -> dict[str, Any]:
     result["prepared_documents"] = prepared_documents
 
     active_run_id = (
-        str((purchase_payload or {}).get("run_id") or "").strip()
+        str((purchase_status_payload or {}).get("run_id") or "").strip()
         or str((retrieve_page_payload or {}).get("run_id") or "").strip()
         or str(result.get("active_retrieval_run_id") or "").strip()
         or None
     )
     index_id = (
-        str((purchase_payload or {}).get("index_id") or "").strip()
+        str((purchase_lookup_payload or {}).get("index_id") or "").strip()
+        or str((purchase_status_payload or {}).get("index_id") or "").strip()
         or str((doc_search_payload or {}).get("index_id") or "").strip()
         or str((retrieve_page_payload or {}).get("index_id") or "").strip()
         or str(result.get("active_retrieval_index_id") or "").strip()
+        or str(result.get("default_index_id") or "").strip()
         or None
     )
     result["active_run_id"] = active_run_id
@@ -785,16 +825,24 @@ async def _refresh_retrieval_state(
     state: SalesLeadAgentState,
     runtime: Runtime[Any],
 ) -> dict[str, Any]:
+    default_index_id = _default_index_id()
     retrieval_id = state.get("active_retrieval_id")
     if not isinstance(retrieval_id, str) or not retrieval_id.strip():
-        return {}
+        return {
+            "conversation_id": str(state.get("conversation_id") or "").strip() or None,
+            "default_index_id": default_index_id,
+            "index_id": str(state.get("index_id") or default_index_id),
+            "active_run_id": str(state.get("active_run_id") or "").strip() or None,
+        }
 
     snapshot = await get_retrieval_service_client().get_retrieval(
         retrieval_id=retrieval_id,
-        include_payloads=True,
+        include_payloads=False,
     )
     if snapshot is None:
         return {
+            "conversation_id": str(state.get("conversation_id") or "").strip() or None,
+            "default_index_id": default_index_id,
             "active_retrieval_id": None,
             "active_retrieval_request_hash": None,
             "active_retrieval_run_id": None,
@@ -804,7 +852,7 @@ async def _refresh_retrieval_state(
             "active_retrieval_message": None,
             "active_retrieval_progress": None,
             "active_run_id": None,
-            "index_id": None,
+            "index_id": default_index_id,
             "purchase_search_result": None,
             "prepared_documents": [],
         }
@@ -822,14 +870,131 @@ async def _refresh_retrieval_state(
                 "progress": snapshot.progress.model_dump(),
             }
         )
-    purchase_response = _purchase_response_from_snapshot(snapshot).model_dump()
     return {
+        "conversation_id": str(state.get("conversation_id") or "").strip() or None,
+        "default_index_id": default_index_id,
         **_retrieval_state_from_snapshot(snapshot),
         "active_run_id": str(snapshot.run_id),
-        "index_id": str(snapshot.index_id),
-        "purchase_search_result": purchase_response,
+        "index_id": str(snapshot.index_id or default_index_id),
         "prepared_documents": [],
     }
+
+
+async def _handle_crawl_confirmation(
+    state: SalesLeadAgentState,
+    runtime: Runtime[Any],
+) -> Command[Any] | dict[str, Any]:
+    pending_request = state.get("pending_crawl_request")
+    pending_hash = str(state.get("pending_crawl_request_hash") or "").strip()
+    if not isinstance(pending_request, dict) or not pending_hash:
+        return {}
+
+    preview = state.get("pending_crawl_query_preview")
+    reason = str(state.get("pending_crawl_reason") or "cached procurement data is insufficient").strip()
+    while True:
+        user_response = interrupt(
+            {
+                "type": "choice",
+                "content": (
+                    "В индексе не хватило данных. Запустить новый поиск на zakupki.gov.ru и "
+                    "пополнить кэш/индекс?"
+                ),
+                "question": "Ответьте да или нет.",
+                "pending_crawl_request": pending_request,
+                "pending_crawl_reason": reason,
+                "pending_crawl_query_preview": preview if isinstance(preview, list) else [],
+            }
+        )
+        decision = _parse_crawl_confirmation(user_response)
+        if decision is not None:
+            break
+
+    message_update = [HumanMessage(content=str(user_response))]
+    if not decision:
+        return Command(
+            goto="run_agent",
+            update={
+                "messages": message_update,
+                "pending_crawl_request": None,
+                "pending_crawl_reason": None,
+                "pending_crawl_request_hash": None,
+                "pending_crawl_query_preview": None,
+            },
+        )
+
+    retrieval_client = get_retrieval_service_client()
+    conversation_id = (
+        str(state.get("conversation_id") or "").strip()
+        or (
+            runtime.config.get("configurable", {}).get("thread_id")
+            if isinstance(getattr(runtime, "config", None), dict)
+            else None
+        )
+    )
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        raise RuntimeError("sales_lead_agent requires configurable.thread_id for procurement crawl confirmation.")
+
+    requested_run_id = (
+        str(state.get("active_run_id") or "").strip()
+        or str(state.get("active_retrieval_run_id") or "").strip()
+        or None
+    )
+    try:
+        snapshot = await retrieval_client.submit_purchase_search(
+            conversation_id=conversation_id,
+            requested_run_id=requested_run_id,
+            search_url=pending_request.get("search_url"),
+            query_texts=pending_request.get("query_texts"),
+            max_pages=pending_request.get("max_pages"),
+            agent_id="sales_lead_agent",
+        )
+    except RetrievalServiceConflictError as exc:
+        snapshot = exc.snapshot
+    except RetrievalServiceUserInputError as exc:
+        return Command(
+            goto="run_agent",
+            update={
+                "messages": message_update
+                + [
+                    ToolMessage(
+                        content=json.dumps(
+                            {
+                                "ok": False,
+                                "error_code": exc.code,
+                                "message": str(exc),
+                                "retryable": True,
+                                "suggestion": exc.suggestion,
+                                "input_field": exc.input_field,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        tool_call_id="crawl_confirmation",
+                        name="purchase_search_tool",
+                        status="error",
+                    )
+                ],
+                "pending_crawl_request": None,
+                "pending_crawl_reason": None,
+                "pending_crawl_request_hash": None,
+                "pending_crawl_query_preview": None,
+            },
+        )
+
+    purchase_response = _purchase_response_from_snapshot(snapshot).model_dump()
+    return Command(
+        goto="run_agent",
+        update={
+            "messages": message_update,
+            **_retrieval_state_from_snapshot(snapshot),
+            "active_run_id": str(snapshot.run_id),
+            "index_id": str(snapshot.index_id or _default_index_id()),
+            "purchase_search_result": purchase_response,
+            "pending_crawl_request": None,
+            "pending_crawl_reason": None,
+            "pending_crawl_request_hash": None,
+            "pending_crawl_query_preview": None,
+        },
+    )
 
 
 def initialize_agent(
@@ -877,9 +1042,11 @@ def initialize_agent(
     builder = StateGraph(SalesLeadAgentState)
     builder.add_node("refresh_state", _refresh_retrieval_state)
     builder.add_node("run_agent", run_agent)
+    builder.add_node("handle_crawl_confirmation", _handle_crawl_confirmation)
     builder.add_edge(START, "refresh_state")
     builder.add_edge("refresh_state", "run_agent")
-    builder.add_edge("run_agent", END)
+    builder.add_edge("run_agent", "handle_crawl_confirmation")
+    builder.add_edge("handle_crawl_confirmation", END)
 
     graph = builder.compile(
         checkpointer=MemorySaver() if checkpoint_saver is None else checkpoint_saver,

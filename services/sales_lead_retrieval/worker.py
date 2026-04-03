@@ -91,6 +91,7 @@ async def _process_job(
     items_by_registry: dict[str, dict[str, Any]] = {}
     prepared_payload: list[dict[str, Any]] = []
     request_payload = dict(job.request_payload or {})
+    processed_registries: set[str] = set()
 
     def _sync_record(
         *,
@@ -142,11 +143,13 @@ async def _process_job(
             level="error" if stage.endswith("_failed") else "info",
         )
 
-    def _item_discovered(item: PurchaseSearchItem) -> None:
-        payload = item.model_dump()
-        items_by_registry[item.registry_number] = payload
+    def _store_item_payload(item: PurchaseSearchItem) -> None:
+        items_by_registry[item.registry_number] = item.model_dump()
         items_payload.clear()
         items_payload.extend(items_by_registry.values())
+
+    def _item_discovered(item: PurchaseSearchItem) -> None:
+        _store_item_payload(item)
         _sync_record(
             stage="crawler_item",
             message=f"Discovered procurement {item.registry_number}.",
@@ -154,66 +157,109 @@ async def _process_job(
             progress_update={"total_purchases": len(items_payload)},
         )
 
-    await _record(
-        store,
-        retrieval_id=job.retrieval_id,
-        stage="starting",
-        message="Background procurement retrieval started.",
-        progress=progress,
-        items=items_payload,
-        prepared_documents=prepared_payload,
-        status="in_progress",
-    )
-
-    try:
-        resolved_urls, items = await asyncio.to_thread(
-            deps.purchase_adapter.search,
-            search_url=request_payload.get("search_url"),
-            query_texts=request_payload.get("query_texts"),
-            downloads_dir=str(workspace.downloads_dir),
-            max_pages=request_payload.get("max_pages"),
-            progress_callback=_crawler_progress,
-            item_callback=_item_discovered,
-        )
-        items_payload = [item.model_dump() for item in items]
-        items_by_registry = {str(item["registry_number"]): item for item in items_payload}
-        progress["total_queries"] = len(resolved_urls)
-        progress["completed_queries"] = len(resolved_urls)
-        progress["total_purchases"] = len(items_payload)
-        await _record(
-            store,
-            retrieval_id=job.retrieval_id,
-            stage="crawler_complete",
-            message=(
-                f"Crawl finished. Collected {len(items_payload)} unique procurement record(s)."
-            ),
-            progress=progress,
-            items=items_payload,
-            prepared_documents=prepared_payload,
-            status="in_progress",
-            payload={"search_urls": resolved_urls},
-        )
-
-        total_items = len(items)
-        for item_index, item in enumerate(items, start=1):
+    async def _refresh_item_summary(item: PurchaseSearchItem) -> PurchaseSearchItem:
+        purchase_document_summary = getattr(deps.document_service, "purchase_document_summary", None)
+        if not callable(purchase_document_summary):
+            return item
+        try:
+            summary = await asyncio.to_thread(purchase_document_summary, item.registry_number)
+        except Exception as exc:
             await _record(
                 store,
                 retrieval_id=job.retrieval_id,
-                stage="purchase_processing",
+                stage="purchase_summary_failed",
                 message=(
-                    f"Processing procurement {item.registry_number} "
-                    f"[{item_index}/{total_items}]."
+                    f"Failed to refresh indexed summary for procurement "
+                    f"{item.registry_number}: {exc}"
                 ),
                 progress=progress,
                 items=items_payload,
                 prepared_documents=prepared_payload,
                 status="in_progress",
+                level="error",
                 payload={
                     "purchase_id": item.registry_number,
-                    "current_purchase": item_index,
-                    "total_purchases": total_items,
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
                 },
             )
+            return item
+        prepared_document_ids = summary.get("prepared_document_ids")
+        if isinstance(prepared_document_ids, list):
+            item.prepared_document_ids = [str(value) for value in prepared_document_ids if str(value)]
+        indexed_documents_count = summary.get("indexed_documents_count")
+        if indexed_documents_count is not None:
+            item.indexed_documents_count = int(indexed_documents_count)
+        last_indexed_at = summary.get("last_indexed_at")
+        if last_indexed_at:
+            item.last_indexed_at = str(last_indexed_at)
+        source_url = summary.get("source_url")
+        if source_url and not item.detail_url:
+            item.detail_url = str(source_url)
+        return item
+
+    async def _upsert_catalog_item(item: PurchaseSearchItem) -> PurchaseSearchItem:
+        procurement_catalog = getattr(deps, "procurement_catalog", None)
+        if procurement_catalog is None:
+            _store_item_payload(item)
+            return item
+        try:
+            updated_item = await asyncio.to_thread(
+                procurement_catalog.upsert_item,
+                item.model_copy(deep=True),
+            )
+        except Exception as exc:
+            _store_item_payload(item)
+            await _record(
+                store,
+                retrieval_id=job.retrieval_id,
+                stage="catalog_upsert_failed",
+                message=(
+                    f"Failed to update procurement catalog for "
+                    f"{item.registry_number}: {exc}"
+                ),
+                progress=progress,
+                items=items_payload,
+                prepared_documents=prepared_payload,
+                status="in_progress",
+                level="error",
+                payload={
+                    "purchase_id": item.registry_number,
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            return item
+        _store_item_payload(updated_item)
+        return updated_item
+
+    async def _process_purchase_item(
+        *,
+        item: PurchaseSearchItem,
+        current_purchase: int,
+        total_purchases: int,
+    ) -> None:
+        await _record(
+            store,
+            retrieval_id=job.retrieval_id,
+            stage="purchase_processing",
+            message=(
+                f"Processing procurement {item.registry_number} "
+                f"[{current_purchase}/{total_purchases}]."
+            ),
+            progress=progress,
+            items=items_payload,
+            prepared_documents=prepared_payload,
+            status="in_progress",
+            payload={
+                "purchase_id": item.registry_number,
+                "current_purchase": current_purchase,
+                "total_purchases": total_purchases,
+            },
+        )
+        item = await _refresh_item_summary(item)
+        item = await _upsert_catalog_item(item)
+        try:
             artifact_paths = _ensure_purchase_artifacts(workspace=workspace, item=item.model_dump())
             progress["total_files"] += len(artifact_paths)
             if artifact_paths:
@@ -254,52 +300,32 @@ async def _process_job(
                         },
                         level="error" if stage.endswith("_failed") else "info",
                     )
-                try:
-                    prepared = await asyncio.to_thread(
-                        deps.document_service.prepare_files,
-                        workspace=workspace,
-                        origin="purchase",
-                        bundle_id=item.bundle_id,
-                        registry_number=item.registry_number,
-                        source_url=item.detail_url,
-                        file_paths=artifact_paths,
-                        provenance_by_path=provenance_by_path,
-                        progress_callback=_prepare_progress,
-                    )
+
+                prepared = await asyncio.to_thread(
+                    deps.document_service.prepare_files,
+                    workspace=workspace,
+                    origin="purchase",
+                    bundle_id=item.bundle_id,
+                    registry_number=item.registry_number,
+                    source_url=item.detail_url,
+                    file_paths=artifact_paths,
+                    provenance_by_path=provenance_by_path,
+                    progress_callback=_prepare_progress,
+                )
+                if prepared:
                     item.prepared_document_ids = [doc.document_id for doc in prepared]
-                    item_payload = item.model_dump()
-                    items_by_registry[item.registry_number] = item_payload
-                    items_payload = list(items_by_registry.values())
                     prepared_payload.extend(doc.model_dump() for doc in prepared)
-                    progress["processed_files"] += len(artifact_paths)
                     progress["prepared_documents"] = len(prepared_payload)
                     progress["indexed_segments"] += sum(int(doc.chunks_count) for doc in prepared)
-                except Exception as exc:
-                    await _record(
-                        store,
-                        retrieval_id=job.retrieval_id,
-                        stage="purchase_failed",
-                        message=(
-                            f"Failed to process procurement {item.registry_number}: {exc}"
-                        ),
-                        progress=progress,
-                        items=items_payload,
-                        prepared_documents=prepared_payload,
-                        status="in_progress",
-                        level="error",
-                        payload={
-                            "purchase_id": item.registry_number,
-                            "error": str(exc),
-                            "error_type": exc.__class__.__name__,
-                        },
-                    )
+                progress["processed_files"] += len(artifact_paths)
             else:
                 await _record(
                     store,
                     retrieval_id=job.retrieval_id,
                     stage="artifacts_missing",
                     message=(
-                        f"No artifact files were available for procurement {item.registry_number}."
+                        f"No artifact files were available for procurement "
+                        f"{item.registry_number}."
                     ),
                     progress=progress,
                     items=items_payload,
@@ -307,21 +333,152 @@ async def _process_job(
                     status="in_progress",
                     payload={"purchase_id": item.registry_number},
                 )
-
-            progress["processed_purchases"] = item_index
+        except Exception as exc:
             await _record(
                 store,
                 retrieval_id=job.retrieval_id,
-                stage="purchase_processed",
+                stage="purchase_failed",
                 message=(
-                    f"Processed procurement {item.registry_number} "
-                    f"[{item_index}/{total_items}]."
+                    f"Failed to process procurement {item.registry_number}: {exc}"
                 ),
                 progress=progress,
                 items=items_payload,
                 prepared_documents=prepared_payload,
                 status="in_progress",
-                payload={"purchase_id": item.registry_number},
+                level="error",
+                payload={
+                    "purchase_id": item.registry_number,
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+        item = await _refresh_item_summary(item)
+        item = await _upsert_catalog_item(item)
+        processed_registries.add(item.registry_number)
+        progress["processed_purchases"] = len(processed_registries)
+        await _record(
+            store,
+            retrieval_id=job.retrieval_id,
+            stage="purchase_processed",
+            message=(
+                f"Processed procurement {item.registry_number} "
+                f"[{progress['processed_purchases']}/{max(total_purchases, len(items_payload))}]."
+            ),
+            progress=progress,
+            items=items_payload,
+            prepared_documents=prepared_payload,
+            status="in_progress",
+            payload={"purchase_id": item.registry_number},
+        )
+
+    async def _process_discovered_batch(
+        batch_items: list[PurchaseSearchItem],
+        batch_meta: dict[str, Any],
+    ) -> None:
+        if not batch_items:
+            return
+        await _record(
+            store,
+            retrieval_id=job.retrieval_id,
+            stage="crawler_query_batch",
+            message=(
+                f"Prepared {len(batch_items)} new procurement record(s) "
+                f"from search [{batch_meta.get('current')}/{batch_meta.get('total')}]."
+            ),
+            progress=progress,
+            items=items_payload,
+            prepared_documents=prepared_payload,
+            status="in_progress",
+            payload=batch_meta,
+        )
+        for batch_offset, batch_item in enumerate(batch_items, start=1):
+            try:
+                current_purchase = len(processed_registries) + 1
+                total_purchases = max(len(items_payload), current_purchase)
+                await _process_purchase_item(
+                    item=batch_item,
+                    current_purchase=current_purchase,
+                    total_purchases=total_purchases,
+                )
+            except Exception as exc:
+                await _record(
+                    store,
+                    retrieval_id=job.retrieval_id,
+                    stage="purchase_failed",
+                    message=(
+                        f"Unexpected batch processing failure for procurement "
+                        f"{batch_item.registry_number}: {exc}"
+                    ),
+                    progress=progress,
+                    items=items_payload,
+                    prepared_documents=prepared_payload,
+                    status="in_progress",
+                    level="error",
+                    payload={
+                        "purchase_id": batch_item.registry_number,
+                        "batch_offset": batch_offset,
+                        "error": str(exc),
+                        "error_type": exc.__class__.__name__,
+                        **batch_meta,
+                    },
+                )
+                processed_registries.add(batch_item.registry_number)
+                progress["processed_purchases"] = len(processed_registries)
+
+    def _batch_discovered(batch_items: list[PurchaseSearchItem], batch_meta: dict[str, Any]) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            _process_discovered_batch(batch_items, dict(batch_meta)),
+            loop,
+        )
+        try:
+            future.result()
+        except Exception as exc:
+            _sync_record(
+                stage="crawler_batch_failed",
+                message=f"Failed to process crawler batch: {exc}",
+                payload={
+                    **batch_meta,
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+                level="error",
+            )
+
+    await _record(
+        store,
+        retrieval_id=job.retrieval_id,
+        stage="starting",
+        message="Background procurement retrieval started.",
+        progress=progress,
+        items=items_payload,
+        prepared_documents=prepared_payload,
+        status="in_progress",
+    )
+
+    try:
+        resolved_urls, items = await asyncio.to_thread(
+            deps.purchase_adapter.search,
+            search_url=request_payload.get("search_url"),
+            query_texts=request_payload.get("query_texts"),
+            downloads_dir=str(workspace.downloads_dir),
+            max_pages=request_payload.get("max_pages"),
+            progress_callback=_crawler_progress,
+            item_callback=_item_discovered,
+            batch_callback=_batch_discovered,
+        )
+        for item in items:
+            if item.registry_number not in items_by_registry:
+                _store_item_payload(item)
+        progress["total_queries"] = max(progress["total_queries"], len(resolved_urls))
+        progress["completed_queries"] = max(progress["completed_queries"], len(resolved_urls))
+        progress["total_purchases"] = max(progress["total_purchases"], len(items_payload))
+        for item in items:
+            if item.registry_number in processed_registries:
+                continue
+            await _process_purchase_item(
+                item=item,
+                current_purchase=len(processed_registries) + 1,
+                total_purchases=max(len(items_payload), len(items)),
             )
 
         await _record(

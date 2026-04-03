@@ -21,6 +21,8 @@ class RetrievalProgressState(TypedDict):
 
 
 class SalesLeadAgentState(AgentState):
+    conversation_id: NotRequired[str | None]
+    default_index_id: NotRequired[str | None]
     active_retrieval_id: NotRequired[str | None]
     active_retrieval_request_hash: NotRequired[str | None]
     active_retrieval_run_id: NotRequired[str | None]
@@ -33,7 +35,12 @@ class SalesLeadAgentState(AgentState):
     index_id: NotRequired[str | None]
     turn_tool_usage: NotRequired[list[dict[str, Any]]]
     purchase_search_result: NotRequired[dict[str, Any] | None]
+    last_purchase_lookup_result: NotRequired[dict[str, Any] | None]
     last_doc_search_result: NotRequired[dict[str, Any] | None]
     prepared_documents: NotRequired[list[dict[str, Any]]]
+    pending_crawl_request: NotRequired[dict[str, Any] | None]
+    pending_crawl_reason: NotRequired[str | None]
+    pending_crawl_request_hash: NotRequired[str | None]
+    pending_crawl_query_preview: NotRequired[list[str] | None]
     normalized_final_answer: NotRequired[dict[str, Any]]
     turn_validation: NotRequired[dict[str, Any]]
