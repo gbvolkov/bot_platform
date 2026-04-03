@@ -21,8 +21,6 @@ from langgraph.config import get_stream_writer
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import interrupt
-
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler
 
@@ -47,8 +45,6 @@ from .logic import (
     evaluate_hitl_gate,
     infer_client_intent,
     infer_customer_temperature,
-    is_affirmative,
-    is_negative,
     merge_flags,
     merge_slots,
     normalize_provisional_recommendations,
@@ -1338,7 +1334,7 @@ def create_answer_plan_node(answer_planner, docs_client: GazDocumentsClient):
             has_material_candidates=bool(state.get("material_candidates")),
             has_material_reads=bool(state.get("material_reads")),
         )
-        needs_hitl = False
+        auto_deep_research = False
         hitl_reason = None
         if structured and hitl_gate["needs_hitl_wait_confirmation"]:
             try:
@@ -1350,11 +1346,20 @@ def create_answer_plan_node(answer_planner, docs_client: GazDocumentsClient):
                     competitor=clean_text((state.get("slots") or {}).get("competitor")),
                 )
                 research_status.update(estimate)
-                needs_hitl = bool(estimate.get("requires_hitl_wait_confirmation")) and not state.get("research_wait_rejected")
+                auto_deep_research = bool(estimate.get("requires_hitl_wait_confirmation"))
                 hitl_reason = clean_text(estimate.get("rationale")) or None
             except Exception as exc:
                 LOG.warning("Research cost estimation failed: %s", exc)
                 warnings.append(_runtime_warning("gaz:answer_planner", "estimate_research_cost_failed", str(exc)))
+
+        retry_instruction = ""
+        if auto_deep_research:
+            retry_instruction = (
+                "Decide autonomously whether to answer now or continue collecting evidence. "
+                "Do not ask the user to wait or for permission to do deeper research. "
+                "If current confirmed facts already support a useful draft, deliver it now. "
+                "Otherwise continue using the available tools until you can produce the requested answer."
+            )
 
         allowed_tool_names = build_allowed_tool_names(current_intent, answer_depth, work_mode)
         research_layer = derive_research_layer(
@@ -1386,10 +1391,10 @@ def create_answer_plan_node(answer_planner, docs_client: GazDocumentsClient):
             "hitl_blocked_by_first_turn_budget": bool(hitl_gate.get("hitl_blocked_by_first_turn_budget")),
             "hitl_blocked_by_missing_prior_search": bool(hitl_gate.get("hitl_blocked_by_missing_prior_search")),
             "hitl_trigger_kind": hitl_gate.get("hitl_trigger_kind"),
-            "needs_hitl_wait_confirmation": needs_hitl,
+            "needs_hitl_wait_confirmation": False,
             "hitl_reason": hitl_reason,
             "allowed_tool_names": allowed_tool_names,
-            "llm_retry_instruction": "",
+            "llm_retry_instruction": retry_instruction,
             "runtime_warnings": _merge_runtime_warnings(state, warnings),
         }
 
@@ -1397,40 +1402,7 @@ def create_answer_plan_node(answer_planner, docs_client: GazDocumentsClient):
 
 
 def route_after_answer_plan(state: GazAgentState) -> str:
-    if state.get("needs_hitl_wait_confirmation"):
-        return "hitl_wait"
     return "sales_response"
-
-
-
-def hitl_wait_node(state: GazAgentState, config: RunnableConfig, runtime: Runtime) -> GazAgentState:
-    locale = resolve_locale(state.get("locale"))
-    trigger_kind = clean_text(state.get("hitl_trigger_kind")) or "deep_comparison_wait"
-    question_key = f"{trigger_kind}_question"
-    content_key = f"{trigger_kind}_content"
-    payload = {
-        "type": "choice",
-        "question": get_text(locale, question_key),
-        "content": get_text(locale, content_key),
-    }
-    user_response = interrupt(payload)
-    user_response_text = str(user_response or "")
-    approved = is_affirmative(user_response_text)
-    rejected = is_negative(user_response_text)
-    answer_depth = state.get("answer_depth") or "bounded"
-    return {
-        "messages": [HumanMessage(content=user_response_text)],
-        "needs_hitl_wait_confirmation": False,
-        "research_wait_approved": approved,
-        "research_wait_rejected": rejected,
-        "answer_depth": answer_depth,
-        "stage": derive_work_mode(state.get("current_client_intent") or "overview", answer_depth),
-        "research_status": {
-            **dict(state.get("research_status") or {}),
-            "wait_confirmation_response": user_response_text,
-            "wait_confirmation_granted": approved,
-        },
-    }
 
 
 def create_sales_response_node(sales_response_agent, sales_continue_agent):
@@ -1719,7 +1691,6 @@ def initialize_agent(
     builder.add_node("opening", opening_node)
     builder.add_node("turn_intent", create_turn_intent_node(turn_intent_extractor))
     builder.add_node("answer_plan", create_answer_plan_node(answer_planner, docs_client))
-    builder.add_node("hitl_wait", hitl_wait_node)
     builder.add_node("sales_response", create_sales_response_node(sales_response_agent, sales_continue_agent))
     builder.add_node("response_finalize", create_response_finalize_node(validator, repair_agent))
 
@@ -1736,15 +1707,7 @@ def initialize_agent(
     builder.add_edge("reset", END)
     builder.add_edge("opening", END)
     builder.add_edge("turn_intent", "answer_plan")
-    builder.add_conditional_edges(
-        "answer_plan",
-        route_after_answer_plan,
-        {
-            "hitl_wait": "hitl_wait",
-            "sales_response": "sales_response",
-        },
-    )
-    builder.add_edge("hitl_wait", "sales_response")
+    builder.add_edge("answer_plan", "sales_response")
     builder.add_edge("sales_response", "response_finalize")
     builder.add_edge("response_finalize", END)
 
