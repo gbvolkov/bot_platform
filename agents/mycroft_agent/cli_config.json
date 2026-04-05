@@ -1,0 +1,84 @@
+{
+  "system_prompt": {
+    "type": "gaz_mycroft",
+    "locale": "en",
+    "pricing_subagent": "gaz_pricing_bi",
+    "web_tool": "web_search",
+    "store_tool": "store_artifact_tool",
+    "maps_search_tool": "maps_search_places",
+    "maps_route_tool": "maps_compute_routes",
+    "vin_decode_tool": "nhtsa_decode_vin",
+    "recall_lookup_tool": "nhtsa_search_recalls",
+    "gmail_draft_tool": "gmail_create_draft",
+    "gmail_send_tool": "gmail_send_message",
+    "enable_web_search": true
+  },
+  "agents": [
+    "gaz_pricing_bi"
+  ],
+  "internal_tools": [
+    {
+      "name": "web_search",
+      "max_results": 5,
+      "summarize": true
+    },
+    "store_artifact_tool"
+  ],
+  "deepagents": {
+    "interrupt_on": {
+      "gmail_send_message": {
+        "allowed_decisions": [
+          "approve",
+          "edit",
+          "reject"
+        ],
+        "description": "Review outbound Gmail send before execution."
+      }
+    }
+  },
+  "mcp": {
+    "tool_name_prefix": true,
+    "servers": [
+      {
+        "name": "maps",
+        "transport": "http",
+        "url": "https://mapstools.googleapis.com/mcp",
+        "headers": {
+          "X-Goog-Api-Key": "${GOOGLE_MAPS_GROUNDING_LITE_API_KEY}"
+        },
+        "tools": [
+          "search_places",
+          "compute_routes"
+        ]
+      },
+      {
+        "name": "gmail",
+        "transport": "stdio",
+        "command": "npx",
+        "args": [
+          "@shinzolabs/gmail-mcp"
+        ],
+        "env": {
+          "CLIENT_ID": "${GMAIL_MCP_CLIENT_ID}",
+          "CLIENT_SECRET": "${GMAIL_MCP_CLIENT_SECRET}",
+          "REFRESH_TOKEN": "${GMAIL_MCP_REFRESH_TOKEN}",
+          "TELEMETRY_ENABLED": "false"
+        },
+        "tools": [
+          "create_draft",
+          "send_message"
+        ]
+      },
+      {
+        "name": "nhtsa",
+        "transport": "http",
+        "url": "https://nhtsa.caseyjhand.com/mcp",
+        "tool_name_prefix": false,
+        "tools": [
+          "nhtsa_decode_vin",
+          "nhtsa_search_recalls"
+        ]
+      }
+    ]
+  }
+}
