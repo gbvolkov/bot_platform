@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +22,14 @@ from agents.mycroft_agent.cli_config import (
     select_mcp_tools,
     validate_required_environment,
 )
+
+
+@dataclass(frozen=True)
+class _FakeDefinition:
+    id: str
+    name: str
+    description: str
+    is_active: bool = False
 
 
 def test_load_cli_config_reads_required_sections(tmp_path):
@@ -94,6 +104,55 @@ def test_load_cli_config_reads_required_sections(tmp_path):
     assert "gmail_send_message" in config.system_prompt
 
 
+def test_load_cli_config_reads_system_prompt_from_file(tmp_path):
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("Mycroft file prompt", encoding="utf-8")
+    config_path = tmp_path / "mycroft.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": {
+                    "type": "file",
+                    "path": "prompt.txt",
+                },
+                "agents": ["simple_agent"],
+                "internal_tools": [],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_cli_config(config_path)
+
+    assert config.system_prompt == "Mycroft file prompt"
+    assert config.agents == ("simple_agent",)
+
+
+def test_new_config_includes_default_user_id():
+    thread_id, run_config = cli._new_config("thread-123")
+
+    assert thread_id == "thread-123"
+    assert run_config == {
+        "configurable": {
+            "thread_id": "thread-123",
+            "user_id": "mycroft-agent-cli",
+        }
+    }
+
+
+def test_normalize_subagent_input_wraps_human_message_text():
+    payload = {
+        "messages": [
+            cli.HumanMessage(content="plain text"),
+        ]
+    }
+
+    normalized = cli._normalize_subagent_input(payload)
+
+    assert normalized["messages"][0].content == [{"type": "text", "text": "plain text"}]
+
+
 def test_build_internal_tools_flattens_bundle_builders():
     specs = (
         InternalToolSpec(name="single", params={}),
@@ -155,6 +214,33 @@ def test_default_cli_config_uses_gaz_pricing_bi_and_requested_tools():
         "allowed_decisions": ["approve", "edit", "reject"],
         "description": "Review outbound Gmail send before execution.",
     }
+
+
+def test_ingos_products_cli_config_loads_explicit_agents_and_idea_check():
+    config = load_cli_config(
+        Path("C:/Projects/bot_platform/agents/mycroft_agent/ingos_products_cli_config.json")
+    )
+
+    assert config.agents == (
+        "product_Car",
+        "product_Household",
+        "product_Personal",
+        "product_Tick Bite",
+        "product_Инголаб",
+        "product_Инголаб ПДФ",
+        "product_Инголаб ППТХ",
+        "product_Овертайм",
+        "product_Юридическая помощь",
+    )
+    assert config.internal_tools == (
+        InternalToolSpec(name="web_search", params={"max_results": 5, "summarize": True}),
+    )
+    assert "product_Car" in config.system_prompt
+    assert "idea_check" in config.system_prompt
+    assert tuple(server.name for server in config.mcp.servers) == ("idea_reality",)
+    assert config.mcp.servers[0].connection["command"] == "uvx"
+    assert config.mcp.servers[0].tool_name_prefix is False
+    assert config.mcp.servers[0].tools == ("idea_check",)
 
 
 def test_required_environment_variables_include_default_runtime_requirements():
@@ -254,6 +340,34 @@ def test_load_mcp_tools_from_config_fails_on_unresolved_environment_variable(mon
         asyncio.run(load_mcp_tools_from_config(config))
 
     assert str(exc_info.value) == "MCP server 'maps' requires environment variable 'MISSING_TOKEN'."
+
+
+def test_load_mcp_tools_from_config_surfaces_idea_reality_startup_error(monkeypatch):
+    async def fake_load_mcp_tools(_session, *, connection, server_name, tool_name_prefix):
+        raise RuntimeError(f"Failed to start MCP server {server_name}")
+
+    monkeypatch.setattr("agents.mycroft_agent.cli_config.load_mcp_tools", fake_load_mcp_tools)
+
+    config = MCPConfig(
+        tool_name_prefix=True,
+        servers=(
+            MCPServerSpec(
+                name="idea_reality",
+                connection={
+                    "transport": "stdio",
+                    "command": "uvx",
+                    "args": ["idea-reality-mcp"],
+                },
+                tools=("idea_check",),
+                tool_name_prefix=False,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(load_mcp_tools_from_config(config))
+
+    assert str(exc_info.value) == "Failed to start MCP server idea_reality"
 
 
 def test_cli_invoke_turn_resumes_after_hitl_approve(monkeypatch):
@@ -413,3 +527,56 @@ def test_cli_invoke_turn_resumes_after_hitl_reject(monkeypatch):
             }
         ]
     }
+
+
+def test_initialize_registry_subagents_accepts_inactive_explicit_agents(monkeypatch):
+    class FakeAgent:
+        pass
+
+    fake_agent = FakeAgent()
+
+    class FakeRegistry:
+        _definitions = {
+            "product_Household": _FakeDefinition(
+                id="product_Household",
+                name="Household",
+                description="Inactive product expert.",
+                is_active=False,
+            )
+        }
+
+        async def ensure_agent_ready(self, agent_id):
+            assert agent_id == "product_Household"
+            return True
+
+        def get_agent(self, agent_id):
+            assert agent_id == "product_Household"
+            return fake_agent
+
+    monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
+
+    subagents = asyncio.run(cli._initialize_registry_subagents(("product_Household",)))
+
+    assert len(subagents) == 1
+    assert subagents[0]["name"] == "product_Household"
+    assert subagents[0]["description"] == "Household. Inactive product expert."
+    assert isinstance(subagents[0]["runnable"], cli._SubagentInputAdapter)
+    assert subagents[0]["runnable"]._runnable is fake_agent
+
+
+def test_initialize_registry_subagents_fails_on_unknown_explicit_agent(monkeypatch):
+    class FakeRegistry:
+        _definitions = {}
+
+        async def ensure_agent_ready(self, agent_id):
+            raise AssertionError("ensure_agent_ready should not be called for unknown agents")
+
+        def get_agent(self, agent_id):
+            raise AssertionError("get_agent should not be called for unknown agents")
+
+    monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
+
+    with pytest.raises(ValueError) as exc_info:
+        asyncio.run(cli._initialize_registry_subagents(("product_Unknown",)))
+
+    assert "Unknown registry agent 'product_Unknown'" in str(exc_info.value)

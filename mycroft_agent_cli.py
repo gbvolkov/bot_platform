@@ -32,6 +32,7 @@ DEFAULT_PROMPTS_DIR = Path("./prompts")
 DEFAULT_AGENT_LOCALE = {
     "save_confirmation": "[You can now download the file.]({url})"
 }
+DEFAULT_CLI_USER_ID = "mycroft-agent-cli"
 
 
 def _parse_provider(raw_value: str) -> ModelType:
@@ -102,7 +103,12 @@ def _parse_args() -> argparse.Namespace:
 
 def _new_config(thread_id: Optional[str] = None) -> tuple[str, dict[str, Any]]:
     resolved_thread_id = thread_id or f"mycroft-agent-cli-{uuid.uuid4().hex}"
-    return resolved_thread_id, {"configurable": {"thread_id": resolved_thread_id}}
+    return resolved_thread_id, {
+        "configurable": {
+            "thread_id": resolved_thread_id,
+            "user_id": DEFAULT_CLI_USER_ID,
+        }
+    }
 
 
 def _resolve_system_prompt_path(raw_path: str) -> Path:
@@ -147,6 +153,55 @@ def _extract_last_ai_text(result: dict[str, Any]) -> str:
                             parts.append(text)
                 return "\n".join(parts).strip()
     return ""
+
+
+def _normalize_subagent_message(message: Any) -> Any:
+    if isinstance(message, HumanMessage) and isinstance(message.content, str):
+        return message.model_copy(
+            update={"content": [{"type": "text", "text": message.content}]}
+        )
+
+    if isinstance(message, dict):
+        role = str(message.get("role") or message.get("type") or "").strip().lower()
+        content = message.get("content")
+        if role in {"user", "human"} and isinstance(content, str):
+            normalized = dict(message)
+            normalized["content"] = [{"type": "text", "text": content}]
+            return normalized
+
+    return message
+
+
+def _normalize_subagent_input(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return payload
+
+    normalized_messages = [_normalize_subagent_message(message) for message in messages]
+    normalized_payload = dict(payload)
+    normalized_payload["messages"] = normalized_messages
+    return normalized_payload
+
+
+class _SubagentInputAdapter:
+    def __init__(self, runnable: Any):
+        self._runnable = runnable
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runnable, name)
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        return self._runnable.invoke(
+            _normalize_subagent_input(input), config=config, **kwargs
+        )
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        return await self._runnable.ainvoke(
+            _normalize_subagent_input(input), config=config, **kwargs
+        )
 
 
 def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -413,7 +468,7 @@ async def _initialize_registry_subagents(agent_ids: tuple[str, ...]) -> list[dic
         return {
             "name": definition.id,
             "description": f"{definition.name}. {definition.description}",
-            "runnable": instance,
+            "runnable": _SubagentInputAdapter(instance),
         }
 
     return await asyncio.gather(*(load_one(agent_id) for agent_id in agent_ids))

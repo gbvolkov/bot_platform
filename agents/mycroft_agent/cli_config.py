@@ -80,7 +80,7 @@ def load_cli_config(raw_path: str | Path | None = None) -> MycroftCliConfig:
     if not isinstance(data, dict):
         raise ValueError("Mycroft CLI config must be a JSON object.")
 
-    system_prompt = _parse_system_prompt(data.get("system_prompt"))
+    system_prompt = _parse_system_prompt(data.get("system_prompt"), config_dir=path.parent)
     agents = _parse_agent_ids(data.get("agents") or [])
     internal_tools = _parse_internal_tools(data.get("internal_tools") or [])
     mcp = _parse_mcp_config(data.get("mcp") or {})
@@ -212,7 +212,7 @@ def _parse_agent_ids(value: Any) -> tuple[str, ...]:
     return tuple(_require_str(item, "agents[]") for item in value)
 
 
-def _parse_system_prompt(value: Any) -> str:
+def _parse_system_prompt(value: Any, *, config_dir: Path) -> str:
     if isinstance(value, str):
         return _require_str(value, "system_prompt")
     if not isinstance(value, dict):
@@ -221,10 +221,21 @@ def _parse_system_prompt(value: Any) -> str:
         )
 
     prompt_type = _require_str(value.get("type"), "system_prompt.type")
+    if prompt_type == "file":
+        prompt_path = _require_str(value.get("path"), "system_prompt.path")
+        resolved_prompt_path = Path(prompt_path)
+        if not resolved_prompt_path.is_absolute():
+            resolved_prompt_path = (config_dir / resolved_prompt_path).resolve()
+        if not resolved_prompt_path.is_file():
+            raise FileNotFoundError(
+                f"Mycroft CLI system prompt file not found: {resolved_prompt_path}"
+            )
+        return resolved_prompt_path.read_text(encoding="utf-8")
+
     if prompt_type != "gaz_mycroft":
         raise ValueError(
             "Unsupported Mycroft CLI system prompt type "
-            f"'{prompt_type}'. Supported values: gaz_mycroft"
+            f"'{prompt_type}'. Supported values: file, gaz_mycroft"
         )
 
     locale = str(value.get("locale") or "en")

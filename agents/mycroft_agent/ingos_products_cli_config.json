@@ -1,0 +1,41 @@
+{
+  "system_prompt": {
+    "type": "file",
+    "path": "ingos_products_system_prompt.txt"
+  },
+  "agents": [
+    "product_Car",
+    "product_Household",
+    "product_Personal",
+    "product_Tick Bite",
+    "product_Инголаб",
+    "product_Инголаб ПДФ",
+    "product_Инголаб ППТХ",
+    "product_Овертайм",
+    "product_Юридическая помощь"
+  ],
+  "internal_tools": [
+    {
+      "name": "web_search",
+      "max_results": 5,
+      "summarize": true
+    }
+  ],
+  "mcp": {
+    "tool_name_prefix": true,
+    "servers": [
+      {
+        "name": "idea_reality",
+        "transport": "stdio",
+        "command": "uvx",
+        "args": [
+          "idea-reality-mcp"
+        ],
+        "tool_name_prefix": false,
+        "tools": [
+          "idea_check"
+        ]
+      }
+    ]
+  }
+}
