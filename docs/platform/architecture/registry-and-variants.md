@@ -25,6 +25,9 @@ Each entry in `data/config/bot_service/load.json` can define:
   - `subgraphs`
 - `params`
   - commonly `provider`, `locale`, `checkpoint_saver`, `role`, and implementation-specific keys such as `product`
+  - matching `params` keys are forwarded directly into `initialize_agent(...)`, so agent-specific constructor args such as `system_prompt` or `tools` should be configured here
+- `init_context`
+  - use this for opaque agent-specific context dictionaries such as the `bi_agent` report defaults; `_path` suffixed keys are loaded from files before the dict is passed through
 
 ## Configured IDs and implementation mapping
 

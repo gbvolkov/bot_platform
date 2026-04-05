@@ -9,7 +9,7 @@ Interactive drafting agent for user-defined artifacts. It captures a prompt, gen
 ## Entry module and initialization
 
 - Implementation: `agents/artifact_creator_agent/agent.py`
-- Contract: exposes `initialize_agent(provider, use_platform_store, locale, checkpoint_saver)`
+- Contract: exposes `initialize_agent(provider, use_platform_store, locale, checkpoint_saver, tools=None, system_prompt=None)`
 - Registry variant: `artifact_creator_agent`
 
 ## State graph / phases / routing
@@ -27,12 +27,15 @@ The `run` node uses a LangChain agent with a commit tool. A second confirmation 
 ## Inputs, context, and attachments
 
 - Primary input is the user-defined system prompt and subsequent revision feedback.
+- A fixed `system_prompt` can be injected through `initialize_agent(...)`; when provided there, runtime context prompt settings are ignored.
 - No attachment support is declared in the registry.
 - Uses conversation memory or the injected checkpoint saver.
 
 ## Tools and integrations
 
 - `commit_artifact_final_text`
+- optional extra tools passed through `initialize_agent(..., tools=[...])`
+- optional fixed prompt passed through `initialize_agent(..., system_prompt="...")`
 - `agents/store_artifacts.py`
 - `platform_utils/llm_logger.JSONFileTracer`
 - optional Langfuse callbacks

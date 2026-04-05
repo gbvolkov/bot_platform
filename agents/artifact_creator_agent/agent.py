@@ -76,16 +76,17 @@ def route(state: ArtifactCreatorAgentState) -> str:
     
     return state.get("phase")
 
-def create_greetings_node():
+def create_greetings_node(initial_system_prompt: Any | None = None):
 
     def greetings_node(
         state: ArtifactCreatorAgentState,
         config: RunnableConfig,
         runtime: Runtime[ArtifactCreatorAgentContext],
     ) -> ArtifactCreatorAgentState:
-        system_prompt = None
-        if runtime.context and runtime.context.get("system_prompt"):
+        system_prompt = initial_system_prompt
+        if system_prompt is None and runtime.context and runtime.context.get("system_prompt"):
             system_prompt = runtime.context["system_prompt"]
+        if system_prompt is not None and not state.get("system_prompt"):
             state["system_prompt"] = system_prompt
             state["phase"] = "cleanup"
 
@@ -157,28 +158,33 @@ def cleanup_messages_node(
         "phase" : "run"
     }
 
-def _build_run_agent(model: BaseChatModel):
+def _build_run_agent(
+    model: BaseChatModel,
+    tools: List[Any] | None = None,
+    system_prompt: Any | None = None,
+):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
         state: ArtifactCreatorAgentState = request.state
-        system_prompt = state.get("system_prompt")
-        if system_prompt:
-            if not isinstance(system_prompt, str):
+        resolved_system_prompt = state.get("system_prompt", system_prompt)
+        if resolved_system_prompt:
+            if not isinstance(resolved_system_prompt, str):
                 try:
-                    system_prompt = extract_text(HumanMessage(content=system_prompt))
+                    resolved_system_prompt = extract_text(HumanMessage(content=resolved_system_prompt))
                 except Exception:
-                    system_prompt = str(system_prompt)
-            return f"{system_prompt}\n\n{СOMMIT_TOOL_PROMPT_RU}"
+                    resolved_system_prompt = str(resolved_system_prompt)
+            return f"{resolved_system_prompt}\n\n{СOMMIT_TOOL_PROMPT_RU}"
         return DEFAULT_SYSTEM_PROMPT_RU
 
     return create_agent(
         model=model,
-        tools=[commit_artifact_final_text],
+        tools=[commit_artifact_final_text] + (tools or []),
         middleware=[build_prompt],
         state_schema=ArtifactCreatorAgentState,
         context_schema=ArtifactCreatorAgentContext,
     )
-    
+
+
 #def create_run_node(model: BaseChatModel):
 #    _run_agent = _build_run_agent(model)
 #    def run_node(
@@ -332,6 +338,8 @@ def initialize_agent(
     use_platform_store: bool = False,
     locale: str = "en",
     checkpoint_saver=None,
+    tools: List[Any] | None = None,
+    system_prompt: Any | None = None,
 ):
     #set_locale(locale)
     #set_models_locale(locale)
@@ -352,10 +360,10 @@ def initialize_agent(
     response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0, streaming=False)
     
     builder = StateGraph(ArtifactCreatorAgentState)
-    builder.add_node("greetings", create_greetings_node())
+    builder.add_node("greetings", create_greetings_node(system_prompt))
     builder.add_node("set_prompt", create_set_prompt_node(llm))
     builder.add_node("cleanup", cleanup_messages_node)
-    builder.add_node("run", _build_run_agent(llm))
+    builder.add_node("run", _build_run_agent(llm, tools, system_prompt))
     builder.add_node("confirm", create_confirmation_node(response_analyser_llm))
     builder.add_node("final_print", final_print_node)
     builder.add_node("ready", ready_node)
