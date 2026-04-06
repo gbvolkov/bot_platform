@@ -5,9 +5,11 @@ import asyncio
 import json
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from deepagents.middleware.subagents import CompiledSubAgent
 from agents.mycroft_agent.agent import VALID_MODEL_SIZES, initialize_agent
 from agents.mycroft_agent.cli_config import (
     DEFAULT_CLI_CONFIG_PATH,
@@ -28,6 +30,7 @@ HELP_COMMANDS = {"help", "/help"}
 MULTILINE_START_COMMANDS = {"/multi", "/multiline", "<<<"}
 MULTILINE_END_COMMANDS = {"/send", "/end", ">>>"}
 MULTILINE_CANCEL_COMMANDS = {"/cancel", "/abort"}
+SAVE_THREAD_COMMANDS = {"/save-thread", "/save"}
 DEFAULT_PROMPTS_DIR = Path("./prompts")
 DEFAULT_AGENT_LOCALE = {
     "save_confirmation": "[You can now download the file.]({url})"
@@ -98,6 +101,11 @@ def _parse_args() -> argparse.Namespace:
         default=0.2,
         help="Sampling temperature passed to get_llm.",
     )
+    parser.add_argument(
+        "--save-thread",
+        default=None,
+        help="Optional path to save the current conversation thread after the run (.md by default, .json also supported).",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +117,113 @@ def _new_config(thread_id: Optional[str] = None) -> tuple[str, dict[str, Any]]:
             "user_id": DEFAULT_CLI_USER_ID,
         }
     }
+
+
+def _normalize_export_path(raw_path: str | None, *, thread_id: str) -> Path:
+    if raw_path and raw_path.strip():
+        candidate = Path(raw_path.strip()).expanduser()
+        if not candidate.suffix:
+            candidate = candidate.with_suffix(".md")
+    else:
+        candidate = Path.cwd() / f"{thread_id}.md"
+
+    if not candidate.is_absolute():
+        candidate = (Path.cwd() / candidate).resolve()
+    return candidate
+
+
+def _thread_export_payload(
+    *,
+    thread_id: str,
+    config_path: str,
+    provider: str,
+    model_size: str,
+    turns: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "config_path": config_path,
+        "provider": provider,
+        "model_size": model_size,
+        "turns": turns,
+    }
+
+
+def _render_thread_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Mycroft Conversation Thread",
+        "",
+        f"- Thread id: `{payload['thread_id']}`",
+        f"- Saved at (UTC): `{payload['saved_at']}`",
+        f"- Config: `{payload['config_path']}`",
+        f"- Provider: `{payload['provider']}`",
+        f"- Model size: `{payload['model_size']}`",
+        "",
+    ]
+    turns = payload.get("turns") or []
+    if not turns:
+        lines.append("_No conversation turns recorded._")
+        lines.append("")
+        return "\n".join(lines)
+
+    for index, turn in enumerate(turns, start=1):
+        lines.extend(
+            [
+                f"## Turn {index}",
+                "",
+                "User:",
+                "",
+                "```text",
+                str(turn.get("user", "")),
+                "```",
+                "",
+                "Mycroft:",
+                "",
+                "```text",
+                str(turn.get("assistant", "")),
+                "```",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _save_thread_export(
+    *,
+    path: Path,
+    thread_id: str,
+    config_path: str,
+    provider: str,
+    model_size: str,
+    turns: list[dict[str, str]],
+) -> Path:
+    payload = _thread_export_payload(
+        thread_id=thread_id,
+        config_path=config_path,
+        provider=provider,
+        model_size=model_size,
+        turns=turns,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() == ".json":
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        path.write_text(_render_thread_markdown(payload), encoding="utf-8")
+    return path
+
+
+def _parse_save_thread_command(user_input: str) -> str | None:
+    stripped = user_input.strip()
+    if not stripped:
+        return None
+
+    parts = stripped.split(maxsplit=1)
+    if parts[0].lower() not in SAVE_THREAD_COMMANDS:
+        return None
+    if len(parts) == 1:
+        return ""
+    return parts[1].strip()
 
 
 def _resolve_system_prompt_path(raw_path: str) -> Path:
@@ -153,55 +268,6 @@ def _extract_last_ai_text(result: dict[str, Any]) -> str:
                             parts.append(text)
                 return "\n".join(parts).strip()
     return ""
-
-
-def _normalize_subagent_message(message: Any) -> Any:
-    if isinstance(message, HumanMessage) and isinstance(message.content, str):
-        return message.model_copy(
-            update={"content": [{"type": "text", "text": message.content}]}
-        )
-
-    if isinstance(message, dict):
-        role = str(message.get("role") or message.get("type") or "").strip().lower()
-        content = message.get("content")
-        if role in {"user", "human"} and isinstance(content, str):
-            normalized = dict(message)
-            normalized["content"] = [{"type": "text", "text": content}]
-            return normalized
-
-    return message
-
-
-def _normalize_subagent_input(payload: Any) -> Any:
-    if not isinstance(payload, dict):
-        return payload
-
-    messages = payload.get("messages")
-    if not isinstance(messages, list):
-        return payload
-
-    normalized_messages = [_normalize_subagent_message(message) for message in messages]
-    normalized_payload = dict(payload)
-    normalized_payload["messages"] = normalized_messages
-    return normalized_payload
-
-
-class _SubagentInputAdapter:
-    def __init__(self, runnable: Any):
-        self._runnable = runnable
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._runnable, name)
-
-    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        return self._runnable.invoke(
-            _normalize_subagent_input(input), config=config, **kwargs
-        )
-
-    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        return await self._runnable.ainvoke(
-            _normalize_subagent_input(input), config=config, **kwargs
-        )
 
 
 def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -426,6 +492,7 @@ def _print_help() -> None:
     print("  /help   show commands")
     print("  /list-tools  show available internal tool names for the config")
     print("  /multi  enter multiline mode")
+    print("  /save-thread [path]  save the current thread to a file (.md by default, .json also supported)")
     print("  /reset  start a fresh thread")
     print("  /exit   leave the CLI")
 
@@ -446,10 +513,10 @@ def _collect_multiline_input() -> Optional[str]:
     return "\n".join(lines).strip()
 
 
-async def _initialize_registry_subagents(agent_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+async def _initialize_registry_subagents(agent_ids: tuple[str, ...]) -> list[CompiledSubAgent]:
     from bot_service.agent_registry import agent_registry
 
-    async def load_one(agent_id: str) -> dict[str, Any]:
+    async def load_one(agent_id: str) -> CompiledSubAgent:
         definitions = getattr(agent_registry, "_definitions", {})
         definition = definitions.get(agent_id)
         if definition is None:
@@ -465,11 +532,11 @@ async def _initialize_registry_subagents(agent_ids: tuple[str, ...]) -> list[dic
             await asyncio.sleep(0.01)
 
         instance = agent_registry.get_agent(agent_id)
-        return {
-            "name": definition.id,
-            "description": f"{definition.name}. {definition.description}",
-            "runnable": _SubagentInputAdapter(instance),
-        }
+        return CompiledSubAgent(
+            name=definition.id,
+            description=f"{definition.name}. {definition.description}",
+            runnable=instance,
+        )
 
     return await asyncio.gather(*(load_one(agent_id) for agent_id in agent_ids))
 
@@ -481,15 +548,27 @@ def _tool_name(tool: Any) -> str:
 def _print_runtime_summary(
     *,
     config_path: str,
-    subagents: list[dict[str, Any]],
+    stateless_subagents: list[CompiledSubAgent],
+    stateful_subagents: list[CompiledSubAgent],
     internal_tools: list[Any],
     mcp_tools: list[Any],
 ) -> None:
     print(f"Mycroft config: {config_path}")
-    if subagents:
-        print("Configured subagents: " + ", ".join(agent["name"] for agent in subagents))
+    if stateless_subagents:
+        print(
+            "Configured stateless subagents: "
+            + ", ".join(agent["name"] for agent in stateless_subagents)
+        )
     else:
-        print("Configured subagents: none")
+        print("Configured stateless subagents: none")
+
+    if stateful_subagents:
+        print(
+            "Configured stateful subagents: "
+            + ", ".join(agent["name"] for agent in stateful_subagents)
+        )
+    else:
+        print("Configured stateful subagents: none")
 
     all_tool_names = [_tool_name(tool) for tool in [*internal_tools, *mcp_tools]]
     if all_tool_names:
@@ -516,7 +595,12 @@ def main() -> int:
 
         with asyncio.Runner() as runner:
             try:
-                subagents = runner.run(_initialize_registry_subagents(cli_config.agents))
+                stateless_subagents = runner.run(
+                    _initialize_registry_subagents(cli_config.subagents.stateless)
+                )
+                stateful_subagents = runner.run(
+                    _initialize_registry_subagents(cli_config.subagents.stateful)
+                )
                 internal_tools = build_internal_tools(cli_config.internal_tools)
                 mcp_tools = runner.run(load_mcp_tools_from_config(cli_config.mcp))
                 agent = initialize_agent(
@@ -525,13 +609,15 @@ def main() -> int:
                     temperature=args.temperature,
                     system_prompt=system_prompt,
                     tools=[*internal_tools, *mcp_tools],
-                    subagents=subagents,
+                    stateless_subagents=stateless_subagents,
+                    stateful_subagents=stateful_subagents,
                     streaming=False,
                     interrupt_on=cli_config.deepagents.interrupt_on or None,
                 )
 
                 thread_id, run_config = _new_config(args.thread_id)
                 prompt = " ".join(args.prompt).strip()
+                current_turns: list[dict[str, str]] = []
 
                 if prompt:
                     try:
@@ -540,7 +626,19 @@ def main() -> int:
                         print("Goodbye!")
                         return 0
                     if answer:
+                        current_turns.append({"user": prompt, "assistant": answer})
+                    if answer:
                         print(answer)
+                    if args.save_thread:
+                        saved_path = _save_thread_export(
+                            path=_normalize_export_path(args.save_thread, thread_id=thread_id),
+                            thread_id=thread_id,
+                            config_path=args.config,
+                            provider=provider.value,
+                            model_size=model_size,
+                            turns=current_turns,
+                        )
+                        print(f"Thread saved to: {saved_path}")
                     return 0
 
                 print(
@@ -548,7 +646,8 @@ def main() -> int:
                 )
                 _print_runtime_summary(
                     config_path=args.config,
-                    subagents=subagents,
+                    stateless_subagents=stateless_subagents,
+                    stateful_subagents=stateful_subagents,
                     internal_tools=internal_tools,
                     mcp_tools=mcp_tools,
                 )
@@ -581,6 +680,18 @@ def main() -> int:
                         _print_help()
                         print("")
                         continue
+                    save_thread_path = _parse_save_thread_command(user_input)
+                    if save_thread_path is not None:
+                        saved_path = _save_thread_export(
+                            path=_normalize_export_path(save_thread_path, thread_id=thread_id),
+                            thread_id=thread_id,
+                            config_path=args.config,
+                            provider=provider.value,
+                            model_size=model_size,
+                            turns=current_turns,
+                        )
+                        print(f"Thread saved to: {saved_path}\n")
+                        continue
                     if user_input_lower == "/list-tools":
                         names = ", ".join(list_available_internal_tools())
                         print(f"Available internal tools: {names}\n")
@@ -596,6 +707,7 @@ def main() -> int:
                         user_input = multiline_input
                     elif user_input_lower in RESET_COMMANDS:
                         thread_id, run_config = _new_config()
+                        current_turns = []
                         print(f"Started a fresh thread: {thread_id}\n")
                         continue
 
@@ -609,6 +721,7 @@ def main() -> int:
                         continue
 
                     if answer:
+                        current_turns.append({"user": user_input, "assistant": answer})
                         print(f"\nMycroft: {answer}\n")
             finally:
                 from bot_service.agent_registry import agent_registry

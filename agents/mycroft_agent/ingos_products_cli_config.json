@@ -3,17 +3,20 @@
     "type": "file",
     "path": "ingos_products_system_prompt.txt"
   },
-  "agents": [
-    "product_Car",
-    "product_Household",
-    "product_Personal",
-    "product_Tick Bite",
-    "product_Инголаб",
-    "product_Инголаб ПДФ",
-    "product_Инголаб ППТХ",
-    "product_Овертайм",
-    "product_Юридическая помощь"
-  ],
+  "subagents": {
+    "stateless": [],
+    "stateful": [
+      "product_Car",
+      "product_Household",
+      "product_Personal",
+      "product_Tick Bite",
+      "product_Инголаб",
+      "product_Инголаб ПДФ",
+      "product_Инголаб ППТХ",
+      "product_Овертайм",
+      "product_Юридическая помощь"
+    ]
+  },
   "internal_tools": [
     {
       "name": "web_search",

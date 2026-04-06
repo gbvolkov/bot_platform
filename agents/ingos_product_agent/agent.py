@@ -59,8 +59,33 @@ import time
 ANON_LOG_NAME = f"LLM_requests_log_{time.strftime("%Y%m%d%H%M")}"
 
 
+def _content_parts(content: Any) -> List[dict[str, Any]]:
+    if isinstance(content, list):
+        return [part for part in content if isinstance(part, dict)]
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    parts: List[str] = []
+    for part in _content_parts(content):
+        if part.get("type") != "text":
+            continue
+        text_value = part.get("text")
+        if isinstance(text_value, str) and text_value.strip():
+            parts.append(text_value.strip())
+    return "\n".join(parts).strip()
+
+
 def reset_or_run(state: ProductAgentState, config: RunnableConfig) -> str:
-    if state["messages"][-1].content[0].get("type") == "reset":
+    last_parts = _content_parts(state["messages"][-1].content)
+    if last_parts and last_parts[0].get("type") == "reset":
+        return "reset_memory"
+    if isinstance(state["messages"][-1].content, str) and state["messages"][-1].content.strip().lower() == "reset":
         return "reset_memory"
     else:
         return "default_agent"
@@ -177,7 +202,9 @@ def initialize_agent(
 
             for message in messages:
                 if message.type == "human":
-                    queries.append(message.content[0]["text"])
+                    query_text = _content_text(message.content)
+                    if query_text:
+                        queries.append(query_text)
             
             if anonymizer:
                 with open(f"./logs/{ANON_LOG_NAME}", "a", encoding="utf-8") as f:
@@ -224,13 +251,7 @@ def initialize_agent(
             return state
 
         last_user = messages[last_user_idx]
-        query_parts: List[str] = []
-        for part in getattr(last_user, "content", []):
-            if isinstance(part, dict) and part.get("type") == "text":
-                text_value = part.get("text")
-                if isinstance(text_value, str) and text_value.strip():
-                    query_parts.append(text_value.strip())
-        query = "\n".join(query_parts).strip()
+        query = _content_text(getattr(last_user, "content", []))
         if not query:
             query = f"information about product {product}"
 

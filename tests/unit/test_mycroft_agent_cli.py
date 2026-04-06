@@ -15,6 +15,7 @@ from agents.mycroft_agent.cli_config import (
     MCPConfig,
     InternalToolSpec,
     MCPServerSpec,
+    SubagentsConfig,
     build_internal_tools,
     load_cli_config,
     load_mcp_tools_from_config,
@@ -49,18 +50,21 @@ def test_load_cli_config_reads_required_sections(tmp_path):
                     "recall_lookup_tool": "nhtsa_search_recalls",
                     "gmail_draft_tool": "gmail_create_draft",
                     "gmail_send_tool": "gmail_send_message",
-                    "enable_web_search": True
+                    "enable_web_search": True,
                 },
-                "agents": ["simple_agent", "new_ideator"],
+                "subagents": {
+                    "stateless": ["simple_agent", "new_ideator"],
+                    "stateful": ["product_Инголаб"],
+                },
                 "internal_tools": [
                     {"name": "web_search", "max_results": 3, "summarize": False},
-                    "store_artifact_tool"
+                    "store_artifact_tool",
                 ],
                 "deepagents": {
                     "interrupt_on": {
                         "gmail_send_message": {
                             "allowed_decisions": ["approve", "edit", "reject"],
-                            "description": "Review outbound Gmail send before execution."
+                            "description": "Review outbound Gmail send before execution.",
                         }
                     }
                 },
@@ -84,7 +88,10 @@ def test_load_cli_config_reads_required_sections(tmp_path):
 
     assert "gaz_pricing_bi" in config.system_prompt
     assert "store_artifact_tool" in config.system_prompt
-    assert config.agents == ("simple_agent", "new_ideator")
+    assert config.subagents == SubagentsConfig(
+        stateless=("simple_agent", "new_ideator"),
+        stateful=("product_Инголаб",),
+    )
     assert config.internal_tools[0] == InternalToolSpec(
         name="web_search",
         params={"max_results": 3, "summarize": False},
@@ -115,7 +122,10 @@ def test_load_cli_config_reads_system_prompt_from_file(tmp_path):
                     "type": "file",
                     "path": "prompt.txt",
                 },
-                "agents": ["simple_agent"],
+                "subagents": {
+                    "stateless": ["simple_agent"],
+                    "stateful": [],
+                },
                 "internal_tools": [],
                 "mcp": {"tool_name_prefix": True, "servers": []},
             }
@@ -126,7 +136,30 @@ def test_load_cli_config_reads_system_prompt_from_file(tmp_path):
     config = load_cli_config(config_path)
 
     assert config.system_prompt == "Mycroft file prompt"
-    assert config.agents == ("simple_agent",)
+    assert config.subagents == SubagentsConfig(
+        stateless=("simple_agent",),
+        stateful=(),
+    )
+
+
+def test_load_cli_config_rejects_legacy_agents_field(tmp_path):
+    config_path = tmp_path / "mycroft.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": "Prompt",
+                "agents": ["legacy_agent"],
+                "internal_tools": [],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_cli_config(config_path)
+
+    assert "field 'agents' is no longer supported" in str(exc_info.value)
 
 
 def test_new_config_includes_default_user_id():
@@ -141,16 +174,58 @@ def test_new_config_includes_default_user_id():
     }
 
 
-def test_normalize_subagent_input_wraps_human_message_text():
-    payload = {
-        "messages": [
-            cli.HumanMessage(content="plain text"),
-        ]
-    }
+def test_parse_save_thread_command_supports_alias_and_optional_path():
+    assert cli._parse_save_thread_command("/save-thread") == ""
+    assert cli._parse_save_thread_command("/save-thread logs/thread.md") == "logs/thread.md"
+    assert cli._parse_save_thread_command("/save export.json") == "export.json"
+    assert cli._parse_save_thread_command("/reset") is None
 
-    normalized = cli._normalize_subagent_input(payload)
 
-    assert normalized["messages"][0].content == [{"type": "text", "text": "plain text"}]
+def test_normalize_export_path_defaults_to_markdown_suffix(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert cli._normalize_export_path(None, thread_id="thread-123") == tmp_path / "thread-123.md"
+    assert cli._normalize_export_path("logs/thread", thread_id="thread-123") == tmp_path / "logs" / "thread.md"
+
+
+def test_save_thread_export_writes_markdown(tmp_path):
+    path = tmp_path / "thread.md"
+
+    saved = cli._save_thread_export(
+        path=path,
+        thread_id="thread-123",
+        config_path="config.json",
+        provider="openai",
+        model_size="base",
+        turns=[{"user": "Hello", "assistant": "Hi"}],
+    )
+
+    assert saved == path
+    text = path.read_text(encoding="utf-8")
+    assert "# Mycroft Conversation Thread" in text
+    assert "Thread id: `thread-123`" in text
+    assert "Hello" in text
+    assert "Hi" in text
+
+
+def test_save_thread_export_writes_json(tmp_path):
+    path = tmp_path / "thread.json"
+
+    cli._save_thread_export(
+        path=path,
+        thread_id="thread-123",
+        config_path="config.json",
+        provider="openai",
+        model_size="base",
+        turns=[{"user": "Hello", "assistant": "Hi"}],
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["thread_id"] == "thread-123"
+    assert payload["config_path"] == "config.json"
+    assert payload["provider"] == "openai"
+    assert payload["model_size"] == "base"
+    assert payload["turns"] == [{"user": "Hello", "assistant": "Hi"}]
 
 
 def test_build_internal_tools_flattens_bundle_builders():
@@ -199,7 +274,10 @@ def test_select_mcp_tools_accepts_prefixed_and_raw_names():
 def test_default_cli_config_uses_gaz_pricing_bi_and_requested_tools():
     config = load_cli_config()
 
-    assert config.agents == ("gaz_pricing_bi",)
+    assert config.subagents == SubagentsConfig(
+        stateless=("gaz_pricing_bi",),
+        stateful=(),
+    )
     assert [tool.name for tool in config.internal_tools] == [
         "web_search",
         "store_artifact_tool",
@@ -216,21 +294,24 @@ def test_default_cli_config_uses_gaz_pricing_bi_and_requested_tools():
     }
 
 
-def test_ingos_products_cli_config_loads_explicit_agents_and_idea_check():
+def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
     config = load_cli_config(
         Path("C:/Projects/bot_platform/agents/mycroft_agent/ingos_products_cli_config.json")
     )
 
-    assert config.agents == (
-        "product_Car",
-        "product_Household",
-        "product_Personal",
-        "product_Tick Bite",
-        "product_Инголаб",
-        "product_Инголаб ПДФ",
-        "product_Инголаб ППТХ",
-        "product_Овертайм",
-        "product_Юридическая помощь",
+    assert config.subagents == SubagentsConfig(
+        stateless=(),
+        stateful=(
+            "product_Car",
+            "product_Household",
+            "product_Personal",
+            "product_Tick Bite",
+            "product_Инголаб",
+            "product_Инголаб ПДФ",
+            "product_Инголаб ППТХ",
+            "product_Овертайм",
+            "product_Юридическая помощь",
+        ),
     )
     assert config.internal_tools == (
         InternalToolSpec(name="web_search", params={"max_results": 5, "summarize": True}),
@@ -560,8 +641,7 @@ def test_initialize_registry_subagents_accepts_inactive_explicit_agents(monkeypa
     assert len(subagents) == 1
     assert subagents[0]["name"] == "product_Household"
     assert subagents[0]["description"] == "Household. Inactive product expert."
-    assert isinstance(subagents[0]["runnable"], cli._SubagentInputAdapter)
-    assert subagents[0]["runnable"]._runnable is fake_agent
+    assert subagents[0]["runnable"] is fake_agent
 
 
 def test_initialize_registry_subagents_fails_on_unknown_explicit_agent(monkeypatch):

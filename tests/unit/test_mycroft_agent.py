@@ -6,12 +6,14 @@ from agents.mycroft_agent.agent import _build_callback_handlers, initialize_agen
 from agents.mycroft_agent.prompts import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT_WITHOUT_WEB_SEARCH,
+    build_delegate_system_prompt,
+    build_delegate_tool_description,
     build_gaz_mycroft_system_prompt,
 )
 from agents.utils import ModelType
 
 
-def test_initialize_agent_passes_tools_and_subagents(monkeypatch):
+def test_initialize_agent_passes_stateless_and_stateful_subagents(monkeypatch):
     captured: dict[str, object] = {}
     monkeypatch.setattr("agents.mycroft_agent.agent.config.LANGFUSE_URL", "")
     monkeypatch.setattr("agents.mycroft_agent.agent.config.OPENAI_API_KEY", "test-openai-key")
@@ -26,20 +28,31 @@ def test_initialize_agent_passes_tools_and_subagents(monkeypatch):
     )
 
     web_search_tool = SimpleNamespace(name="web_search")
-    subagent = {"name": "simple_agent", "description": "Simple Agent", "runnable": object()}
+    stateless_subagent = {"name": "simple_agent", "description": "Simple Agent", "runnable": object()}
+    stateful_subagent = {"name": "product_agent", "description": "Product Agent", "runnable": object()}
 
     result = initialize_agent(
         provider=ModelType.GPT,
         model_size="mini",
         temperature=0.1,
         tools=[web_search_tool],
-        subagents=[subagent],
+        stateless_subagents=[stateless_subagent],
+        stateful_subagents=[stateful_subagent],
         checkpoint_saver="checkpoint",
         interrupt_on={"gmail_send_message": {"allowed_decisions": ["approve", "edit", "reject"]}},
     )
 
     assert result["agent"]["tools"] == [web_search_tool]
-    assert captured["subagents"] == [subagent]
+    assert captured["subagents"] == [stateless_subagent]
+    assert len(captured["middleware"]) == 1
+    delegate_middleware = captured["middleware"][0]
+    assert delegate_middleware.tools[0].name == "delegate"
+    assert delegate_middleware.tools[0].description == build_delegate_tool_description(
+        tool_name="delegate"
+    ).format(available_agents="- product_agent: Product Agent")
+    assert delegate_middleware.system_prompt == build_delegate_system_prompt(
+        tool_name="delegate"
+    )
     assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT
     assert captured["checkpointer"] == "checkpoint"
     assert captured["interrupt_on"] == {
@@ -64,6 +77,8 @@ def test_initialize_agent_uses_default_prompt_without_web_search(monkeypatch):
     initialize_agent(provider=ModelType.GPT, tools=[])
 
     assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT_WITHOUT_WEB_SEARCH
+    assert captured["subagents"] == []
+    assert captured["middleware"] == []
 
 
 def test_initialize_agent_adds_langfuse_callbacks(monkeypatch):
@@ -153,3 +168,21 @@ def test_build_gaz_mycroft_system_prompt_mentions_mcp_tools_and_context_rules():
     assert "gmail_send_message" in prompt
     assert "do not ask for the model again" in prompt
     assert "approval-gated by the runtime" in prompt
+
+
+def test_delegate_prompt_and_description_have_stateful_semantics():
+    system_prompt = build_delegate_system_prompt(tool_name="delegate")
+    description = build_delegate_tool_description(tool_name="delegate")
+
+    assert "`delegate`" in system_prompt
+    assert "stateful team members" in system_prompt
+    assert "same conversation thread" in system_prompt
+    assert "Do not call the same stateful agent multiple times in parallel" in system_prompt
+    assert "ephemeral" not in system_prompt.lower()
+    assert "single result" not in system_prompt.lower()
+
+    assert "`delegate`" in description
+    assert "multiple user turns" in description
+    assert "{available_agents}" in description
+    assert "one-shot isolated task" in description
+    assert "ephemeral" not in description.lower()

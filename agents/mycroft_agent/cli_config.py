@@ -12,7 +12,8 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from .prompts import build_gaz_mycroft_system_prompt
 
 
-DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("cli_config.json")
+#DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("cli_config.json")
+DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("ingos_products_cli_config.json")
 _BRACED_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _ALLOWED_MCP_TRANSPORTS = {
     "stdio",
@@ -57,9 +58,15 @@ class DeepAgentsConfig:
 
 
 @dataclass(frozen=True)
+class SubagentsConfig:
+    stateless: tuple[str, ...]
+    stateful: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MycroftCliConfig:
     system_prompt: str
-    agents: tuple[str, ...]
+    subagents: SubagentsConfig
     internal_tools: tuple[InternalToolSpec, ...]
     mcp: MCPConfig
     deepagents: DeepAgentsConfig
@@ -79,15 +86,20 @@ def load_cli_config(raw_path: str | Path | None = None) -> MycroftCliConfig:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Mycroft CLI config must be a JSON object.")
+    if "agents" in data:
+        raise ValueError(
+            "Mycroft CLI config field 'agents' is no longer supported. "
+            "Use 'subagents.stateless' and 'subagents.stateful'."
+        )
 
     system_prompt = _parse_system_prompt(data.get("system_prompt"), config_dir=path.parent)
-    agents = _parse_agent_ids(data.get("agents") or [])
+    subagents = _parse_subagents(data.get("subagents"))
     internal_tools = _parse_internal_tools(data.get("internal_tools") or [])
     mcp = _parse_mcp_config(data.get("mcp") or {})
     deepagents = _parse_deepagents_config(data.get("deepagents") or {})
     return MycroftCliConfig(
         system_prompt=system_prompt,
-        agents=agents,
+        subagents=subagents,
         internal_tools=internal_tools,
         mcp=mcp,
         deepagents=deepagents,
@@ -206,10 +218,25 @@ def _find_mcp_tool(server_name: str, requested_name: str, loaded_tools: list[Any
     return None
 
 
-def _parse_agent_ids(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ValueError("Mycroft CLI config field 'agents' must be a list.")
-    return tuple(_require_str(item, "agents[]") for item in value)
+def _parse_subagents(value: Any) -> SubagentsConfig:
+    if not isinstance(value, dict):
+        raise ValueError("Mycroft CLI config field 'subagents' must be an object.")
+
+    stateless_value = value.get("stateless", [])
+    stateful_value = value.get("stateful", [])
+    if not isinstance(stateless_value, list):
+        raise ValueError("Mycroft CLI config field 'subagents.stateless' must be a list.")
+    if not isinstance(stateful_value, list):
+        raise ValueError("Mycroft CLI config field 'subagents.stateful' must be a list.")
+
+    return SubagentsConfig(
+        stateless=tuple(
+            _require_str(item, "subagents.stateless[]") for item in stateless_value
+        ),
+        stateful=tuple(
+            _require_str(item, "subagents.stateful[]") for item in stateful_value
+        ),
+    )
 
 
 def _parse_system_prompt(value: Any, *, config_dir: Path) -> str:

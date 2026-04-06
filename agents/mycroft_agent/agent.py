@@ -5,6 +5,7 @@ from typing import Any
 
 import config
 from deepagents import create_deep_agent
+from deepagents.middleware.subagents import CompiledSubAgent
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
 from langgraph.checkpoint.memory import MemorySaver
@@ -13,7 +14,9 @@ from agents.llm_utils import get_llm
 from agents.tools.yandex_search import YandexSearchTool
 from agents.utils import ModelType
 
+from .delegate_middleware import DelegateSubAgentMiddleware
 from .prompts import build_system_prompt
+from .prompts import build_delegate_system_prompt, build_delegate_tool_description
 
 
 VALID_MODEL_SIZES = {"base", "mini", "nano"}
@@ -69,7 +72,8 @@ def initialize_agent(
     temperature: float = 0.2,
     system_prompt: str | None = None,
     tools: Sequence[Any] | None = None,
-    subagents: Sequence[dict[str, Any]] | None = None,
+    stateless_subagents: Sequence[CompiledSubAgent] | None = None,
+    stateful_subagents: Sequence[CompiledSubAgent] | None = None,
     checkpoint_saver: Any | None = None,
     streaming: bool = False,
     reasoning: str | None = None,
@@ -93,16 +97,30 @@ def initialize_agent(
     )
 
     resolved_tools = list(tools or [])
-    resolved_subagents = list(subagents or [])
+    resolved_stateless_subagents = list(stateless_subagents or [])
+    resolved_stateful_subagents = list(stateful_subagents or [])
     resolved_system_prompt = system_prompt or build_system_prompt(
         enable_web_search=_has_web_search_tool(resolved_tools)
     )
+    resolved_middleware: list[Any] = []
+    if resolved_stateful_subagents:
+        resolved_middleware.append(
+            DelegateSubAgentMiddleware(
+                default_model=llm,
+                default_tools=resolved_tools,
+                subagents=resolved_stateful_subagents,
+                system_prompt=build_delegate_system_prompt(tool_name="delegate"),
+                general_purpose_agent=False,
+                task_description=build_delegate_tool_description(tool_name="delegate"),
+            )
+        )
 
     agent = create_deep_agent(
         name="mycroft",
         model=llm,
         tools=resolved_tools,
-        subagents=resolved_subagents,
+        subagents=resolved_stateless_subagents,
+        middleware=resolved_middleware,
         system_prompt=resolved_system_prompt,
         checkpointer=checkpoint_saver or MemorySaver(),
         interrupt_on=interrupt_on,
