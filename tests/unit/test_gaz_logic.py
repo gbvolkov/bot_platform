@@ -36,7 +36,6 @@ from agents.gaz_agent.logic import (
     is_affirmative,
     is_negative,
     prioritize_missing_slots,
-    requires_pricing_bi_first,
     select_active_tool_names,
     update_provisional_recommendations,
 )
@@ -559,7 +558,7 @@ def test_select_active_tool_names_for_specs_starts_with_pricing_bi():
         has_followup=False,
         has_pricing_bi_call_this_turn=False,
     )
-    assert active == ["query_pricing_bi"]
+    assert active == ["query_pricing_bi", "web_search"]
 
 
 def test_select_active_tool_names_for_specs_unlocks_snapshot_after_pricing_bi():
@@ -579,56 +578,7 @@ def test_select_active_tool_names_for_specs_unlocks_snapshot_after_pricing_bi():
         has_followup=False,
         has_pricing_bi_call_this_turn=True,
     )
-    assert active == ["query_pricing_bi", "collect_product_snapshot", "search_sales_materials"]
-
-
-def test_select_active_tool_names_unlocks_web_after_internal_source_step():
-    planned = build_allowed_tool_names("specs", "justified", "RESEARCH")
-    active = select_active_tool_names(
-        "specs",
-        "justified",
-        "RESEARCH",
-        planned_tools=planned,
-        has_sales_digest=False,
-        has_comparison_digest=False,
-        has_product_snapshot=False,
-        has_material_candidates=False,
-        has_material_reads=False,
-        has_branch_pack=False,
-        has_shortlist=False,
-        has_followup=False,
-        has_pricing_bi_call_this_turn=True,
-        requires_pricing_bi_first=True,
-        tool_calls_this_turn=["query_pricing_bi", "search_sales_materials"],
-    )
     assert active == ["query_pricing_bi", "web_search", "collect_product_snapshot", "search_sales_materials"]
-
-
-def test_select_active_tool_names_for_competitor_followup_enforces_bi_first():
-    planned = build_allowed_tool_names("compare", "justified", "RESEARCH")
-    requires_bi = requires_pricing_bi_first(
-        "compare",
-        {
-            "requested_competitor_comparison": True,
-            "requested_specs": False,
-            "requested_price": False,
-            "requested_concrete_numbers": False,
-        },
-        last_user_text="Q35N",
-        problem_summary="compare against Dongfeng by turning radius, fuel consumption, maintenance, and warranty",
-        search_query="Dongfeng Q35N turning radius fuel consumption maintenance warranty",
-        slots={"competitor": "Dongfeng"},
-    )
-    active = select_active_tool_names(
-        "compare",
-        "justified",
-        "RESEARCH",
-        planned_tools=planned,
-        has_pricing_bi_call_this_turn=False,
-        requires_pricing_bi_first=requires_bi,
-    )
-    assert requires_bi is True
-    assert active == ["query_pricing_bi"]
 
 
 def test_select_active_tool_names_for_recommendation_prefers_composites_before_narrow_reads():
@@ -778,9 +728,9 @@ def test_answer_plan_node_only_enables_hitl_after_prior_search_and_read():
     )
     assert docs_client.calls
     assert result["answer_depth"] == "justified"
-    assert result["needs_hitl_wait_confirmation"] is False
+    assert result["needs_hitl_wait_confirmation"] is True
     assert result["hitl_trigger_kind"] == "document_package_wait"
-    assert route_after_answer_plan(result) == "sales_response"
+    assert route_after_answer_plan(result) == "hitl_wait"
 
 
 def test_landscape_digest_aggregates_multi_direction_sales_summary():
@@ -1065,7 +1015,7 @@ def test_ru_locale_has_repair_and_question_budget_prompts():
 
 def test_search_sales_materials_blocks_duplicate_query_in_same_turn():
     docs_client = DummyCompositeDocsClient()
-    tool = build_search_sales_materials_tool("ru", docs_client)
+    tool = build_search_sales_materials_tool(docs_client)
     base_state = {
         "problem_summary": "????????? ????????",
         "slots": {"transport_type": "cargo"},
@@ -1100,7 +1050,7 @@ def test_search_sales_materials_blocks_duplicate_query_in_same_turn():
 
 def test_read_material_blocks_duplicate_focus_in_same_turn():
     docs_client = DummyCompositeDocsClient()
-    tool = build_read_material_tool("ru", docs_client)
+    tool = build_read_material_tool(docs_client)
     base_state = {
         "allowed_material_ids": ["cand_gnn_cfg"],
         "read_attempts_by_candidate": {},
@@ -1131,7 +1081,7 @@ def test_read_material_blocks_duplicate_focus_in_same_turn():
 
 def test_read_material_blocks_third_read_of_same_candidate():
     docs_client = DummyCompositeDocsClient()
-    tool = build_read_material_tool("ru", docs_client)
+    tool = build_read_material_tool(docs_client)
     base_state = {
         "allowed_material_ids": ["cand_gnn_cfg"],
         "read_attempts_by_candidate": {},

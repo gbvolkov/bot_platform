@@ -22,16 +22,13 @@ _LOCALES: Dict[str, Dict[str, Any]] = {
                 "Информационные lookup-инструменты доступны только для тех продуктовых семейств, которые разрешены текущей конфигурацией агента.\n"
                 "Если информационный инструмент сообщил, что данные по запрошенному семейству недоступны полностью или частично, скажите об этом прямо и не пытайтесь обходить ограничение другим информационным инструментом."
             ),
-            "turn_intent_extractor": "Извлеките из последнего сообщения клиента факты, продажные сигналы и текущий запрос клиента. Для коротких follow-up сообщений вроде индекса модели в продолжающемся сравнении сохраняйте контекстные требования из problem_summary: если сравнение уже про характеристики, цену, ТО, расход, гарантию или другие точные числа, выставляйте соответствующие флаги, даже если последнее сообщение содержит только модель. Верните только структурированные данные.",
+            "turn_intent_extractor": "Извлеките из последнего сообщения клиента факты, продажные сигналы и текущий запрос клиента. Верните только структурированные данные.",
             "answer_planner": "Выберите минимальную полезную глубину ответа. Не планируйте deep research или ожидание, пока bounded answer еще возможен.",
             "source_ladder_policy": (
                 "ПОЛИТИКА ПОИСКА ИСТОЧНИКОВ:\n"
                 "Для вопросов о цене, стоимости, прайсе, ТО, комплектациях, опциях, сервисных интервалах, стоимости обслуживания и точных технических характеристиках сначала используйте query_pricing_bi. "
                 "Если BI не отвечает на запрошенную сущность или атрибут на нужном уровне конкретности, затем используйте внутренние документы ГАЗ. "
                 "Если внутренних документов всё ещё недостаточно, используйте web_search.\n"
-                "Для сравнений с конкурентами, задач вида «найди похожее/ближайшее/подходящее» и коротких follow-up сообщений с индексом модели (например, Q35N) применяйте этот BI-first порядок отдельно к каждой названной или выбранной машине, включая конкурентов. "
-                "Если точная модель ещё не известна, сначала используйте query_pricing_bi для поиска подходящих BI-кандидатов и их структурированных характеристик, и только затем обогащайте результат внутренними документами или web_search. "
-                "Для конкурентов не заполняйте requested_product_terms конкурентным брендом; передавайте конкурентную модель/бренд в обычном бизнес-вопросе query_pricing_bi.\n"
                 "Для остальных продуктовых и продажных вопросов сначала используйте внутренние документы ГАЗ и composite sales tools. "
                 "Если они не дают достаточного ответа, используйте web_search.\n"
                 "Информация считается недостаточной, если текущие источники не отвечают напрямую на факты, которые запросил пользователь, на нужном уровне конкретности. "
@@ -77,16 +74,13 @@ _LOCALES: Dict[str, Dict[str, Any]] = {
         },
         "prompts": {
             "system": "You are a B2B sales consultant for GAZ commercial vehicles. Answer first, narrow second, and never invent exact document-backed facts. Informational lookup tools are available only for the product families allowed by the current agent configuration. If an informational tool reports unavailable or partial coverage for a requested family, state that plainly and do not try to bypass the restriction with another informational lookup tool.",
-            "turn_intent_extractor": "Extract the customer's current ask, explicit facts, and sales signals. For short follow-up messages that only name a model index in an ongoing comparison, carry forward contextual requirements from problem_summary: if the comparison is already about specifications, price, maintenance, fuel consumption, warranty, or other exact numbers, set the corresponding flags even if the latest message only contains the model. Return structured data only.",
+            "turn_intent_extractor": "Extract the customer's current ask, explicit facts, and sales signals. Return structured data only.",
             "answer_planner": "Choose the minimum useful answer depth. Prefer bounded answers over deep research while a useful live-turn answer is still possible.",
             "source_ladder_policy": (
                 "SOURCE SEARCH POLICY:\n"
                 "For questions about price, cost, pricing, maintenance, trims, options, service intervals, service cost, and exact technical characteristics, use query_pricing_bi first. "
                 "If BI does not answer the requested entity or attribute at the needed specificity, then use internal GAZ documents. "
                 "If internal documents are still insufficient, use web_search.\n"
-                "For competitor comparisons, similar/closest/suitable vehicle searches, and short follow-up messages that only name a model index (for example, Q35N), apply this BI-first order separately to every named or resolved vehicle, including competitors. "
-                "If the exact model is not known yet, first use query_pricing_bi to look for suitable BI candidates and their structured characteristics, then enrich the result with internal documents or web_search. "
-                "For competitors, do not put the competitor brand into requested_product_terms; pass the competitor model/brand in the normal business question to query_pricing_bi.\n"
                 "For other product and sales questions, use internal GAZ documents and composite sales tools first. "
                 "If they are insufficient, use web_search.\n"
                 "Treat information as insufficient when the current sources do not directly answer the user's requested facts at the requested level of specificity. "

@@ -54,71 +54,6 @@ _IMPATIENCE_TERMS = ("короче", "faster", "быстрее", "меньше �
 _CONCRETE_NUMBER_TERMS = ("конкретн", "точн", "exact", "specific", "numbers", "цифр")
 _COMPARISON_TABLE_TERMS = ("таблиц", "table")
 _VERSION_TERMS = ("верс", "trim", "modification", "модифик")
-_SIMILAR_SELECTION_TERMS = (
-    "similar",
-    "closest",
-    "suitable",
-    "equivalent",
-    "match",
-    "аналог",
-    "похож",
-    "ближайш",
-    "подход",
-    "сопостав",
-)
-_PRICING_BI_FIRST_TERMS = tuple(
-    dict.fromkeys(
-        _TCO_TERMS
-        + _SPECS_TERMS
-        + _CONCRETE_NUMBER_TERMS
-        + _VERSION_TERMS
-        + _COMPARISON_TABLE_TERMS
-        + _SIMILAR_SELECTION_TERMS
-        + (
-            "price",
-            "pricing",
-            "maintenance",
-            "service interval",
-            "fuel consumption",
-            "payload",
-            "dimensions",
-            "warranty",
-            "option",
-            "trim",
-            "цена",
-            "цен",
-            "прайс",
-            "тех",
-            "техобслуж",
-            "обслужив",
-            "регламент",
-            "характерист",
-            "масса",
-            "снаряж",
-            "грузопод",
-            "габар",
-            "разворот",
-            "радиус",
-            "расход",
-            "гарант",
-            "интервал",
-            "опци",
-            "комплектац",
-        )
-    )
-)
-_INTERNAL_SOURCE_TOOL_NAMES = {
-    "get_sales_catalog_overview",
-    "get_sales_landscape",
-    "compare_product_directions",
-    "collect_product_snapshot",
-    "search_sales_materials",
-    "read_material",
-    "classify_problem_branch",
-    "get_branch_pack",
-    "build_solution_shortlist",
-    "build_followup_pack",
-}
 
 
 
@@ -632,59 +567,6 @@ def derive_work_mode(intent: ClientIntent, answer_depth: AnswerDepth) -> GazStag
     return "SELL"
 
 
-def _stringify_context_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, Mapping):
-        return " ".join(_stringify_context_value(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return " ".join(_stringify_context_value(item) for item in value)
-    return str(value)
-
-
-def requires_pricing_bi_first(
-    intent: ClientIntent,
-    intent_flags: Mapping[str, Any] | None = None,
-    *,
-    last_user_text: Any = "",
-    problem_summary: Any = "",
-    search_query: Any = "",
-    slots: Mapping[str, Any] | None = None,
-) -> bool:
-    flags = dict(intent_flags or {})
-    slot_data = dict(slots or {})
-    text = _normalize(
-        " ".join(
-            (
-                _stringify_context_value(last_user_text),
-                _stringify_context_value(problem_summary),
-                _stringify_context_value(search_query),
-                _stringify_context_value(slot_data.get("competitor")),
-                _stringify_context_value(slot_data.get("decision_criterion")),
-                _stringify_context_value(slot_data.get("goal")),
-                _stringify_context_value(slot_data.get("capacity_or_payload")),
-                _stringify_context_value(slot_data.get("body_type")),
-            )
-        )
-    )
-
-    if flags.get("requested_price") or flags.get("requested_specs") or flags.get("requested_concrete_numbers"):
-        return True
-    if flags.get("requested_versions") or flags.get("requested_comparison_table"):
-        return True
-    if intent == "specs":
-        return True
-    if intent in {"compare", "objection"} and (flags.get("requested_competitor_comparison") or clean_text(slot_data.get("competitor"))):
-        return True
-    if intent in {"compare", "recommendation", "next_step"} and _contains_any(text, _PRICING_BI_FIRST_TERMS):
-        return True
-    if _contains_any(text, _PRICING_BI_FIRST_TERMS):
-        return True
-    return False
-
-
 def build_allowed_tool_names(intent: ClientIntent, answer_depth: AnswerDepth, work_mode: GazStage) -> List[str]:
     allowed = ["query_pricing_bi", "web_search", "get_sales_catalog_overview"]
     if intent in {"overview", "financing", "recommendation", "next_step"}:
@@ -748,35 +630,12 @@ def select_active_tool_names(
     has_shortlist: bool = False,
     has_followup: bool = False,
     has_pricing_bi_call_this_turn: bool = False,
-    requires_pricing_bi_first: bool = False,
-    tool_calls_this_turn: Sequence[str] | None = None,
 ) -> List[str]:
     planned = list(planned_tools or build_allowed_tool_names(intent, answer_depth, work_mode))
-    if requires_pricing_bi_first and not has_pricing_bi_call_this_turn and "query_pricing_bi" in planned:
-        return ["query_pricing_bi"]
-    called_tools = set(tool_calls_this_turn or [])
-    has_internal_source_step = bool(
-        has_sales_digest
-        or has_comparison_digest
-        or has_product_snapshot
-        or has_material_candidates
-        or has_material_reads
-        or has_branch_pack
-        or has_shortlist
-        or has_followup
-        or called_tools.intersection(_INTERNAL_SOURCE_TOOL_NAMES)
-    )
-    has_internal_source_planned = bool(set(planned).intersection(_INTERNAL_SOURCE_TOOL_NAMES))
-    allow_web_search = bool(
-        "web_search" in planned
-        and (not requires_pricing_bi_first or has_pricing_bi_call_this_turn)
-        and (has_internal_source_step or not has_internal_source_planned)
-    )
     active: List[str] = []
-    if "query_pricing_bi" in planned and (requires_pricing_bi_first or has_pricing_bi_call_this_turn or intent == "specs"):
-        active.append("query_pricing_bi")
-    if allow_web_search:
-        active.append("web_search")
+    for tool_name in ("query_pricing_bi", "web_search"):
+        if tool_name in planned:
+            active.append(tool_name)
 
     if intent == "overview":
         for tool_name in ("get_sales_catalog_overview", "get_sales_landscape"):
@@ -1068,7 +927,6 @@ __all__ = [
     "merge_slots",
     "normalize_provisional_recommendations",
     "prioritize_missing_slots",
-    "requires_pricing_bi_first",
     "select_active_tool_names",
     "should_use_discovery_agent",
     "update_provisional_recommendations",
