@@ -9,11 +9,7 @@ from typing import Any, Callable
 
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-from .prompts import build_gaz_mycroft_system_prompt
-
-
-#DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("cli_config.json")
-DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("ingos_products_cli_config.json")
+DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("cli_config.json")
 _BRACED_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _ALLOWED_MCP_TRANSPORTS = {
     "stdio",
@@ -160,7 +156,8 @@ def required_environment_variables(
     if provider_name in _OPENAI_PROVIDER_VALUES:
         required.append("OPENAI_API_KEY")
 
-    if any(spec.name == "web_search" for spec in cli_config.internal_tools):
+    all_subagents = (*cli_config.subagents.stateless, *cli_config.subagents.stateful)
+    if "web_search_agent" in all_subagents:
         required.extend(["YA_API_KEY", "YA_FOLDER_ID"])
 
     for server in cli_config.mcp.servers:
@@ -259,35 +256,9 @@ def _parse_system_prompt(value: Any, *, config_dir: Path) -> str:
             )
         return resolved_prompt_path.read_text(encoding="utf-8")
 
-    if prompt_type != "gaz_mycroft":
-        raise ValueError(
-            "Unsupported Mycroft CLI system prompt type "
-            f"'{prompt_type}'. Supported values: file, gaz_mycroft"
-        )
-
-    locale = str(value.get("locale") or "en")
-    pricing_subagent = str(value.get("pricing_subagent") or "gaz_pricing_bi")
-    web_tool = str(value.get("web_tool") or "web_search")
-    store_tool = str(value.get("store_tool") or "store_artifact_tool")
-    maps_search_tool = _optional_str(value.get("maps_search_tool"), "system_prompt.maps_search_tool")
-    maps_route_tool = _optional_str(value.get("maps_route_tool"), "system_prompt.maps_route_tool")
-    vin_decode_tool = _optional_str(value.get("vin_decode_tool"), "system_prompt.vin_decode_tool")
-    recall_lookup_tool = _optional_str(value.get("recall_lookup_tool"), "system_prompt.recall_lookup_tool")
-    gmail_draft_tool = _optional_str(value.get("gmail_draft_tool"), "system_prompt.gmail_draft_tool")
-    gmail_send_tool = _optional_str(value.get("gmail_send_tool"), "system_prompt.gmail_send_tool")
-    enable_web_search = bool(value.get("enable_web_search", True))
-    return build_gaz_mycroft_system_prompt(
-        locale=locale,
-        pricing_subagent_name=pricing_subagent,
-        web_tool_name=web_tool,
-        store_tool_name=store_tool,
-        maps_search_tool_name=maps_search_tool,
-        maps_route_tool_name=maps_route_tool,
-        vin_decode_tool_name=vin_decode_tool,
-        recall_lookup_tool_name=recall_lookup_tool,
-        gmail_draft_tool_name=gmail_draft_tool,
-        gmail_send_tool_name=gmail_send_tool,
-        enable_web_search=enable_web_search,
+    raise ValueError(
+        "Unsupported Mycroft CLI system prompt type "
+        f"'{prompt_type}'. Supported values: file"
     )
 
 
@@ -422,12 +393,6 @@ def _require_str(value: Any, field_name: str) -> str:
     return value
 
 
-def _optional_str(value: Any, field_name: str) -> str | None:
-    if value is None:
-        return None
-    return _require_str(value, field_name)
-
-
 def _require_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"Mycroft CLI config field '{field_name}' must be a boolean.")
@@ -484,12 +449,10 @@ def _internal_tool_builders() -> dict[str, Callable[..., Any]]:
     return {
         "fetch_user_info": _build_fetch_user_info_tool,
         "lookup_term": _build_lookup_term_tool,
-        "sales_lead_tools": _build_sales_lead_tools_bundle,
         "search_kb": _build_search_kb_tool,
         "search_tickets": _build_search_tickets_tool,
         "store_artifact_tool": _build_store_artifact_tool,
         "think_tool": _build_think_tool,
-        "web_search": _build_web_search_tool,
     }
 
 
@@ -503,12 +466,6 @@ def _build_lookup_term_tool() -> Any:
     from agents.retrievers.retriever import get_term_and_defition_tools
 
     return get_term_and_defition_tools()
-
-
-def _build_sales_lead_tools_bundle() -> list[Any]:
-    from agents.sales_lead_agent.tools import build_sales_lead_tools
-
-    return list(build_sales_lead_tools())
 
 
 def _build_search_kb_tool() -> Any:
@@ -550,13 +507,3 @@ def _build_think_tool() -> Any:
     from agents.tools.think import ThinkTool
 
     return ThinkTool()
-
-
-def _build_web_search_tool(
-    *,
-    max_results: int = 5,
-    summarize: bool = True,
-) -> Any:
-    from agents.mycroft_agent.agent import build_web_search_tool
-
-    return build_web_search_tool(max_results=max_results, summarize=summarize)

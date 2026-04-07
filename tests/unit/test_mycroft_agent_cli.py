@@ -34,30 +34,25 @@ class _FakeDefinition:
 
 
 def test_load_cli_config_reads_required_sections(tmp_path):
+    prompt_path = tmp_path / "scenario_prompt.txt"
+    prompt_path.write_text(
+        "Scenario prompt with gaz_pricing_bi, web_search_agent, store_artifact_tool, "
+        "maps_search_places, gmail_send_message.",
+        encoding="utf-8",
+    )
     config_path = tmp_path / "mycroft.json"
     config_path.write_text(
         json.dumps(
             {
                 "system_prompt": {
-                    "type": "gaz_mycroft",
-                    "locale": "en",
-                    "pricing_subagent": "gaz_pricing_bi",
-                    "web_tool": "web_search",
-                    "store_tool": "store_artifact_tool",
-                    "maps_search_tool": "maps_search_places",
-                    "maps_route_tool": "maps_compute_routes",
-                    "vin_decode_tool": "nhtsa_decode_vin",
-                    "recall_lookup_tool": "nhtsa_search_recalls",
-                    "gmail_draft_tool": "gmail_create_draft",
-                    "gmail_send_tool": "gmail_send_message",
-                    "enable_web_search": True,
+                    "type": "file",
+                    "path": "scenario_prompt.txt",
                 },
                 "subagents": {
-                    "stateless": ["simple_agent", "new_ideator"],
+                    "stateless": ["simple_agent", "new_ideator", "web_search_agent"],
                     "stateful": ["product_Инголаб"],
                 },
                 "internal_tools": [
-                    {"name": "web_search", "max_results": 3, "summarize": False},
                     "store_artifact_tool",
                 ],
                 "deepagents": {
@@ -89,14 +84,12 @@ def test_load_cli_config_reads_required_sections(tmp_path):
     assert "gaz_pricing_bi" in config.system_prompt
     assert "store_artifact_tool" in config.system_prompt
     assert config.subagents == SubagentsConfig(
-        stateless=("simple_agent", "new_ideator"),
+        stateless=("simple_agent", "new_ideator", "web_search_agent"),
         stateful=("product_Инголаб",),
     )
-    assert config.internal_tools[0] == InternalToolSpec(
-        name="web_search",
-        params={"max_results": 3, "summarize": False},
+    assert config.internal_tools == (
+        InternalToolSpec(name="store_artifact_tool", params={}),
     )
-    assert config.internal_tools[1] == InternalToolSpec(name="store_artifact_tool", params={})
     assert config.mcp.tool_name_prefix is True
     assert config.mcp.servers[0].name == "sysadmin"
     assert config.mcp.servers[0].connection["transport"] == "http"
@@ -109,6 +102,34 @@ def test_load_cli_config_reads_required_sections(tmp_path):
     }
     assert "maps_search_places" in config.system_prompt
     assert "gmail_send_message" in config.system_prompt
+
+
+def test_load_cli_config_rejects_scenario_specific_system_prompt_types(tmp_path):
+    config_path = tmp_path / "mycroft.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": {
+                    "type": "gaz_mycroft",
+                    "locale": "en",
+                },
+                "subagents": {
+                    "stateless": [],
+                    "stateful": [],
+                },
+                "internal_tools": [],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_cli_config(config_path)
+
+    message = str(exc_info.value)
+    assert "Unsupported Mycroft CLI system prompt type 'gaz_mycroft'" in message
+    assert "Supported values: file" in message
 
 
 def test_load_cli_config_reads_system_prompt_from_file(tmp_path):
@@ -271,27 +292,19 @@ def test_select_mcp_tools_accepts_prefixed_and_raw_names():
     ]
 
 
-def test_default_cli_config_uses_gaz_pricing_bi_and_requested_tools():
+def test_default_cli_config_uses_generic_config_file():
     config = load_cli_config()
 
     assert config.subagents == SubagentsConfig(
-        stateless=("gaz_pricing_bi",),
+        stateless=("gaz_pricing_bi", "web_search_agent"),
         stateful=(),
     )
-    assert [tool.name for tool in config.internal_tools] == [
-        "web_search",
-        "store_artifact_tool",
-    ]
+    assert config.internal_tools == (
+        InternalToolSpec(name="store_artifact_tool", params={}),
+    )
     assert tuple(server.name for server in config.mcp.servers) == ("maps", "gmail", "nhtsa")
-    assert config.mcp.servers[0].connection["url"] == "https://mapstools.googleapis.com/mcp"
-    assert config.mcp.servers[1].connection["command"] == "npx"
-    assert config.mcp.servers[2].connection["url"] == "https://nhtsa.caseyjhand.com/mcp"
-    assert config.mcp.servers[2].tool_name_prefix is False
-    assert config.mcp.servers[2].tools == ("nhtsa_decode_vin", "nhtsa_search_recalls")
-    assert config.deepagents.interrupt_on["gmail_send_message"] == {
-        "allowed_decisions": ["approve", "edit", "reject"],
-        "description": "Review outbound Gmail send before execution.",
-    }
+    assert "gaz_pricing_bi" in config.system_prompt
+    assert "web_search_agent" in config.system_prompt
 
 
 def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
@@ -300,7 +313,7 @@ def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
     )
 
     assert config.subagents == SubagentsConfig(
-        stateless=(),
+        stateless=("web_search_agent",),
         stateful=(
             "product_Car",
             "product_Household",
@@ -313,9 +326,7 @@ def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
             "product_Юридическая помощь",
         ),
     )
-    assert config.internal_tools == (
-        InternalToolSpec(name="web_search", params={"max_results": 5, "summarize": True}),
-    )
+    assert config.internal_tools == ()
     assert "product_Car" in config.system_prompt
     assert "idea_check" in config.system_prompt
     assert tuple(server.name for server in config.mcp.servers) == ("idea_reality",)
@@ -330,13 +341,13 @@ def test_required_environment_variables_include_default_runtime_requirements():
     required = set(required_environment_variables(config, "openai"))
 
     assert required == {
-        "OPENAI_API_KEY",
-        "YA_API_KEY",
-        "YA_FOLDER_ID",
-        "GOOGLE_MAPS_GROUNDING_LITE_API_KEY",
         "GMAIL_MCP_CLIENT_ID",
         "GMAIL_MCP_CLIENT_SECRET",
         "GMAIL_MCP_REFRESH_TOKEN",
+        "GOOGLE_MAPS_GROUNDING_LITE_API_KEY",
+        "OPENAI_API_KEY",
+        "YA_API_KEY",
+        "YA_FOLDER_ID",
     }
 
 
@@ -349,9 +360,11 @@ def test_validate_required_environment_reports_missing_names(monkeypatch):
         validate_required_environment(config, "openai")
 
     message = str(exc_info.value)
-    assert "OPENAI_API_KEY" in message
-    assert "GOOGLE_MAPS_GROUNDING_LITE_API_KEY" in message
     assert "GMAIL_MCP_CLIENT_ID" in message
+    assert "GOOGLE_MAPS_GROUNDING_LITE_API_KEY" in message
+    assert "OPENAI_API_KEY" in message
+    assert "YA_API_KEY" in message
+    assert "YA_FOLDER_ID" in message
 
 
 def test_load_mcp_tools_from_config_expands_nested_environment_values(monkeypatch):
@@ -610,7 +623,7 @@ def test_cli_invoke_turn_resumes_after_hitl_reject(monkeypatch):
     }
 
 
-def test_initialize_registry_subagents_accepts_inactive_explicit_agents(monkeypatch):
+def test_initialize_configured_subagents_accepts_inactive_explicit_agents(monkeypatch):
     class FakeAgent:
         pass
 
@@ -636,7 +649,7 @@ def test_initialize_registry_subagents_accepts_inactive_explicit_agents(monkeypa
 
     monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
 
-    subagents = asyncio.run(cli._initialize_registry_subagents(("product_Household",)))
+    subagents = asyncio.run(cli._initialize_configured_subagents(("product_Household",)))
 
     assert len(subagents) == 1
     assert subagents[0]["name"] == "product_Household"
@@ -644,7 +657,37 @@ def test_initialize_registry_subagents_accepts_inactive_explicit_agents(monkeypa
     assert subagents[0]["runnable"] is fake_agent
 
 
-def test_initialize_registry_subagents_fails_on_unknown_explicit_agent(monkeypatch):
+def test_initialize_configured_subagents_builds_builtin_web_search_agent(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "build_web_search_subagent",
+        lambda: {"name": "web_search_agent", "description": "web", "system_prompt": "prompt", "tools": []},
+    )
+
+    class FakeRegistry:
+        _definitions = {}
+
+        async def ensure_agent_ready(self, agent_id):
+            raise AssertionError("registry should not be used for built-in web_search_agent")
+
+        def get_agent(self, agent_id):
+            raise AssertionError("registry should not be used for built-in web_search_agent")
+
+    monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
+
+    subagents = asyncio.run(cli._initialize_configured_subagents(("web_search_agent",)))
+
+    assert subagents == [
+        {
+            "name": "web_search_agent",
+            "description": "web",
+            "system_prompt": "prompt",
+            "tools": [],
+        }
+    ]
+
+
+def test_initialize_configured_subagents_fails_on_unknown_explicit_agent(monkeypatch):
     class FakeRegistry:
         _definitions = {}
 
@@ -657,6 +700,6 @@ def test_initialize_registry_subagents_fails_on_unknown_explicit_agent(monkeypat
     monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
 
     with pytest.raises(ValueError) as exc_info:
-        asyncio.run(cli._initialize_registry_subagents(("product_Unknown",)))
+        asyncio.run(cli._initialize_configured_subagents(("product_Unknown",)))
 
     assert "Unknown registry agent 'product_Unknown'" in str(exc_info.value)

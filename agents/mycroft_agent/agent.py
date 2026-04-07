@@ -5,52 +5,19 @@ from typing import Any
 
 import config
 from deepagents import create_deep_agent
-from deepagents.middleware.subagents import CompiledSubAgent
+from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 from langfuse import Langfuse
 from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
 from langgraph.checkpoint.memory import MemorySaver
 
 from agents.llm_utils import get_llm
-from agents.tools.yandex_search import YandexSearchTool
 from agents.utils import ModelType
 
 from .delegate_middleware import DelegateSubAgentMiddleware
-from .prompts import build_system_prompt
 from .prompts import build_delegate_system_prompt, build_delegate_tool_description
 
 
 VALID_MODEL_SIZES = {"base", "mini", "nano"}
-
-
-def build_web_search_tool(
-    *,
-    max_results: int = 5,
-    summarize: bool = True,
-) -> Any:
-    missing: list[str] = []
-    if not config.YA_API_KEY:
-        missing.append("YA_API_KEY")
-    if not config.YA_FOLDER_ID:
-        missing.append("YA_FOLDER_ID")
-    if missing:
-        missing_text = ", ".join(missing)
-        raise ValueError(
-            f"Mycroft web_search requires environment variables: {missing_text}"
-        )
-
-    return YandexSearchTool(
-        api_key=config.YA_API_KEY,
-        folder_id=config.YA_FOLDER_ID,
-        max_results=max_results,
-        summarize=summarize,
-    )
-
-
-def _has_web_search_tool(tools: Sequence[Any]) -> bool:
-    for tool in tools:
-        if getattr(tool, "name", None) == "web_search":
-            return True
-    return False
 
 
 def _build_callback_handlers() -> list[Any]:
@@ -72,8 +39,8 @@ def initialize_agent(
     temperature: float = 0.2,
     system_prompt: str | None = None,
     tools: Sequence[Any] | None = None,
-    stateless_subagents: Sequence[CompiledSubAgent] | None = None,
-    stateful_subagents: Sequence[CompiledSubAgent] | None = None,
+    stateless_subagents: Sequence[SubAgent | CompiledSubAgent] | None = None,
+    stateful_subagents: Sequence[SubAgent | CompiledSubAgent] | None = None,
     checkpoint_saver: Any | None = None,
     streaming: bool = False,
     reasoning: str | None = None,
@@ -99,9 +66,9 @@ def initialize_agent(
     resolved_tools = list(tools or [])
     resolved_stateless_subagents = list(stateless_subagents or [])
     resolved_stateful_subagents = list(stateful_subagents or [])
-    resolved_system_prompt = system_prompt or build_system_prompt(
-        enable_web_search=_has_web_search_tool(resolved_tools)
-    )
+    if not system_prompt:
+        raise ValueError("Mycroft requires a system_prompt from scenario configuration.")
+    resolved_system_prompt = system_prompt
     resolved_middleware: list[Any] = []
     if resolved_stateful_subagents:
         resolved_middleware.append(

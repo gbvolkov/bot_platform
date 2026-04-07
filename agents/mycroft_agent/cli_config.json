@@ -1,30 +1,16 @@
 {
   "system_prompt": {
-    "type": "gaz_mycroft",
-    "locale": "en",
-    "pricing_subagent": "gaz_pricing_bi",
-    "web_tool": "web_search",
-    "store_tool": "store_artifact_tool",
-    "maps_search_tool": "maps_search_places",
-    "maps_route_tool": "maps_compute_routes",
-    "vin_decode_tool": "nhtsa_decode_vin",
-    "recall_lookup_tool": "nhtsa_search_recalls",
-    "gmail_draft_tool": "gmail_create_draft",
-    "gmail_send_tool": "gmail_send_message",
-    "enable_web_search": true
+    "type": "file",
+    "path": "gaz_sales_system_prompt.txt"
   },
   "subagents": {
     "stateless": [
-      "gaz_pricing_bi"
+      "gaz_pricing_bi",
+      "web_search_agent"
     ],
     "stateful": []
   },
   "internal_tools": [
-    {
-      "name": "web_search",
-      "max_results": 5,
-      "summarize": true
-    },
     "store_artifact_tool"
   ],
   "deepagents": {

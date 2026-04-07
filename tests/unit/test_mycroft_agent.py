@@ -4,11 +4,8 @@ from types import SimpleNamespace
 
 from agents.mycroft_agent.agent import _build_callback_handlers, initialize_agent
 from agents.mycroft_agent.prompts import (
-    DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_SYSTEM_PROMPT_WITHOUT_WEB_SEARCH,
     build_delegate_system_prompt,
     build_delegate_tool_description,
-    build_gaz_mycroft_system_prompt,
 )
 from agents.utils import ModelType
 
@@ -27,22 +24,24 @@ def test_initialize_agent_passes_stateless_and_stateful_subagents(monkeypatch):
         lambda **kwargs: captured.update(kwargs) or {"agent": kwargs},
     )
 
-    web_search_tool = SimpleNamespace(name="web_search")
+    store_tool = SimpleNamespace(name="store_artifact_tool")
     stateless_subagent = {"name": "simple_agent", "description": "Simple Agent", "runnable": object()}
     stateful_subagent = {"name": "product_agent", "description": "Product Agent", "runnable": object()}
+    system_prompt = "Scenario-specific Mycroft prompt."
 
     result = initialize_agent(
         provider=ModelType.GPT,
         model_size="mini",
         temperature=0.1,
-        tools=[web_search_tool],
+        system_prompt=system_prompt,
+        tools=[store_tool],
         stateless_subagents=[stateless_subagent],
         stateful_subagents=[stateful_subagent],
         checkpoint_saver="checkpoint",
         interrupt_on={"gmail_send_message": {"allowed_decisions": ["approve", "edit", "reject"]}},
     )
 
-    assert result["agent"]["tools"] == [web_search_tool]
+    assert result["agent"]["tools"] == [store_tool]
     assert captured["subagents"] == [stateless_subagent]
     assert len(captured["middleware"]) == 1
     delegate_middleware = captured["middleware"][0]
@@ -53,15 +52,14 @@ def test_initialize_agent_passes_stateless_and_stateful_subagents(monkeypatch):
     assert delegate_middleware.system_prompt == build_delegate_system_prompt(
         tool_name="delegate"
     )
-    assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT
+    assert captured["system_prompt"] == system_prompt
     assert captured["checkpointer"] == "checkpoint"
     assert captured["interrupt_on"] == {
         "gmail_send_message": {"allowed_decisions": ["approve", "edit", "reject"]}
     }
 
 
-def test_initialize_agent_uses_default_prompt_without_web_search(monkeypatch):
-    captured: dict[str, object] = {}
+def test_initialize_agent_requires_scenario_system_prompt(monkeypatch):
     monkeypatch.setattr("agents.mycroft_agent.agent.config.LANGFUSE_URL", "")
     monkeypatch.setattr("agents.mycroft_agent.agent.config.OPENAI_API_KEY", "test-openai-key")
 
@@ -69,16 +67,13 @@ def test_initialize_agent_uses_default_prompt_without_web_search(monkeypatch):
         "agents.mycroft_agent.agent.get_llm",
         lambda **kwargs: {"llm": kwargs},
     )
-    monkeypatch.setattr(
-        "agents.mycroft_agent.agent.create_deep_agent",
-        lambda **kwargs: captured.update(kwargs) or {"agent": kwargs},
-    )
 
-    initialize_agent(provider=ModelType.GPT, tools=[])
-
-    assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT_WITHOUT_WEB_SEARCH
-    assert captured["subagents"] == []
-    assert captured["middleware"] == []
+    try:
+        initialize_agent(provider=ModelType.GPT, tools=[])
+    except ValueError as exc:
+        assert "system_prompt" in str(exc)
+    else:
+        raise AssertionError("initialize_agent should require an explicit system_prompt")
 
 
 def test_initialize_agent_adds_langfuse_callbacks(monkeypatch):
@@ -111,7 +106,11 @@ def test_initialize_agent_adds_langfuse_callbacks(monkeypatch):
         lambda **kwargs: FakeAgent(),
     )
 
-    result = initialize_agent(provider=ModelType.GPT, tools=[])
+    result = initialize_agent(
+        provider=ModelType.GPT,
+        system_prompt="Scenario prompt.",
+        tools=[],
+    )
 
     assert captured["langfuse_kwargs"] == {
         "public_key": "public",
@@ -127,47 +126,6 @@ def test_build_callback_handlers_returns_empty_without_langfuse(monkeypatch):
     monkeypatch.setattr("agents.mycroft_agent.agent.config.LANGFUSE_URL", "")
 
     assert _build_callback_handlers() == []
-
-
-def test_build_gaz_mycroft_system_prompt_uses_bi_subagent_and_store_tool():
-    prompt = build_gaz_mycroft_system_prompt(
-        locale="en",
-        pricing_subagent_name="gaz_pricing_bi",
-        web_tool_name="web_search",
-        store_tool_name="store_artifact_tool",
-        enable_web_search=True,
-    )
-
-    assert "gaz_pricing_bi" in prompt
-    assert "store_artifact_tool" in prompt
-    assert "web_search" in prompt
-    assert "query_pricing_bi" not in prompt
-    assert "composite sales tools" not in prompt
-
-
-def test_build_gaz_mycroft_system_prompt_mentions_mcp_tools_and_context_rules():
-    prompt = build_gaz_mycroft_system_prompt(
-        locale="en",
-        pricing_subagent_name="gaz_pricing_bi",
-        web_tool_name="web_search",
-        store_tool_name="store_artifact_tool",
-        maps_search_tool_name="maps_search_places",
-        maps_route_tool_name="maps_compute_routes",
-        vin_decode_tool_name="nhtsa_decode_vin",
-        recall_lookup_tool_name="nhtsa_lookup_recalls",
-        gmail_draft_tool_name="gmail_create_draft",
-        gmail_send_tool_name="gmail_send_message",
-        enable_web_search=True,
-    )
-
-    assert "maps_search_places" in prompt
-    assert "maps_compute_routes" in prompt
-    assert "nhtsa_decode_vin" in prompt
-    assert "nhtsa_lookup_recalls" in prompt
-    assert "gmail_create_draft" in prompt
-    assert "gmail_send_message" in prompt
-    assert "do not ask for the model again" in prompt
-    assert "approval-gated by the runtime" in prompt
 
 
 def test_delegate_prompt_and_description_have_stateful_semantics():

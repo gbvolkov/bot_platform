@@ -4,7 +4,9 @@
     "path": "ingos_products_system_prompt.txt"
   },
   "subagents": {
-    "stateless": [],
+    "stateless": [
+      "web_search_agent"
+    ],
     "stateful": [
       "product_Car",
       "product_Household",
@@ -17,13 +19,7 @@
       "product_Юридическая помощь"
     ]
   },
-  "internal_tools": [
-    {
-      "name": "web_search",
-      "max_results": 5,
-      "summarize": true
-    }
-  ],
+  "internal_tools": [],
   "mcp": {
     "tool_name_prefix": true,
     "servers": [

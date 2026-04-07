@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from deepagents.middleware.subagents import CompiledSubAgent
+from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
 from agents.mycroft_agent.agent import VALID_MODEL_SIZES, initialize_agent
 from agents.mycroft_agent.cli_config import (
     DEFAULT_CLI_CONFIG_PATH,
@@ -18,6 +18,10 @@ from agents.mycroft_agent.cli_config import (
     load_cli_config,
     load_mcp_tools_from_config,
     validate_required_environment,
+)
+from agents.mycroft_agent.web_search_subagent import (
+    WEB_SEARCH_AGENT_ID,
+    build_web_search_subagent,
 )
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
@@ -513,10 +517,13 @@ def _collect_multiline_input() -> Optional[str]:
     return "\n".join(lines).strip()
 
 
-async def _initialize_registry_subagents(agent_ids: tuple[str, ...]) -> list[CompiledSubAgent]:
+async def _initialize_configured_subagents(agent_ids: tuple[str, ...]) -> list[SubAgent | CompiledSubAgent]:
     from bot_service.agent_registry import agent_registry
 
-    async def load_one(agent_id: str) -> CompiledSubAgent:
+    async def load_one(agent_id: str) -> SubAgent | CompiledSubAgent:
+        if agent_id == WEB_SEARCH_AGENT_ID:
+            return build_web_search_subagent()
+
         definitions = getattr(agent_registry, "_definitions", {})
         definition = definitions.get(agent_id)
         if definition is None:
@@ -548,8 +555,8 @@ def _tool_name(tool: Any) -> str:
 def _print_runtime_summary(
     *,
     config_path: str,
-    stateless_subagents: list[CompiledSubAgent],
-    stateful_subagents: list[CompiledSubAgent],
+    stateless_subagents: list[SubAgent | CompiledSubAgent],
+    stateful_subagents: list[SubAgent | CompiledSubAgent],
     internal_tools: list[Any],
     mcp_tools: list[Any],
 ) -> None:
@@ -596,10 +603,10 @@ def main() -> int:
         with asyncio.Runner() as runner:
             try:
                 stateless_subagents = runner.run(
-                    _initialize_registry_subagents(cli_config.subagents.stateless)
+                    _initialize_configured_subagents(cli_config.subagents.stateless)
                 )
                 stateful_subagents = runner.run(
-                    _initialize_registry_subagents(cli_config.subagents.stateful)
+                    _initialize_configured_subagents(cli_config.subagents.stateful)
                 )
                 internal_tools = build_internal_tools(cli_config.internal_tools)
                 mcp_tools = runner.run(load_mcp_tools_from_config(cli_config.mcp))
