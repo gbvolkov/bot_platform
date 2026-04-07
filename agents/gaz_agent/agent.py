@@ -49,6 +49,7 @@ from .logic import (
     merge_slots,
     normalize_provisional_recommendations,
     prioritize_missing_slots,
+    requires_pricing_bi_first,
     select_active_tool_names,
     update_provisional_recommendations,
 )
@@ -143,6 +144,16 @@ class SalesToolSelectionMiddleware(AgentMiddleware):
         allowed_tool_names = list(state.get("allowed_tool_names") or [])
         if not allowed_tool_names:
             return handler(request)
+        tool_calls_this_turn = list(state.get("tool_calls_this_turn") or [])
+        tool_call_names = set(tool_calls_this_turn)
+        requires_bi_first = requires_pricing_bi_first(
+            state.get("current_client_intent") or "overview",
+            state.get("intent_flags") or {},
+            last_user_text=state.get("last_user_text") or "",
+            problem_summary=state.get("problem_summary") or "",
+            search_query=state.get("search_query") or "",
+            slots=state.get("slots") or {},
+        )
         active_tool_names = select_active_tool_names(
             state.get("current_client_intent") or "overview",
             state.get("answer_depth") or "broad",
@@ -156,7 +167,9 @@ class SalesToolSelectionMiddleware(AgentMiddleware):
             has_branch_pack=bool((state.get("research_status") or {}).get("last_branch_pack")),
             has_shortlist=bool(state.get("shortlist")),
             has_followup=bool((state.get("followup_pack") or {}).get("documents")),
-            has_pricing_bi_call_this_turn="query_pricing_bi" in set(state.get("tool_calls_this_turn") or []),
+            has_pricing_bi_call_this_turn="query_pricing_bi" in tool_call_names,
+            requires_pricing_bi_first=requires_bi_first,
+            tool_calls_this_turn=tool_calls_this_turn,
         )
         selected = [self._tool_registry[name] for name in active_tool_names if name in self._tool_registry]
         selected_names = {name for name in active_tool_names if name in self._tool_registry}
@@ -168,7 +181,7 @@ class SalesToolSelectionMiddleware(AgentMiddleware):
                 selected.append(tool_obj)
                 selected_names.add(tool_name)
         if not selected:
-            return handler(request)
+            return handler(request.override(tools=[]))
         return handler(request.override(tools=selected))
 
 
@@ -872,7 +885,11 @@ def _build_policy_validator(
             locale,
             "sales_validator",
             payload,
-            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+            [
+                *_retry_prompt_sections(request.state),
+                *_allowed_family_prompt_sections(locale, allowed_family_ids),
+                *_source_ladder_prompt_sections(locale),
+            ],
         )
 
     return create_agent(
@@ -919,7 +936,7 @@ def _build_sales_response_agent(
             ToolCallLimitMiddleware(tool_name="search_sales_materials", run_limit=3, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name="read_material", run_limit=4, exit_behavior="continue"),
             ToolCallLimitMiddleware(tool_name="get_branch_pack", run_limit=1, exit_behavior="continue"),
-            SalesToolSelectionMiddleware(tool_registry, always_available_tool_names=["query_pricing_bi", "web_search"]),
+            SalesToolSelectionMiddleware(tool_registry),
             prompt,
         ],
         state_schema=GazAgentState,
