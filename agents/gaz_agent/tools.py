@@ -36,6 +36,7 @@ from .schemas import (
 
 
 LOG = logging.getLogger(__name__)
+_DEFAULT_INTERNAL_RECURSION_LIMIT = 50
 _VALID_SEARCH_INTENTS = {"overview", "compare", "specs", "financing", "objection"}
 _VALID_BRANCHES = {
     "tco",
@@ -1823,13 +1824,45 @@ def build_search_sales_materials_tool(
                 }
             )
 
-        response = docs_client.search_sales_materials(
-            query=search_query,
-            intent=resolved_intent,
-            families=effective_families,
-            competitor=resolved_competitor,
-            top_k=clamped_top_k,
-        )
+        try:
+            response = docs_client.search_sales_materials(
+                query=search_query,
+                intent=resolved_intent,
+                families=effective_families,
+                competitor=resolved_competitor,
+                top_k=clamped_top_k,
+            )
+        except Exception as exc:  # noqa: BLE001
+            detail = str(exc)
+            LOG.warning("GAZ docs search failed: %s", detail)
+            response_payload = {
+                "status": "error",
+                "error_code": "gaz_docs_search_failed",
+                "message": detail,
+                "query": search_query,
+                "next_step": "Treat GAZ documents as unavailable for this requested fact and use web_search if the fact is still required.",
+            }
+            _debug_tool_result("search_sales_materials", response_payload)
+            return Command(
+                update={
+                    "docs_status": {"service_available": False, "collection_available": False, "error": detail},
+                    "research_status": {
+                        **dict(state.get("research_status") or {}),
+                        "last_intent": resolved_intent,
+                        "candidate_count": 0,
+                        "has_prior_search": True,
+                    },
+                    "search_keys_this_turn": [*existing_search_keys, search_key],
+                    "tool_calls_this_turn": _append_tool_call(state, "search_sales_materials"),
+                    "runtime_warnings": _append_runtime_warning(
+                        state,
+                        stage="gaz:search_sales_materials",
+                        code="gaz_docs_search_failed",
+                        detail=detail,
+                    ),
+                    "messages": _tool_message(response_payload, runtime),
+                }
+            )
         candidates = _filter_candidates_for_requested_families(
             response.get("candidates") or [],
             effective_families or allowed_family_ids,
@@ -2228,6 +2261,7 @@ def build_query_pricing_bi_tool(
             runtime.config if runtime else None,
             extra_tags=["gaz:pricing_bi"],
         )
+        internal_config["recursion_limit"] = _DEFAULT_INTERNAL_RECURSION_LIMIT
         parent_configurable = dict(internal_config.get("configurable") or {})
         configurable = dict(pricing_bi_configurable)
         configurable.update(parent_configurable)

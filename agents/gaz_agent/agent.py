@@ -81,6 +81,7 @@ _TEMPERATURE_ORDER = {"neutral": 0, "impatient": 1, "irritated": 2, "competitor_
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_GAZ_PRICING_DB_URL = f"sqlite:///{(_REPO_ROOT / 'data' / 'gaz-pricing' / 'gaz_pricing_norm.sqlite').as_posix()}"
 _DEFAULT_GAZ_PRICING_PROMPT_CONTEXT_PATH = _REPO_ROOT / "agents" / "gaz_agent" / "pricing_bi_prompt_context.txt"
+_DEFAULT_INTERNAL_RECURSION_LIMIT = 50
 _PRICING_BI_THREAD_SUFFIX = ":pricing_bi"
 _VALID_BRANCH_HINTS = {
     "tco",
@@ -275,6 +276,7 @@ def _repair_answer(
     validation: Dict[str, Any],
 ) -> tuple[str, List[Dict[str, Any]]]:
     internal_config = build_internal_invoke_config(config, extra_tags=["gaz:repair"])
+    internal_config["recursion_limit"] = _DEFAULT_INTERNAL_RECURSION_LIMIT
     repair_state: GazAgentState = dict(state)
     repair_state["draft_answer"] = draft_answer
     repair_state["validation_feedback"] = _validation_feedback_payload(validation)
@@ -680,6 +682,7 @@ def _invoke_agent_with_retry(
         if attempt == 2:
             tags.append("retry")
         internal_config = build_internal_invoke_config(config, extra_tags=tags)
+        internal_config["recursion_limit"] = _DEFAULT_INTERNAL_RECURSION_LIMIT
         try:
             result = agent.invoke(invoke_state, config=internal_config, context=getattr(runtime, "context", None))
         except Exception as exc:
@@ -769,6 +772,10 @@ def _tool_contract_sections(locale: str, state: GazAgentState) -> List[str]:
     return sections
 
 
+def _source_ladder_prompt_sections(locale: str) -> List[str]:
+    return [get_prompt(locale, "source_ladder_policy")]
+
+
 def _allowed_family_prompt_sections(locale: str, allowed_family_ids: Optional[List[str]]) -> List[str]:
     labels = format_allowed_product_names(allowed_family_ids)
     if not labels:
@@ -833,7 +840,11 @@ def _build_answer_planner(
             locale,
             "answer_planner",
             _answer_plan_payload(request.state),
-            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+            [
+                *_retry_prompt_sections(request.state),
+                *_allowed_family_prompt_sections(locale, allowed_family_ids),
+                *_source_ladder_prompt_sections(locale),
+            ],
         )
 
     return create_agent(
@@ -891,6 +902,7 @@ def _build_sales_response_agent(
             [
                 *_retry_prompt_sections(request.state),
                 *_allowed_family_prompt_sections(locale, allowed_family_ids),
+                *_source_ladder_prompt_sections(locale),
                 *_tool_contract_sections(locale, request.state),
             ],
         )
@@ -930,7 +942,11 @@ def _build_sales_repair_agent(
             locale,
             "sales_repair_agent",
             payload,
-            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+            [
+                *_retry_prompt_sections(request.state),
+                *_allowed_family_prompt_sections(locale, allowed_family_ids),
+                *_source_ladder_prompt_sections(locale),
+            ],
         )
 
     return create_agent(
@@ -954,7 +970,11 @@ def _build_sales_continue_agent(
             locale,
             "sales_continue_agent",
             _compact_payload(request.state),
-            [*_retry_prompt_sections(request.state), *_allowed_family_prompt_sections(locale, allowed_family_ids)],
+            [
+                *_retry_prompt_sections(request.state),
+                *_allowed_family_prompt_sections(locale, allowed_family_ids),
+                *_source_ladder_prompt_sections(locale),
+            ],
         )
 
     return create_agent(
