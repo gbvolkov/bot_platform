@@ -6,9 +6,9 @@ from typing import Any, Dict, Iterable, Optional
 from .locales import get_locale
 
 
-SYSTEM_PROMPT_VERSION = "v0.6.1"
-NODE_PROMPT_SET_VERSION = "v0.6.1"
-SUMMARY_PROMPT_VERSION = "v0.6.1"
+SYSTEM_PROMPT_VERSION = "v0.7.3"
+NODE_PROMPT_SET_VERSION = "v0.7.3"
+SUMMARY_PROMPT_VERSION = "v0.7.3"
 
 
 

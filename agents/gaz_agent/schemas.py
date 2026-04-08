@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
@@ -20,6 +20,7 @@ GazBranch = Literal[
 ClientIntent = Literal["overview", "compare", "specs", "financing", "objection", "recommendation", "materials", "next_step"]
 AnswerDepth = Literal["broad", "bounded", "justified", "deep_research"]
 CustomerTemperature = Literal["neutral", "impatient", "irritated", "competitor_risk"]
+SourceStrategy = Literal["model_bi_first", "selection_docs_first", "docs_first"]
 
 
 class GazSlots(BaseModel):
@@ -158,18 +159,10 @@ class TurnIntentExtractionResult(BaseModel):
     problem_summary_candidate: str = ""
     current_client_intent: ClientIntent = "overview"
     customer_temperature: CustomerTemperature = "neutral"
-
-
-class AnswerPlanResult(BaseModel):
-    current_client_intent: ClientIntent = "overview"
-    answer_depth: AnswerDepth = "broad"
-    customer_temperature: CustomerTemperature = "neutral"
-    work_mode: GazStage = "SELL"
-    clarification_allowed: bool = False
-    should_offer_provisional_recommendations: bool = True
-    search_query: str = ""
-    branch_hint: Optional[str] = None
-    provisional_recommendations: List[str] = Field(default_factory=list)
+    mentioned_models: List[str] = Field(default_factory=list)
+    requested_facts: List[str] = Field(default_factory=list)
+    source_strategy: SourceStrategy = "docs_first"
+    source_reason: str = ""
 
 
 class ShortlistEntry(BaseModel):
@@ -188,9 +181,3 @@ class FollowupPack(BaseModel):
     decision_role: Optional[str] = None
     recommended_action: str
     documents: List[FollowupDocument] = Field(default_factory=list)
-
-
-class PolicyValidationResult(BaseModel):
-    is_valid: bool = True
-    violations: List[str] = Field(default_factory=list)
-    suggested_fix: Optional[str] = None

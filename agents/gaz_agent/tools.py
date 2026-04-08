@@ -464,6 +464,26 @@ def _resolve_requested_product_terms(
     }
 
 
+def _comparison_terms_from_state(state: Dict[str, Any] | None) -> List[str]:
+    if not isinstance(state, dict):
+        return []
+    intent_flags = state.get("intent_flags") or {}
+    compare_requested = clean_text(state.get("current_client_intent")).lower() == "compare" or bool(
+        intent_flags.get("requested_competitor_comparison")
+    )
+    if not compare_requested:
+        return []
+    terms: List[str] = []
+    for item in state.get("mentioned_models") or []:
+        cleaned = clean_text(item)
+        if cleaned:
+            terms.append(cleaned)
+    competitor = clean_text((state.get("slots") or {}).get("competitor"))
+    if competitor:
+        terms.append(competitor)
+    return _dedupe_preserve(terms)
+
+
 def _find_family_alias_matches(value: Any) -> List[Tuple[str, str]]:
     text = _normalize_family_text(value)
     matches: List[Tuple[str, str]] = []
@@ -1739,11 +1759,16 @@ def build_search_sales_materials_tool(
         top_k: int = 4,
         runtime: ToolRuntime = None,
     ) -> Command:
-        """Search official sales materials before reading any specific document in depth.
+        """Search internal GAZ documents before reading any specific document in depth.
 
-        Use this tool to discover candidate brochures, presentations, battlecards, and other
-        approved materials that are relevant to the current ask. Prefer this before
-        `read_material` when you still need to identify the right sources.
+        Use this tool to discover candidates, constraints, configurations/options, sales
+        arguments, comparison evidence, TCO/service context, and other approved materials
+        relevant to the current ask. It is not the primary source for exact normalized model
+        prices or structured technical characteristics; use `query_pricing_bi` first for
+        concrete model price/spec facts. For no-model selection tasks, use this tool first
+        to identify directions, constraints, and candidate models before checking concrete
+        candidates in BI. Prefer this before `read_material` when you still need to identify
+        the right document candidates.
 
         Args:
             query: Natural-language search request describing the customer problem or sales need.
@@ -1910,11 +1935,15 @@ def build_read_material_tool(
 ):
     @tool("read_material", parse_docstring=True)
     def read_material(candidate_id: str, focus: str, max_segments: int = 3, runtime: ToolRuntime = None) -> Command:
-        """Read a targeted excerpt from a previously surfaced material candidate.
+        """Read a targeted excerpt from a previously surfaced internal GAZ material.
 
         Use this tool only after `search_sales_materials` or `get_branch_pack` has returned
         candidate documents. It reads focused excerpts instead of the whole material and is
-        best for extracting evidence for one concrete point.
+        best for extracting evidence for one concrete point: configuration details, sales
+        arguments, comparison notes, service/TCO context, or operating constraints. It is not
+        the primary source for exact normalized model price/spec facts; use `query_pricing_bi`
+        first for those when a concrete model is involved. Use it to enrich or confirm facts
+        that BI does not cover fully, not to replace BI for exact model price/spec lookups.
 
         Args:
             candidate_id: Identifier of a previously surfaced material candidate that is allowed
@@ -2162,28 +2191,31 @@ def build_query_pricing_bi_tool(
     ) -> Command:
         """Query the internal pricing BI agent for exact commercial and technical facts.
 
-        Use this tool first for business questions about model price ranges, option
-        availability, option pricing, trims, maintenance cost or service intervals, and
-        exact technical characteristics stored in the pricing database. This includes
+        Use this tool first whenever the current request or context contains a concrete
+        model/modification and the answer needs exact prices, trims, options, maintenance,
+        service intervals, or structured technical facts. This also applies to competitor
+        models when they are needed strictly for factual comparison with GAZ. This includes
         structured fields such as gross weight, curb weight, payload, wheelbase, dimensions,
         engine, power, transmission, drive type, wheel formula, seating, fuel tank, warranty,
         and similar exact specification fields. The question should stay in business language
         and should not mention database tables, columns, or SQL. When possible, also pass
-        product terms from the user's request. Umbrella terms such as "Соболь" or "Газель"
-        are allowed here; the tool will normalize and expand them to the concrete internal
-        product families before querying BI.
+        concrete model mentions (for example A21R22 or Dongfeng Q35N) and broader family
+        terms in `requested_product_terms`; the tool will normalize and expand them internally.
 
         Args:
             question: Business-language question for the pricing BI agent, such as a request
                 about model price, configuration content, exact technical characteristics,
                 option status, option price, warranty, or maintenance cost.
             requested_product_terms: Optional list of product terms from the user's request.
-                Pass names like "Газель NN", "Газель NEXT", or broader terms like "Соболь".
-                The tool will normalize and expand them internally.
+                Pass concrete model/modification names or broader family terms; the tool will
+                normalize and expand them internally.
         """
         state = runtime.state if runtime else {}
         resolved_question = clean_text(question)
         normalized_requested_terms = [clean_text(item) for item in requested_product_terms or [] if clean_text(item)]
+        comparison_terms = _comparison_terms_from_state(state)
+        if comparison_terms:
+            normalized_requested_terms = _dedupe_preserve([*normalized_requested_terms, *comparison_terms])
         _debug_tool_call(
             "query_pricing_bi",
             {"question": resolved_question, "requested_product_terms": normalized_requested_terms},
@@ -2211,6 +2243,7 @@ def build_query_pricing_bi_tool(
         resolved_family_ids = list(resolved_scope.get("resolved_family_ids") or [])
         resolved_family_labels = list(resolved_scope.get("resolved_family_labels") or [])
         unresolved_terms = list(resolved_scope.get("unresolved_terms") or [])
+        compare_mode = bool(comparison_terms)
 
         normalized_allowed = _normalize_family_list(allowed_family_ids)
         allowed_set = set(normalized_allowed)
@@ -2224,13 +2257,13 @@ def build_query_pricing_bi_tool(
             )
             if effective_family_ids and len(effective_family_ids) != len(resolved_family_ids):
                 partial_filter = True
-        if normalized_allowed and normalized_requested_terms and unresolved_terms:
+        if normalized_allowed and normalized_requested_terms and unresolved_terms and not compare_mode:
             unsupported_names.extend(unresolved_terms)
             if effective_family_ids:
                 partial_filter = True
         unsupported_names = _dedupe_preserve(unsupported_names)
 
-        if normalized_allowed and not effective_family_ids and (resolved_family_ids or unresolved_terms):
+        if normalized_allowed and not effective_family_ids and (resolved_family_ids or (unresolved_terms and not compare_mode)):
             payload = _family_filter_notice(
                 locale,
                 unsupported_names or unresolved_terms or normalized_requested_terms,
@@ -2250,11 +2283,20 @@ def build_query_pricing_bi_tool(
         forwarded_question = resolved_question
         scope_labels = [_family_display_label(family_id) for family_id in effective_family_ids] or resolved_family_labels
         if scope_labels:
-            scope_prefix = (
-                f"Work only within these product families: {', '.join(scope_labels)}. "
-                if _locale_key(locale) == "en"
-                else f"Работай только по следующим продуктовым семействам: {', '.join(scope_labels)}. "
-            )
+            if compare_mode:
+                scope_prefix = (
+                    f"Use these GAZ product families as the only recommendation scope: {', '.join(scope_labels)}. "
+                    "External models mentioned in the request may be used only for factual comparison with these GAZ families; do not promote or recommend them. "
+                    if _locale_key(locale) == "en"
+                    else f"Используй следующие продуктовые семейства ГАЗ как единственный scope для рекомендаций: {', '.join(scope_labels)}. "
+                    "Внешние модели из запроса можно использовать только для фактического сравнения с этими семействами ГАЗ; не продвигай и не рекомендуй их. "
+                )
+            else:
+                scope_prefix = (
+                    f"Work only within these product families: {', '.join(scope_labels)}. "
+                    if _locale_key(locale) == "en"
+                    else f"Работай только по следующим продуктовым семействам: {', '.join(scope_labels)}. "
+                )
             forwarded_question = f"{scope_prefix}{forwarded_question}"
 
         internal_config = build_internal_invoke_config(
@@ -2360,11 +2402,12 @@ def build_web_search_tool(
 
     @tool("web_search", parse_docstring=True)
     def web_search(query: str, runtime: ToolRuntime = None) -> Command:
-        """Search the public web with Yandex when the user explicitly asks for internet sources.
+        """Search the public web with Yandex for external or current facts after internal sources.
 
-        Use this tool only when the user directly asks to search the internet, check external
-        sources, or verify something on the web. Do not use it for internal product questions
-        that can be answered from the existing GAZ tools and materials.
+        Use this tool only after BI and/or internal GAZ documents are insufficient for the
+        requested fact, or when external/current competitor or market data is needed. Do not
+        use it before BI for a concrete model and do not use it before internal documents for
+        a no-model selection task.
 
         Args:
             query: A concise web search query describing what should be looked up online.

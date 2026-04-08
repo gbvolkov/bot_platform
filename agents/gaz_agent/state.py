@@ -38,18 +38,14 @@ class GazAgentState(AgentState[Dict[str, Any]]):
     problem_summary: NotRequired[Annotated[str, _latest]]
 
     current_client_intent: NotRequired[Annotated[Optional[str], _latest]]
-    planned_answer_depth: NotRequired[Annotated[Optional[str], _latest]]
-    answer_depth: NotRequired[Annotated[Optional[str], _latest]]
     customer_temperature: NotRequired[Annotated[Optional[str], _latest]]
     clarification_allowed: NotRequired[Annotated[bool, _latest]]
-    validator_guidance: NotRequired[Annotated[str, _latest]]
     llm_retry_instruction: NotRequired[Annotated[str, _latest]]
     provisional_recommendations: NotRequired[Annotated[List[str], _merge_list]]
-    hitl_eligible: NotRequired[Annotated[bool, _latest]]
-    hitl_blocked_by_temperature: NotRequired[Annotated[bool, _latest]]
-    hitl_blocked_by_first_turn_budget: NotRequired[Annotated[bool, _latest]]
-    hitl_blocked_by_missing_prior_search: NotRequired[Annotated[bool, _latest]]
-    hitl_trigger_kind: NotRequired[Annotated[Optional[str], _latest]]
+    mentioned_models: NotRequired[Annotated[List[str], _merge_list]]
+    requested_facts: NotRequired[Annotated[List[str], _merge_list]]
+    source_strategy: NotRequired[Annotated[Optional[str], _latest]]
+    source_reason: NotRequired[Annotated[str, _latest]]
 
     active_branch: NotRequired[Annotated[Optional[str], _latest]]
     branch_conflict: NotRequired[Annotated[List[str], _merge_list]]
@@ -69,10 +65,6 @@ class GazAgentState(AgentState[Dict[str, Any]]):
     followup_pack: NotRequired[Annotated[Dict[str, Any], _merge_dict]]
 
     research_status: NotRequired[Annotated[Dict[str, Any], _merge_dict]]
-    needs_hitl_wait_confirmation: NotRequired[Annotated[bool, _latest]]
-    hitl_reason: NotRequired[Annotated[Optional[str], _latest]]
-    research_wait_approved: NotRequired[Annotated[bool, _latest]]
-    research_wait_rejected: NotRequired[Annotated[bool, _latest]]
     read_attempts_by_candidate: NotRequired[Annotated[Dict[str, Any], _merge_dict]]
     read_focus_keys_this_turn: NotRequired[Annotated[List[str], _merge_list]]
     search_keys_this_turn: NotRequired[Annotated[List[str], _merge_list]]
@@ -81,8 +73,6 @@ class GazAgentState(AgentState[Dict[str, Any]]):
 
     allowed_tool_names: NotRequired[Annotated[List[str], _merge_list]]
     tool_calls_this_turn: NotRequired[Annotated[List[str], _merge_list]]
-    draft_answer: NotRequired[Annotated[Optional[str], _latest]]
-    validation_feedback: NotRequired[Annotated[Dict[str, Any], _merge_dict]]
     runtime_warnings: NotRequired[Annotated[List[Dict[str, Any]], _merge_list]]
 
     trace: NotRequired[Annotated[List[Dict[str, Any]], _merge_list]]

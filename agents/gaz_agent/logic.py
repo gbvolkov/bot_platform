@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .schemas import AnswerDepth, ClientIntent, CustomerTemperature, FollowupPack, GazBranch, GazStage, ShortlistEntry
+from .schemas import ClientIntent, CustomerTemperature, FollowupPack, GazBranch, ShortlistEntry
 
 _SPECIAL_BODY_TERMS = {
     "refrigerator",
@@ -464,279 +464,6 @@ def infer_customer_temperature(intent_flags: Mapping[str, Any] | None, last_user
     return "neutral"
 
 
-def derive_answer_depth(intent: ClientIntent, intent_flags: Mapping[str, Any] | None, branch_hint: Optional[str] = None) -> AnswerDepth:
-    flags = dict(intent_flags or {})
-    if intent == "overview":
-        return "broad"
-    if intent == "financing":
-        return "bounded"
-    if intent in {"compare", "specs", "materials"}:
-        return "bounded"
-    if intent == "objection":
-        if flags.get("requested_competitor_comparison") or flags.get("threatened_competitor_switch"):
-            return "justified"
-        return "bounded"
-    if intent in {"recommendation", "next_step"}:
-        return "justified" if branch_hint else "bounded"
-    return "bounded"
-
-
-def clamp_answer_depth(
-    intent: ClientIntent,
-    proposed_depth: AnswerDepth | str,
-    *,
-    has_prior_search: bool = False,
-    has_prior_read: bool = False,
-    has_branch_basis: bool = False,
-) -> AnswerDepth:
-    depth = str(proposed_depth or "broad")
-    if depth not in {"broad", "bounded", "justified", "deep_research"}:
-        depth = "broad"
-    if depth == "deep_research":
-        depth = "justified"
-
-    if intent == "overview":
-        return "broad"
-    if intent == "financing":
-        return "bounded"
-    if intent in {"compare", "specs", "materials"}:
-        if not (has_prior_search and has_prior_read):
-            return "bounded"
-        return "justified" if depth == "justified" else "bounded"
-    if intent == "objection":
-        if depth == "justified" and (has_prior_search or has_prior_read):
-            return "justified"
-        return "bounded"
-    if intent in {"recommendation", "next_step"}:
-        if depth == "justified" and has_branch_basis:
-            return "justified"
-        return "bounded"
-    return "bounded"
-
-
-def derive_hitl_trigger_kind(intent: ClientIntent, intent_flags: Mapping[str, Any] | None) -> Optional[str]:
-    flags = dict(intent_flags or {})
-    if flags.get("requested_materials") or intent == "materials":
-        return "document_package_wait"
-    if flags.get("requested_comparison_table") or flags.get("requested_competitor_comparison"):
-        return "deep_comparison_wait"
-    return None
-
-
-def evaluate_hitl_gate(
-    intent: ClientIntent,
-    customer_temperature: CustomerTemperature,
-    intent_flags: Mapping[str, Any] | None,
-    research_status: Mapping[str, Any] | None,
-    *,
-    research_wait_rejected: bool = False,
-    has_material_candidates: bool = False,
-    has_material_reads: bool = False,
-) -> Dict[str, Any]:
-    status = dict(research_status or {})
-    has_prior_search = bool(status.get("has_prior_search")) or has_material_candidates
-    has_prior_read = bool(status.get("has_prior_read")) or has_material_reads
-    trigger_kind = derive_hitl_trigger_kind(intent, intent_flags)
-    blocked_by_temperature = customer_temperature in {"irritated", "competitor_risk"}
-    blocked_by_first_turn_budget = not has_prior_search and not has_prior_read
-    blocked_by_missing_prior_search = has_prior_search and not has_prior_read
-    hitl_eligible = bool(trigger_kind) and not research_wait_rejected
-    needs_wait = bool(
-        hitl_eligible
-        and not blocked_by_temperature
-        and not blocked_by_first_turn_budget
-        and not blocked_by_missing_prior_search
-    )
-    return {
-        "hitl_eligible": hitl_eligible,
-        "needs_hitl_wait_confirmation": needs_wait,
-        "hitl_blocked_by_temperature": blocked_by_temperature,
-        "hitl_blocked_by_first_turn_budget": blocked_by_first_turn_budget,
-        "hitl_blocked_by_missing_prior_search": blocked_by_missing_prior_search,
-        "hitl_trigger_kind": trigger_kind,
-    }
-
-
-def derive_work_mode(intent: ClientIntent, answer_depth: AnswerDepth) -> GazStage:
-    if intent == "next_step":
-        return "FOLLOWUP"
-    if intent == "recommendation":
-        return "RECOMMEND"
-    if answer_depth in {"justified", "deep_research"} or intent in {"compare", "specs", "materials", "objection"}:
-        return "RESEARCH"
-    return "SELL"
-
-
-def build_allowed_tool_names(intent: ClientIntent, answer_depth: AnswerDepth, work_mode: GazStage) -> List[str]:
-    allowed = ["query_pricing_bi", "web_search", "get_sales_catalog_overview"]
-    if intent in {"overview", "financing", "recommendation", "next_step"}:
-        allowed.append("get_sales_landscape")
-    if intent in {"compare", "objection", "recommendation"}:
-        allowed.append("compare_product_directions")
-    if intent in {"specs", "recommendation"}:
-        allowed.append("collect_product_snapshot")
-    if intent in {"financing", "materials", "compare", "specs", "objection", "recommendation", "next_step"}:
-        allowed.extend(["search_sales_materials", "read_material"])
-    if answer_depth in {"justified", "deep_research"} or intent in {"recommendation", "next_step"}:
-        allowed.extend(["classify_problem_branch", "get_branch_pack"])
-    if work_mode in {"RECOMMEND", "FOLLOWUP"} or intent in {"recommendation", "next_step"}:
-        allowed.extend(["build_solution_shortlist", "build_followup_pack"])
-    return list(dict.fromkeys(allowed))
-
-
-def derive_research_layer(
-    *,
-    has_sales_digest: bool = False,
-    has_comparison_digest: bool = False,
-    has_product_snapshot: bool = False,
-    has_material_candidates: bool,
-    has_material_reads: bool,
-    has_branch_pack: bool,
-    has_shortlist: bool,
-    has_followup: bool,
-) -> str:
-    if has_followup:
-        return "followup"
-    if has_shortlist:
-        return "shortlist"
-    if has_branch_pack:
-        return "branch_pack"
-    if has_product_snapshot:
-        return "product_snapshot"
-    if has_comparison_digest:
-        return "comparison_digest"
-    if has_material_reads:
-        return "targeted_read"
-    if has_sales_digest:
-        return "sales_landscape"
-    if has_material_candidates:
-        return "broad_search"
-    return "portfolio_baseline"
-
-
-
-def select_active_tool_names(
-    intent: ClientIntent,
-    answer_depth: AnswerDepth,
-    work_mode: GazStage,
-    planned_tools: Sequence[str] | None = None,
-    *,
-    has_sales_digest: bool = False,
-    has_comparison_digest: bool = False,
-    has_product_snapshot: bool = False,
-    has_material_candidates: bool = False,
-    has_material_reads: bool = False,
-    has_branch_pack: bool = False,
-    has_shortlist: bool = False,
-    has_followup: bool = False,
-    has_pricing_bi_call_this_turn: bool = False,
-) -> List[str]:
-    planned = list(planned_tools or build_allowed_tool_names(intent, answer_depth, work_mode))
-    active: List[str] = []
-    for tool_name in ("query_pricing_bi", "web_search"):
-        if tool_name in planned:
-            active.append(tool_name)
-
-    if intent == "overview":
-        for tool_name in ("get_sales_catalog_overview", "get_sales_landscape"):
-            if tool_name in planned:
-                active.append(tool_name)
-        return list(dict.fromkeys(active))
-
-    if intent == "financing":
-        if not has_sales_digest:
-            for tool_name in ("get_sales_catalog_overview", "get_sales_landscape", "search_sales_materials"):
-                if tool_name in planned:
-                    active.append(tool_name)
-            return list(dict.fromkeys(active))
-        for tool_name in ("get_sales_landscape", "search_sales_materials"):
-            if tool_name in planned:
-                active.append(tool_name)
-        if has_material_candidates and "read_material" in planned:
-            active.append("read_material")
-        return list(dict.fromkeys(active))
-
-    if intent in {"compare", "objection"}:
-        if not has_comparison_digest:
-            if "compare_product_directions" in planned:
-                active.append("compare_product_directions")
-            return list(dict.fromkeys(active))
-        for tool_name in ("compare_product_directions", "search_sales_materials"):
-            if tool_name in planned:
-                active.append(tool_name)
-        if has_material_candidates and "read_material" in planned:
-            active.append("read_material")
-        if answer_depth in {"justified", "deep_research"}:
-            if "classify_problem_branch" in planned:
-                active.append("classify_problem_branch")
-            if "get_branch_pack" in planned:
-                active.append("get_branch_pack")
-        return list(dict.fromkeys(active))
-
-    if intent == "specs":
-        if not has_pricing_bi_call_this_turn:
-            return list(dict.fromkeys(active))
-        if not has_product_snapshot:
-            for tool_name in ("collect_product_snapshot", "search_sales_materials"):
-                if tool_name in planned:
-                    active.append(tool_name)
-            if has_material_candidates and "read_material" in planned:
-                active.append("read_material")
-            return list(dict.fromkeys(active))
-        for tool_name in ("collect_product_snapshot", "search_sales_materials"):
-            if tool_name in planned:
-                active.append(tool_name)
-        if has_material_candidates and "read_material" in planned:
-            active.append("read_material")
-        return list(dict.fromkeys(active))
-
-    if intent == "materials":
-        if not has_material_candidates:
-            if "search_sales_materials" in planned:
-                active.append("search_sales_materials")
-            return list(dict.fromkeys(active))
-        for tool_name in ("search_sales_materials", "read_material"):
-            if tool_name in planned:
-                active.append(tool_name)
-        if answer_depth in {"justified", "deep_research"}:
-            if "classify_problem_branch" in planned:
-                active.append("classify_problem_branch")
-            if "get_branch_pack" in planned:
-                active.append("get_branch_pack")
-        return list(dict.fromkeys(active))
-
-    if intent in {"recommendation", "next_step"}:
-        if not (has_sales_digest or has_comparison_digest or has_product_snapshot or has_material_candidates):
-            for tool_name in ("get_sales_landscape", "compare_product_directions", "collect_product_snapshot"):
-                if tool_name in planned:
-                    active.append(tool_name)
-            if intent == "recommendation" and "classify_problem_branch" in planned:
-                active.append("classify_problem_branch")
-        else:
-            for tool_name in ("get_sales_landscape", "compare_product_directions", "collect_product_snapshot", "search_sales_materials"):
-                if tool_name in planned:
-                    active.append(tool_name)
-            if has_material_candidates and "read_material" in planned:
-                active.append("read_material")
-        if answer_depth in {"justified", "deep_research"}:
-            if "classify_problem_branch" in planned:
-                active.append("classify_problem_branch")
-            if "get_branch_pack" in planned:
-                active.append("get_branch_pack")
-        if intent == "recommendation" or work_mode == "RECOMMEND" or has_shortlist:
-            if "build_solution_shortlist" in planned:
-                active.append("build_solution_shortlist")
-        if intent == "next_step" or work_mode == "FOLLOWUP" or has_followup:
-            if "build_followup_pack" in planned:
-                active.append("build_followup_pack")
-        return list(dict.fromkeys(active))
-
-    for tool_name in ("get_sales_catalog_overview", "get_sales_landscape", "search_sales_materials"):
-        if tool_name in planned:
-            active.append(tool_name)
-    return list(dict.fromkeys(active))
-
-
 def normalize_provisional_recommendations(values: Sequence[str] | None) -> List[str]:
     cleaned: List[str] = []
     for value in values or []:
@@ -901,7 +628,6 @@ def _followup_reason(
 
 
 __all__ = [
-    "build_allowed_tool_names",
     "build_followup",
     "build_sales_context",
     "build_sales_context_baseline",
@@ -909,14 +635,8 @@ __all__ = [
     "classify_branch",
     "clean_text",
     "compute_missing_slots",
-    "derive_answer_depth",
-    "clamp_answer_depth",
-    "derive_research_layer",
-    "derive_work_mode",
     "extract_conclusions",
-    "evaluate_hitl_gate",
     "family_label",
-    "derive_hitl_trigger_kind",
     "filter_sales_context",
     "infer_client_intent",
     "infer_customer_temperature",
@@ -927,7 +647,6 @@ __all__ = [
     "merge_slots",
     "normalize_provisional_recommendations",
     "prioritize_missing_slots",
-    "select_active_tool_names",
     "should_use_discovery_agent",
     "update_provisional_recommendations",
 ]
