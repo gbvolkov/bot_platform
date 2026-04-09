@@ -104,6 +104,15 @@ class AnswerOutput(TypedDict):
     ]
 
 
+class SQLQueryExecutionError(Exception):
+    """Raised when a generated SQL query cannot be executed successfully."""
+
+    def __init__(self, query: str, error: str):
+        super().__init__(error)
+        self.query = query
+        self.error = error
+
+
 agent_llm = ChatOpenAI(model="gpt-5.4-nano", temperature=0.0).with_structured_output(AnswerOutput)
 llm_query_gen = ChatOpenAI(model="gpt-5.4", temperature=0.0).with_structured_output(QueryOutput)
 
@@ -614,7 +623,7 @@ def get_response(
         if result.get("error") is None:
             break
         if attempt == 2:
-            raise Exception(result["error"])
+            raise SQLQueryExecutionError(query=query, error=result["error"])
         query = fix_query(query, result["error"])
     
     top_k = 30
