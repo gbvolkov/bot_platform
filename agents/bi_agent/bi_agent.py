@@ -17,7 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from platform_utils.llm_logger import JSONFileTracer
 from services.kb_manager.notifications import KBReloadContext, register_reload_listener
 
-from ..sql_query_gen import get_response
+from ..sql_query_gen import SQLQueryExecutionError, get_response
 from ..state.state import ConfigSchema
 from ..utils import ModelType
 
@@ -49,6 +49,7 @@ class BiAgentState(TypedDict, total=False):
     user_info: Dict[str, Any]
     question: str
     answer: str
+    query: str
     data_attachment: Optional[TabularAttachment]
     image_attachment: Optional[ImageAttachment]
     graphic_type: Optional[GraphicType]
@@ -94,6 +95,7 @@ def reset_memory(state: BiAgentState) -> BiAgentState:
         "messages": [RemoveMessage(id=mid) for mid in all_msg_ids],
         "question": "",
         "answer": "",
+        "query": "",
         "data_attachment": None,
         "image_attachment": None,
         "graphic_type": None,
@@ -218,6 +220,7 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
             return {
                 "question": "",
                 "answer": "Укажите вопрос, чтобы я мог построить отчёт и подготовить данные.",
+                "query": "",
                 "data_attachment": None,
                 "image_attachment": None,
                 "graphic_type": None,
@@ -243,11 +246,23 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
                 return_files=return_files,
                 return_images=return_images,
             )
+        except SQLQueryExecutionError as exc:
+            logging.exception("BI agent failed to execute generated report query: %s", exc)
+            return {
+                "question": question,
+                "answer": f"Не удалось построить отчёт: {exc}",
+                "query": exc.query,
+                "data_attachment": None,
+                "image_attachment": None,
+                "graphic_type": None,
+                "notes": exc.error,
+            }
         except Exception as exc:  # noqa: BLE001
             logging.exception("BI agent failed to build report: %s", exc)
             return {
                 "question": question,
                 "answer": f"Не удалось построить отчёт: {exc}",
+                "query": "",
                 "data_attachment": None,
                 "image_attachment": None,
                 "graphic_type": None,
@@ -270,6 +285,7 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
         return {
             "question": question,
             "answer": answer_text,
+            "query": raw_response.get("query", ""),
             "data_attachment": data_attachment,
             "image_attachment": image_attachment,
             "graphic_type": graphic_type,
@@ -310,13 +326,13 @@ def respond_with_report(state: BiAgentState, config: Optional[RunnableConfig] = 
         if state.get("graphic_type"):
             image_part["graphic_type"] = state["graphic_type"]
         parts.append(image_part)
-    #elif state.get("graphic_type"):
-        #parts.append(
-        #    {
-        #        "type": "text",
-        #        "text": f"Рекомендованный тип графика: {state['graphic_type']}",
-        #    }
-        #)
+    # elif state.get("graphic_type"):
+    #     parts.append(
+    #         {
+    #             "type": "text",
+    #             "text": f"Рекомендованный тип графика: {state['graphic_type']}",
+    #         }
+    #     )
 
     return {"messages": [AIMessage(content=parts)]}
 
@@ -376,7 +392,7 @@ def initialize_agent(
     def _handle_kb_reload(context: KBReloadContext) -> None:
         logging.info("KB reload requested for %s (reason=%s); no KB-backed retrievers configured.", agent_key, context.reason)
 
-    #if notify_on_reload:
+    # if notify_on_reload:
     register_reload_listener(agent_key, _handle_kb_reload)
 
     return graph
