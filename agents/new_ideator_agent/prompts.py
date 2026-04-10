@@ -317,12 +317,12 @@ LOCALES = {
             "ideator_prompt": IDEATOR_PROMPT_EN,
             "summary_prompt": SUMMARY_PROMPT,
             "format_prompt": FORMAT_PROMPT_EN,
+            "web_search_prompt": SEARCH_TOOL_POLICY_PROMPT_EN,
         },
         "agent": {
             "greeting": GREETINGS_EN,
             "set_report_request": SET_REPORT_REQUEST_EN,
             "report_confirmation": REPORT_CONFIRMATION_EN,
-            "web_search_prompt": SEARCH_TOOL_POLICY_PROMPT_EN,
         },
         "save_confirmation": "[You can now download the file.]({url})",
     },
