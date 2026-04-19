@@ -39,6 +39,8 @@ def test_initialize_agent_passes_stateless_and_stateful_subagents(monkeypatch):
         stateful_subagents=[stateful_subagent],
         checkpoint_saver="checkpoint",
         interrupt_on={"gmail_send_message": {"allowed_decisions": ["approve", "edit", "reject"]}},
+        skills=["/skills/example"],
+        backend="backend",
     )
 
     assert result["agent"]["tools"] == [store_tool]
@@ -57,6 +59,8 @@ def test_initialize_agent_passes_stateless_and_stateful_subagents(monkeypatch):
     assert captured["interrupt_on"] == {
         "gmail_send_message": {"allowed_decisions": ["approve", "edit", "reject"]}
     }
+    assert captured["skills"] == ["/skills/example"]
+    assert captured["backend"] == "backend"
 
 
 def test_initialize_agent_requires_scenario_system_prompt(monkeypatch):

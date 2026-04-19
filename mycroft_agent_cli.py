@@ -19,10 +19,11 @@ from agents.mycroft_agent.cli_config import (
     load_mcp_tools_from_config,
     validate_required_environment,
 )
-from agents.mycroft_agent.web_search_subagent import (
-    WEB_SEARCH_AGENT_ID,
-    build_web_search_subagent,
+from agents.mycroft_agent.configured_agent import (
+    build_skills_backend,
+    normalize_skill_source,
 )
+from agents.mycroft_agent.subagent_loader import initialize_configured_subagents
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
@@ -517,35 +518,7 @@ def _collect_multiline_input() -> Optional[str]:
     return "\n".join(lines).strip()
 
 
-async def _initialize_configured_subagents(agent_ids: tuple[str, ...]) -> list[SubAgent | CompiledSubAgent]:
-    from bot_service.agent_registry import agent_registry
-
-    async def load_one(agent_id: str) -> SubAgent | CompiledSubAgent:
-        if agent_id == WEB_SEARCH_AGENT_ID:
-            return build_web_search_subagent()
-
-        definitions = getattr(agent_registry, "_definitions", {})
-        definition = definitions.get(agent_id)
-        if definition is None:
-            available = ", ".join(sorted(definitions))
-            raise ValueError(
-                f"Unknown registry agent '{agent_id}'. Available agents: {available}"
-            )
-
-        while True:
-            ready = await agent_registry.ensure_agent_ready(agent_id)
-            if ready:
-                break
-            await asyncio.sleep(0.01)
-
-        instance = agent_registry.get_agent(agent_id)
-        return CompiledSubAgent(
-            name=definition.id,
-            description=f"{definition.name}. {definition.description}",
-            runnable=instance,
-        )
-
-    return await asyncio.gather(*(load_one(agent_id) for agent_id in agent_ids))
+_initialize_configured_subagents = initialize_configured_subagents
 
 
 def _tool_name(tool: Any) -> str:
@@ -610,6 +583,7 @@ def main() -> int:
                 )
                 internal_tools = build_internal_tools(cli_config.internal_tools)
                 mcp_tools = runner.run(load_mcp_tools_from_config(cli_config.mcp))
+                skills = tuple(normalize_skill_source(skill) for skill in cli_config.skills.paths)
                 agent = initialize_agent(
                     provider=provider,
                     model_size=model_size,
@@ -620,6 +594,8 @@ def main() -> int:
                     stateful_subagents=stateful_subagents,
                     streaming=False,
                     interrupt_on=cli_config.deepagents.interrupt_on or None,
+                    skills=skills,
+                    backend=build_skills_backend(skills),
                 )
 
                 thread_id, run_config = _new_config(args.thread_id)

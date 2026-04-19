@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+import importlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,8 +31,9 @@ _OPENAI_PROVIDER_VALUES = {
 
 @dataclass(frozen=True)
 class InternalToolSpec:
-    name: str
-    params: dict[str, Any]
+    name: str | None = None
+    import_path: str | None = None
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -60,8 +62,14 @@ class SubagentsConfig:
 
 
 @dataclass(frozen=True)
+class SkillsConfig:
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MycroftCliConfig:
     system_prompt: str
+    skills: SkillsConfig
     subagents: SubagentsConfig
     internal_tools: tuple[InternalToolSpec, ...]
     mcp: MCPConfig
@@ -89,12 +97,14 @@ def load_cli_config(raw_path: str | Path | None = None) -> MycroftCliConfig:
         )
 
     system_prompt = _parse_system_prompt(data.get("system_prompt"), config_dir=path.parent)
+    skills = _parse_skills(data.get("skills"))
     subagents = _parse_subagents(data.get("subagents"))
     internal_tools = _parse_internal_tools(data.get("internal_tools") or [])
     mcp = _parse_mcp_config(data.get("mcp") or {})
     deepagents = _parse_deepagents_config(data.get("deepagents") or {})
     return MycroftCliConfig(
         system_prompt=system_prompt,
+        skills=skills,
         subagents=subagents,
         internal_tools=internal_tools,
         mcp=mcp,
@@ -114,12 +124,17 @@ def build_internal_tools(
     resolved_builders = builders or _internal_tool_builders()
     tools: list[Any] = []
     for spec in specs:
-        builder = resolved_builders.get(spec.name)
-        if builder is None:
-            available = ", ".join(sorted(resolved_builders))
-            raise ValueError(
-                f"Unknown internal tool '{spec.name}'. Available tools: {available}"
-            )
+        if spec.import_path is not None:
+            builder = _load_imported_builder(spec.import_path)
+        else:
+            if spec.name is None:
+                raise ValueError("Internal tool spec must define either 'name' or 'import'.")
+            builder = resolved_builders.get(spec.name)
+            if builder is None:
+                available = ", ".join(sorted(resolved_builders))
+                raise ValueError(
+                    f"Unknown internal tool '{spec.name}'. Available tools: {available}"
+                )
 
         built = builder(**spec.params)
         if isinstance(built, (list, tuple)):
@@ -127,6 +142,26 @@ def build_internal_tools(
         else:
             tools.append(built)
     return tools
+
+
+def _load_imported_builder(import_path: str) -> Callable[..., Any]:
+    module_path, sep, attr_name = import_path.partition(":")
+    if not sep or not module_path.strip() or not attr_name.strip():
+        raise ValueError(
+            "Importable internal tool bundle must use 'module:function' format."
+        )
+
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        raise ValueError(f"Could not import internal tool module '{module_path}'.") from exc
+
+    builder = getattr(module, attr_name, None)
+    if not callable(builder):
+        raise ValueError(
+            f"Imported internal tool builder '{import_path}' is not callable."
+        )
+    return builder
 
 
 async def load_mcp_tools_from_config(mcp_config: MCPConfig) -> list[Any]:
@@ -236,6 +271,19 @@ def _parse_subagents(value: Any) -> SubagentsConfig:
     )
 
 
+def _parse_skills(value: Any) -> SkillsConfig:
+    if value is None:
+        return SkillsConfig(paths=())
+    if not isinstance(value, dict):
+        raise ValueError("Mycroft CLI config field 'skills' must be an object.")
+
+    raw_paths = value.get("paths", [])
+    if not isinstance(raw_paths, list):
+        raise ValueError("Mycroft CLI config field 'skills.paths' must be a list.")
+
+    return SkillsConfig(paths=tuple(_require_str(item, "skills.paths[]") for item in raw_paths))
+
+
 def _parse_system_prompt(value: Any, *, config_dir: Path) -> str:
     if isinstance(value, str):
         return _require_str(value, "system_prompt")
@@ -273,6 +321,23 @@ def _parse_internal_tools(value: Any) -> tuple[InternalToolSpec, ...]:
             continue
         if not isinstance(entry, dict):
             raise ValueError("Each internal_tools entry must be a string or an object.")
+        has_name = "name" in entry
+        has_import = "import" in entry
+        if has_name == has_import:
+            raise ValueError("Each internal_tools object must contain exactly one of 'name' or 'import'.")
+
+        if has_import:
+            import_path = _require_str(entry.get("import"), "internal_tools[].import")
+            params = entry.get("params") or {}
+            if not isinstance(params, dict):
+                raise ValueError("Mycroft CLI config field 'internal_tools[].params' must be an object.")
+            unexpected = set(entry) - {"import", "params"}
+            if unexpected:
+                names = ", ".join(sorted(unexpected))
+                raise ValueError(f"Unsupported internal_tools import fields: {names}")
+            parsed.append(InternalToolSpec(import_path=import_path, params=dict(params)))
+            continue
+
         name = _require_str(entry.get("name"), "internal_tools[].name")
         params = {key: entry[key] for key in entry if key != "name"}
         parsed.append(InternalToolSpec(name=name, params=params))

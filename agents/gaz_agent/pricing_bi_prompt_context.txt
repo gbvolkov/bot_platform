@@ -53,6 +53,14 @@ Important fields:
 - `comp_brand`
   Brand/display alias that mirrors `base_model`.
 
+- `manufacturer_brand`
+  Manufacturer brand.
+
+- `manufacturer_brand_lat`
+  Manufacturer brand in Latin uppercase spelling.
+  Use this field to restrict queries by manufacturer.
+  Known values in this database: `AVIOR`, `DONGFENG`, `FOTON`, `GAZ`, `ISUZU`, `JAC`, `KAMAZ`, `LADA`, `LIAZ`, `MAZ`, `PAZ`, `PROMTEKH`, `SAZ`, `SIMAZ`, `SOLLERS`, `UAZ`, `VOLGABUS`, `YUTONG`.
+
 - `comp_model`
   Second canonical identity part.
 

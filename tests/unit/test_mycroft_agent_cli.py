@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from agents.mycroft_agent.cli_config import (
     MCPConfig,
     InternalToolSpec,
     MCPServerSpec,
+    SkillsConfig,
     SubagentsConfig,
     build_internal_tools,
     load_cli_config,
@@ -90,6 +92,7 @@ def test_load_cli_config_reads_required_sections(tmp_path):
     assert config.internal_tools == (
         InternalToolSpec(name="store_artifact_tool", params={}),
     )
+    assert config.skills == SkillsConfig(paths=())
     assert config.mcp.tool_name_prefix is True
     assert config.mcp.servers[0].name == "sysadmin"
     assert config.mcp.servers[0].connection["transport"] == "http"
@@ -273,6 +276,78 @@ def test_build_internal_tools_flattens_bundle_builders():
     ]
 
 
+def test_build_internal_tools_loads_importable_bundle(monkeypatch):
+    fake_module = SimpleNamespace(
+        build_tools=lambda prefix: [
+            SimpleNamespace(name=f"{prefix}_a"),
+            SimpleNamespace(name=f"{prefix}_b"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "fake_mycroft_tools", fake_module)
+
+    tools = build_internal_tools(
+        (
+            InternalToolSpec(
+                import_path="fake_mycroft_tools:build_tools",
+                params={"prefix": "imported"},
+            ),
+        )
+    )
+
+    assert [tool.name for tool in tools] == ["imported_a", "imported_b"]
+
+
+def test_load_cli_config_reads_skills_and_importable_tool_bundle(tmp_path):
+    config_path = tmp_path / "mycroft.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": "Prompt",
+                "skills": {"paths": ["/skills/marketing_analyst"]},
+                "subagents": {"stateless": [], "stateful": []},
+                "internal_tools": [
+                    {
+                        "import": "agents.gaz_agent.marketing_tools:build_marketing_document_tools",
+                        "params": {"locale": "ru", "docs_collection": "gaz"},
+                    }
+                ],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_cli_config(config_path)
+
+    assert config.skills == SkillsConfig(paths=("/skills/marketing_analyst",))
+    assert config.internal_tools == (
+        InternalToolSpec(
+            import_path="agents.gaz_agent.marketing_tools:build_marketing_document_tools",
+            params={"locale": "ru", "docs_collection": "gaz"},
+        ),
+    )
+
+
+def test_load_cli_config_rejects_malformed_import_tool_specs(tmp_path):
+    config_path = tmp_path / "mycroft.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": "Prompt",
+                "subagents": {"stateless": [], "stateful": []},
+                "internal_tools": [{"import": "module:function", "name": "tool"}],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_cli_config(config_path)
+
+    assert "exactly one of 'name' or 'import'" in str(exc_info.value)
+
+
 def test_select_mcp_tools_accepts_prefixed_and_raw_names():
     server = MCPServerSpec(
         name="sysadmin",
@@ -296,15 +371,28 @@ def test_default_cli_config_uses_generic_config_file():
     config = load_cli_config()
 
     assert config.subagents == SubagentsConfig(
-        stateless=("gaz_pricing_bi", "web_search_agent"),
+        stateless=("gaz_pricing_bi_int", "marketing_analyst", "web_search_agent"),
         stateful=(),
     )
     assert config.internal_tools == (
         InternalToolSpec(name="store_artifact_tool", params={}),
     )
     assert tuple(server.name for server in config.mcp.servers) == ("maps", "gmail", "nhtsa")
-    assert "gaz_pricing_bi" in config.system_prompt
-    assert "web_search_agent" in config.system_prompt
+    assert "Source authority" in config.system_prompt
+    assert "Parallel calls are allowed" in config.system_prompt
+    assert "reconcile them" in config.system_prompt
+    assert "make an additional `gaz_pricing_bi_int` request" in config.system_prompt
+    assert "structured search/filtering by concrete operational parameters" in config.system_prompt
+    assert "Do not delegate requirement collection" in config.system_prompt
+    assert "Preserve the user's requested brand and portfolio scope" in config.system_prompt
+    assert "GAZ-only; exclude non-GAZ and competitor models" in config.system_prompt
+    assert "do not stop by offering to search again" in config.system_prompt
+    assert "make a follow-up `gaz_pricing_bi_int` request for those candidates" in config.system_prompt
+    assert "latest recommended mix first" in config.system_prompt
+    assert "Do not blindly accept an incorrect premise" in config.system_prompt
+    assert "Do not write a procurement mix like" in config.system_prompt
+    assert "Do not use the `general-purpose` subagent" in config.system_prompt
+    assert config.skills == SkillsConfig(paths=("skills/mycroft",))
 
 
 def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
@@ -659,8 +747,7 @@ def test_initialize_configured_subagents_accepts_inactive_explicit_agents(monkey
 
 def test_initialize_configured_subagents_builds_builtin_web_search_agent(monkeypatch):
     monkeypatch.setattr(
-        cli,
-        "build_web_search_subagent",
+        "agents.mycroft_agent.subagent_loader.build_web_search_subagent",
         lambda: {"name": "web_search_agent", "description": "web", "system_prompt": "prompt", "tools": []},
     )
 

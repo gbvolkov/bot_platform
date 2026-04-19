@@ -1,0 +1,31 @@
+{
+  "system_prompt": {
+    "type": "file",
+    "path": "system_prompt.txt"
+  },
+  "skills": {
+    "paths": [
+      "skills/marketing_analyst"
+    ]
+  },
+  "subagents": {
+    "stateless": [],
+    "stateful": []
+  },
+  "internal_tools": [
+    {
+      "import": "agents.gaz_agent.marketing_tools:build_marketing_document_tools",
+      "params": {
+        "locale": "ru",
+        "docs_collection": "gaz"
+      }
+    }
+  ],
+  "deepagents": {
+    "interrupt_on": {}
+  },
+  "mcp": {
+    "tool_name_prefix": true,
+    "servers": []
+  }
+}

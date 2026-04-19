@@ -3,9 +3,15 @@
     "type": "file",
     "path": "gaz_sales_system_prompt.txt"
   },
+  "skills": {
+    "paths": [
+      "skills/mycroft"
+    ]
+  },
   "subagents": {
     "stateless": [
-      "gaz_pricing_bi",
+      "gaz_pricing_bi_int",
+      "marketing_analyst",
       "web_search_agent"
     ],
     "stateful": []

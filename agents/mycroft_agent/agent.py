@@ -46,11 +46,14 @@ def initialize_agent(
     reasoning: str | None = None,
     max_tool_calls: int | None = 12,
     interrupt_on: dict[str, bool | dict[str, Any]] | None = None,
+    skills: Sequence[str] | None = None,
+    backend: Any | None = None,
 ) -> Any:
     if provider.value in {"openai", "openai_4", "openai_pers", "openai_think"} and not config.OPENAI_API_KEY:
         raise ValueError(
             f"Mycroft provider '{provider.value}' requires environment variable OPENAI_API_KEY"
         )
+
 
     callback_handlers = _build_callback_handlers()
     llm = get_llm(
@@ -91,6 +94,8 @@ def initialize_agent(
         system_prompt=resolved_system_prompt,
         checkpointer=checkpoint_saver or MemorySaver(),
         interrupt_on=interrupt_on,
+        skills=list(skills or []) or None,
+        backend=backend,
     )
     if callback_handlers:
         return agent.with_config({"callbacks": callback_handlers})
