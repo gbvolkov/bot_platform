@@ -198,6 +198,24 @@ def test_new_config_includes_default_user_id():
     }
 
 
+def test_persistent_checkpoint_saver_uses_hardcoded_workspace_path(tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "mycroft" / "cli_checkpoints.sqlite"
+    captured: dict[str, str] = {}
+
+    class FakeAsyncSqliteSaver:
+        @staticmethod
+        def from_conn_string(conn_string):
+            captured["conn_string"] = conn_string
+            return "checkpoint-cm"
+
+    monkeypatch.setattr(cli, "MYCROFT_CLI_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(cli, "AsyncSqliteSaver", FakeAsyncSqliteSaver)
+
+    assert cli._persistent_checkpoint_saver() == "checkpoint-cm"
+    assert captured["conn_string"] == str(checkpoint_path)
+    assert checkpoint_path.parent.is_dir()
+
+
 def test_parse_save_thread_command_supports_alias_and_optional_path():
     assert cli._parse_save_thread_command("/save-thread") == ""
     assert cli._parse_save_thread_command("/save-thread logs/thread.md") == "logs/thread.md"
@@ -421,6 +439,28 @@ def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
     assert config.mcp.servers[0].connection["command"] == "uvx"
     assert config.mcp.servers[0].tool_name_prefix is False
     assert config.mcp.servers[0].tools == ("idea_check",)
+
+
+def test_kpi_agent_cli_config_loads_kpi_bi_subagent_and_skills():
+    config = load_cli_config(
+        Path("C:/Projects/bot_platform/agents/mycroft_agent/kpi_agent_cli_config.json")
+    )
+
+    assert config.subagents == SubagentsConfig(
+        stateless=("kpi_bi_int",),
+        stateful=(),
+    )
+    assert config.internal_tools[0].import_path == (
+        "agents.mycroft_agent.scenarios.kpi_agent.tools:"
+        "build_kpi_staff_structure_fuzzy_search_tool"
+    )
+    assert config.mcp.servers == ()
+    assert config.skills == SkillsConfig(
+        paths=("agents/mycroft_agent/scenarios/kpi_agent/skills",)
+    )
+    assert "position-first" in config.system_prompt
+    assert "kpi_bi_int" in config.system_prompt
+    assert "kpi_method_ref" in config.system_prompt
 
 
 def test_required_environment_variables_include_default_runtime_requirements():

@@ -115,6 +115,7 @@ class SQLQueryExecutionError(Exception):
 
 agent_llm = ChatOpenAI(model="gpt-5.4-nano", temperature=0.0).with_structured_output(AnswerOutput)
 llm_query_gen = ChatOpenAI(model="gpt-5.4", temperature=0.0).with_structured_output(QueryOutput)
+DEFAULT_ANSWER_ROW_LIMIT = 30
 
 
 query_prompt_template = ChatPromptTemplate(
@@ -145,6 +146,7 @@ def build_sql_database(
     *,
     csv_paths: Optional[Sequence[str]] = None,
     database_url: Optional[str] = None,
+    max_string_length: int = 300,
 ) -> SQLDatabase:
     """Create a SQLDatabase from either a database URL or CSV-backed DuckDB views."""
     from sqlalchemy import create_engine
@@ -153,7 +155,11 @@ def build_sql_database(
 
     if database_url:
         engine = create_engine(database_url)
-        db = SQLDatabase(engine, view_support=True)
+        db = SQLDatabase(
+            engine,
+            view_support=True,
+            max_string_length=max_string_length,
+        )
         db.name = database_url
         return db
 
@@ -167,7 +173,11 @@ def build_sql_database(
     _attach_csvs_as_views_sqlalchemy_engine(engine, csv_paths)
 
     # 👈 include views in LangChain's introspection so get_table_info() isn't empty
-    db = SQLDatabase(engine, view_support=True)
+    db = SQLDatabase(
+        engine,
+        view_support=True,
+        max_string_length=max_string_length,
+    )
     db.name = "csv_duckdb"
     return db
 
@@ -437,18 +447,51 @@ def fix_query(query: str, error: str)-> str:
     return new_query
 
 
-def generate_answer(question: str, query: str, result: list)-> dict:
+def _resolve_answer_row_limit(answer_row_limit: Optional[int]) -> Optional[int]:
+    """Return rows visible to answer generation; negative means no row limit."""
+    if answer_row_limit is None or answer_row_limit == 0:
+        return DEFAULT_ANSWER_ROW_LIMIT
+    if answer_row_limit < 0:
+        return None
+    return answer_row_limit
+
+
+def generate_answer(
+    question: str,
+    query: str,
+    result: list,
+    *,
+    sql_row_count: int,
+    answer_row_count: int,
+    result_truncated: bool,
+)-> dict:
     """Post-process results into a succinct answer."""
+    truncation_note = (
+        "The SQL Result below is truncated to the rows visible to you. "
+        "Do not claim that it is a complete list unless the SQL result itself "
+        "contains aggregate totals proving completeness."
+        if result_truncated
+        else "The SQL Result below contains all rows returned by the SQL query."
+    )
     prompt = (
         "You are given a user question, the SQL query, and the SQL result rows.\n"
         "- If results are empty, say there are no matching records.\n"
         "- Otherwise, summarize relevant information clearly and list key rows/fields the user asked for.\n"
         "- Do not include internal/technical columns unless the user asked for them.\n"
+        "- Do not state SQL row counts unless the user asked for counts or the count is necessary to answer the question.\n"
+        "- If you do state a SQL row count, use only the control metadata below or explicit aggregate columns from the SQL result; never estimate by reading the text.\n"
+        "- If you produce a numbered list, every numbered item must correspond to a SQL result record or an explicit SQL aggregate/group. Do not number metadata, repeated context fields, notes, or explanatory comments as data rows.\n"
+        "- Do not invent additional rows, categories, KPIs, positions, or records that are not present in the SQL result.\n"
         "- Always answer in Russian, except measure_columns, label_columns and visual_recommendations.\n"
         "- Provide visualization guidance by specifying:\n"
         "  * measure_columns: ordered numeric columns suitable for metrics (y-axis values).\n"
         "  * label_columns: ordered categorical/context columns (first item will be used as x-axis; remaining entries annotate data points).\n"
         "  * visual_recommendations: choose from bar_chart, line_chart, scatter_plot, pie.\n\n"
+        "Control metadata for answer generation. Use it to avoid miscounting; do not repeat it unless useful for the answer:\n"
+        f"- sql_row_count: {sql_row_count}\n"
+        f"- answer_visible_row_count: {answer_row_count}\n"
+        f"- result_truncated_for_answer: {result_truncated}\n"
+        f"- result_scope: {truncation_note}\n\n"
         f'Question: {question}\n'
         f'SQL Query: {query}\n'
         f'SQL Result: {result}'
@@ -614,8 +657,14 @@ def get_response(
     database_prompt_context: Optional[str] = None,
     return_files: bool = True,
     return_images: bool = True,
+    max_string_length: int = 300,
+    answer_row_limit: int = 0,
 ) -> dict:
-    db = build_sql_database(csv_paths=data_paths, database_url=database_url)
+    db = build_sql_database(
+        csv_paths=data_paths,
+        database_url=database_url,
+        max_string_length=max_string_length,
+    )
     notes = ""
     query = write_query(question, db, database_prompt_context=database_prompt_context)
     for attempt in range(3):
@@ -626,21 +675,27 @@ def get_response(
             raise SQLQueryExecutionError(query=query, error=result["error"])
         query = fix_query(query, result["error"])
     
-    top_k = 30
+    answer_limit = _resolve_answer_row_limit(answer_row_limit)
     db_result = result.get("result", [])
     df = coerce_rows(db_result)
     row_count = len(df)
-    if row_count > top_k:
-        notes = f"Only showing top {top_k} rows of {row_count}."
+    if answer_limit is None:
+        answer_rows = df
+    else:
+        answer_rows = df.head(answer_limit)
+        if row_count > answer_limit:
+            notes = f"Only showing top {answer_limit} rows of {row_count}."
 
     export_path = ""
     if return_files:
         export_path = str(_export_dataframe(df, f"data/data_{uuid4().hex}.xlsx"))
-    top_rows = df.head(top_k)
     answer = generate_answer(
         question,
         query,
-        serialize_rows(top_rows.to_dict(orient="records")),
+        serialize_rows(answer_rows.to_dict(orient="records")),
+        sql_row_count=row_count,
+        answer_row_count=len(answer_rows),
+        result_truncated=row_count > len(answer_rows),
     )
 
     viz_methods = answer.get("visual_recommendations") or []
@@ -651,7 +706,7 @@ def get_response(
         try:
             image_path = str(
                 create_visualization_image(
-                top_rows,
+                answer_rows,
                 viz_methods[0],
                 label_columns,
                 measure_columns,
@@ -663,6 +718,7 @@ def get_response(
     return {
         "query": query,
         "answer": answer.get('answer', ''),
+        "row_count": row_count,
         "data": export_path,
         "image": image_path,
         "graph_type": answer.get('visual_recommendations', ''),

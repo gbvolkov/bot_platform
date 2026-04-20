@@ -1,0 +1,662 @@
+This database contains a normalized KPI model for a branch organization: staff structure, KPI assignments to organizational/role contexts, and KPI calculation methods.
+
+Database file:
+- `C:\Projects\GWP\kpi\kpi.sqlite`
+
+Main working tables:
+- `kpi_values`
+- `kpi_staff_structure`
+- `kpi_method`
+
+Current table sizes:
+- `kpi_method`: 30 rows
+- `kpi_staff_structure`: 129 rows
+- `kpi_values`: 986 rows
+
+There are no raw external-data tables exposed to BI.
+- Answer from the normalized SQLite tables only.
+- Do not refer to external files in business answers.
+- If a user asks about fields that are not in these tables, state that the current database does not contain that layer.
+
+Core data model:
+- `kpi_values` is the central fact table for KPI assignments.
+- `kpi_staff_structure` is the normalized staff-structure dimension.
+- `kpi_method` is the calculation-method reference table.
+
+Relationships:
+- `kpi_values.staff_structure_ref` -> `kpi_staff_structure.staff_structure_id`
+- `kpi_values.kpi_method_ref` -> `kpi_method.source_row`
+
+Relationship cardinality:
+- `kpi_staff_structure` 1 ---- * `kpi_values`
+- `kpi_values` * ---- 0..1 `kpi_method`
+
+Important nullability:
+- `kpi_values.staff_structure_ref` is always filled in the current data.
+- `kpi_values.kpi_method_ref` can be NULL.
+- In the current data, 6 rows in `kpi_values` have no linked method. They are rows with KPI `Карта КПЭ`.
+- Empty department levels are normally stored as NULL.
+- Empty `position` values are imported as `сотрудник`, so `kpi_staff_structure.position` has no NULL values in the current data.
+- Empty or missing `pool` values are imported as `нет`.
+
+Key interpretation rules:
+- For assigned KPIs, start from `kpi_values`.
+- For staff plan, departments, employee groups, or positions, start from `kpi_staff_structure`.
+- For KPI analysis by staff structure, join `kpi_values` to `kpi_staff_structure`.
+- For method/formula explanations, join `kpi_method` through `kpi_values.kpi_method_ref`.
+- Do not join methods by KPI name when a reliable `kpi_method_ref` exists. KPI names can differ by spacing, footnotes, or clarifying text.
+- Use `LEFT JOIN kpi_method` if you need to keep all KPI assignments, because some assignments have no linked method.
+- Departments, employee groups, and positions do not live directly in `kpi_values`; they live in `kpi_staff_structure`.
+- `source_row` fields are technical row identifiers. They are useful for stable ordering and tracing records inside the database, not as business identifiers.
+- `responsibility_center` and `position_group` remain in `kpi_values`. They describe the context of the KPI assignment, not the staff-structure unit itself.
+- `position_group` means position level for the KPI assignment, such as individual contributor, middle management, or senior management. It is not the same as `kpi_staff_structure.employee_group`, which means a group of staff within a department.
+- KPI applicability is determined by the combination of department hierarchy, employee group, and position. In the database, that combination is stored in `kpi_staff_structure`.
+- The fields `analytics_1`, `analytics_2`, `analytics_3`, and `analytics_4` exist in `kpi_values`, but they are empty in the current database. Do not treat them as a required data source.
+- `staff_structure_id` is the primary key of `kpi_staff_structure`. One
+  `staff_structure_id` identifies exactly one official staff-structure row.
+- If the user request already contains a concrete `staff_structure_id`, use it
+  as the authoritative staff-structure filter. Do not add extra text filters on
+  `department_*`, `employee_group`, `position`, or generated display names.
+  Join `kpi_staff_structure` only to return human-readable context fields.
+- For KPI assignment lookup by a concrete staff-structure id, filter
+  `kpi_values.staff_structure_ref = <staff_structure_id>`. For staff-structure
+  lookup by id, filter `kpi_staff_structure.staff_structure_id =
+  <staff_structure_id>`. For several ids, use `IN (...)`.
+- There are no lowercase or `_nocase` helper fields. Use original text fields.
+- For every string search predicate, normalize both sides in SQL: apply
+  `LOWER(...)` and trim leading/trailing spaces or punctuation/quote characters
+  with `TRIM(...)` before comparing. Use the same normalization for database
+  fields and for the user-provided search text. For example:
+  `LOWER(TRIM(field_name, ' .,:;!?()[]{}"«»')) LIKE '%' || LOWER(TRIM('search text', ' .,:;!?()[]{}"«»')) || '%'`.
+  This applies to `LIKE`, equality, and `IN` comparisons when the filter value
+  comes from user text. It does not apply to numeric IDs or technical keys.
+- For Russian text matching in SQLite, prefer exact values or carefully chosen
+  normalized `LIKE` patterns.
+
+General SQL strategy:
+- If the user asks about KPI assignments, query `kpi_values`.
+- If the user asks about departments, hierarchy, staffing plan, employee groups, or positions, query `kpi_staff_structure`.
+- If the user asks about KPIs for a department, employee group, or position, join `kpi_values` to `kpi_staff_structure`.
+- If the user asks how a KPI is calculated, join `kpi_method` to `kpi_values` by `kpi_method_ref`.
+- If the user asks to find all KPIs with corresponding methods by name or text, search `kpi_values.kpi_name` together with the relevant fields from `kpi_method`, such as `kpi_method.kpi_name`, `kpi_method.calculation_method`, and `kpi_method.note`.
+- If the request includes `staff_structure_id`, prefer that primary-key filter
+  over text filters. Do not combine it with text predicates for department,
+  employee group, or position unless the user explicitly asks to validate a
+  possible data inconsistency.
+- For exact structural queries, filter by the explicit `department_*`, `employee_group`, and `position` fields rather than by a generated full display name.
+- To find direct employees/positions in a department, filter the target department level and require the next department level to be NULL.
+- To find all employees/positions in a department including nested subdivisions, filter the target department level and do not require lower department levels to be NULL.
+- Use `ORDER BY staff_structure_id` for stable staff-structure output.
+- Use `ORDER BY v.source_row` for stable KPI-assignment output.
+
+==================================================
+TABLE: kpi_staff_structure
+==================================================
+
+Purpose:
+- Normalized staff-structure dimension.
+- Contains unique combinations of department hierarchy, employee group, and position.
+- One row describes one structural path from the top department level down to the employee group and position.
+- Use this table as the basis for the staffing plan.
+
+Uniqueness:
+- Rows are unique by all of:
+  `department_1`, `department_2`, `department_3`, `department_4`,
+  `department_5`, `department_6`, `department_7`, `department_8`,
+  `employee_group`, `position`.
+- For uniqueness, NULL department values are treated as empty strings.
+
+Department hierarchy:
+- `department_1` ... `department_8` reflect the hierarchy of departments in the organizational structure.
+- `department_1` is the highest filled level.
+- Each subsequent department level is a lower, more detailed level inside the previous one.
+- In the current data, `department_1` is the branch-level top unit, commonly `Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге`.
+- `department_2` is usually a department, office, or large internal unit inside the branch.
+- `department_3` is a lower-level department, office, sector, or subunit inside `department_2`.
+- `department_4` is a lower level inside `department_3` and is filled rarely in the current data.
+- `department_5`, `department_6`, `department_7`, and `department_8` are reserved for deeper hierarchy levels. In the current data they may be fully empty or rarely filled.
+- NULL in a department level is not an error. It means that the corresponding hierarchy level is not defined for that structural row.
+
+Full position / assignment naming:
+- A full position name always includes `position`, `employee_group`, and all filled `department_*` values.
+- For human-readable output, build the name from the most specific role to the top of the hierarchy:
+  `position`, then `employee_group` in parentheses, then filled `department_8` ... `department_1`.
+- If a full KPI assignment name is required, prefix the staff-structure name with a singularized `kpi_values.position_group` value, for example:
+  `Исполнители` -> `исполнитель`
+  `Руководитель среднего звена` -> `руководитель среднего звена`
+  `Руководитель верхнего звена` -> `руководитель верхнего звена`
+- Example full assignment name for `source_row = 182`:
+  `исполнитель: сотрудник (Руководство центров продаж (дополнительный офис)) Операционный офис в г. Луга Отдел по работе с операционными офисами Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге`
+
+Fields:
+- `staff_structure_id`
+  Primary key. Internal identifier of the staff-structure row. Referenced by `kpi_values.staff_structure_ref`.
+
+- `department_1`
+  First and highest filled department level. In the current data this is usually the branch:
+  `Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге`.
+
+- `department_2`
+  Second department level. Usually a department or large unit inside `department_1`. Can be NULL.
+
+- `department_3`
+  Third department level. Subordinate to `department_2`. Can be NULL.
+
+- `department_4`
+  Fourth department level. Subordinate to `department_3`. Filled rarely in the current data.
+
+- `department_5`
+  Fifth department level. Reserved for deeper hierarchy. Often NULL in the current data.
+
+- `department_6`
+  Sixth department level. Reserved for deeper hierarchy. Often NULL in the current data.
+
+- `department_7`
+  Seventh department level. Reserved for deeper hierarchy. Often NULL in the current data.
+
+- `department_8`
+  Eighth department level. Reserved for deeper hierarchy. Often NULL in the current data.
+
+- `employee_group`
+  Employee group. This is part of the staff structure and one of the attributes that determines KPI applicability.
+  Use together with the department hierarchy and `position`.
+
+- `position`
+  Position/job title.
+  If the source position was not filled, the imported value is `сотрудник`.
+  In the current database this field does not contain NULL.
+
+How to use `kpi_staff_structure`:
+- Use it for staffing-plan questions.
+- Use it for department hierarchy questions.
+- Use it for lists of employee groups and positions by department.
+- Join it to `kpi_values` when the user asks which KPIs belong to a position, employee group, department, or structural path.
+- If the user asks for a list of departments without positions, group by `department_1` ... `department_8`.
+- If the user asks for positions in a department, filter by the needed department levels and select `employee_group` and `position`.
+
+Example: full staff structure for the branch:
+
+```sql
+SELECT
+    staff_structure_id,
+    department_1,
+    department_2,
+    department_3,
+    department_4,
+    department_5,
+    department_6,
+    department_7,
+    department_8,
+    employee_group,
+    position
+FROM kpi_staff_structure
+WHERE department_1 = 'Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге'
+ORDER BY staff_structure_id;
+```
+
+Example: unique department hierarchy under the branch, without employee groups or positions:
+
+```sql
+SELECT DISTINCT
+    department_1,
+    department_2,
+    department_3,
+    department_4,
+    department_5,
+    department_6,
+    department_7,
+    department_8
+FROM kpi_staff_structure
+WHERE department_1 = 'Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге'
+ORDER BY
+    department_1,
+    department_2,
+    department_3,
+    department_4,
+    department_5,
+    department_6,
+    department_7,
+    department_8;
+```
+
+Example: all staff-structure rows working directly in `Управление добровольного медицинского страхования` of the branch:
+
+```sql
+SELECT
+    staff_structure_id,
+    employee_group,
+    position,
+    department_1,
+    department_2,
+    department_3
+FROM kpi_staff_structure
+WHERE department_1 = 'Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге'
+  AND department_2 = 'Управление добровольного медицинского страхования'
+  AND department_3 IS NULL
+ORDER BY staff_structure_id;
+```
+
+Example: all staff-structure rows working in subdivisions of `Управление добровольного медицинского страхования` of the branch:
+
+```sql
+SELECT
+    staff_structure_id,
+    employee_group,
+    position,
+    department_1,
+    department_2,
+    department_3,
+    department_4,
+    department_5,
+    department_6,
+    department_7,
+    department_8
+FROM kpi_staff_structure
+WHERE department_1 = 'Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге'
+  AND department_2 = 'Управление добровольного медицинского страхования'
+  AND department_3 IS NOT NULL
+ORDER BY staff_structure_id;
+```
+
+Example: build a full staff-structure display name:
+
+```sql
+SELECT
+    staff_structure_id,
+    TRIM(
+        position || ' ' ||
+        '(' || employee_group || ') ' ||
+        COALESCE(department_8 || ' ', '') ||
+        COALESCE(department_7 || ' ', '') ||
+        COALESCE(department_6 || ' ', '') ||
+        COALESCE(department_5 || ' ', '') ||
+        COALESCE(department_4 || ' ', '') ||
+        COALESCE(department_3 || ' ', '') ||
+        COALESCE(department_2 || ' ', '') ||
+        COALESCE(department_1, '')
+    ) AS full_position_name
+FROM kpi_staff_structure
+ORDER BY staff_structure_id;
+```
+
+==================================================
+TABLE: kpi_values
+==================================================
+
+Purpose:
+- Central fact table of KPI assignments.
+- Stores which KPI is assigned to which staff-structure row, responsibility center, and position level.
+- Also stores calculation detail/perimeter, business line, pool flag, frequency, calculation specifics, and additional analytics placeholders.
+
+Fields:
+- `source_row`
+  Primary key. Technical identifier of the KPI assignment row. Use for stable ordering and traceability.
+
+- `responsibility_center`
+  Responsibility center for the KPI assignment. This is assignment context.
+
+- `position_group`
+  Position level for the KPI assignment. This is assignment context and remains in `kpi_values`.
+  Example values include position levels such as `Исполнители`, `Руководитель среднего звена`, and `Руководитель верхнего звена`.
+  Do not confuse this with `kpi_staff_structure.employee_group`.
+
+- `staff_structure_ref`
+  Foreign key to `kpi_staff_structure.staff_structure_id`.
+  Always filled in the current data.
+  Use this field to obtain departments, employee group, and position.
+
+- `kpi_name`
+  KPI name assigned to the staff-structure context.
+  Use this field for searching KPI assignments.
+  If the user asks to identify all KPI assignments with the corresponding method, use `kpi_values.kpi_name` together with method fields from `kpi_method`, especially `kpi_method.kpi_name`, `kpi_method.calculation_method`, and `kpi_method.note`.
+  Do not rely only on text equality between `kpi_values.kpi_name` and `kpi_method.kpi_name` when `kpi_method_ref` is available.
+
+- `kpi_method_ref`
+  Foreign key to `kpi_method.source_row`.
+  Can be NULL when no method is linked to the KPI assignment.
+
+- `calculation_detail`
+  Level/detail/perimeter at which the KPI should be calculated for the specific assignment.
+  This field tells whether the KPI is calculated by company, branch, department, sector, operational office, employee, etc.
+  This is not the formula and not the calculation method.
+  Use `kpi_method.calculation_method` and `kpi_method.note` for the formula/method explanation.
+  In the current data this field is filled for all rows in `kpi_values`.
+
+  Known current values and meanings:
+  - `по Компании`: calculate at the whole-company level.
+  - `по филиалу`: calculate at the whole-branch level.
+  - `по филиалу (по группе работников)`: calculate at the branch level, split by employee group.
+  - `по РС`: calculate within the responsibility-center perimeter.
+  - `по отделу`: calculate at department level.
+  - `по сектору`: calculate at sector level.
+  - `по опер.офису`: calculate at operational-office level.
+  - `по работнику`: calculate at individual employee level.
+  - `по курируемым МП`: calculate within the perimeter of supervised managed points / supervised MP units.
+
+  Current value counts:
+  - `по филиалу`: 316
+  - `по работнику`: 276
+  - `по опер.офису`: 111
+  - `по Компании`: 106
+  - `по отделу`: 106
+  - `по курируемым МП`: 27
+  - `по сектору`: 26
+  - `по РС`: 16
+  - `по филиалу (по группе работников)`: 2
+
+- `business_line`
+  Business line for the KPI assignment.
+
+- `pool`
+  Flag of KPI participation in the pool.
+  Valid values: `да` and `нет`.
+  `да` means the KPI assignment belongs to the pool.
+  `нет` means it does not belong to the pool.
+  Missing values are imported as `нет`.
+  Current counts: `да` 562, `нет` 424.
+
+- `other_analytics`
+  Other analytics for the KPI assignment.
+
+- `calculation_frequency`
+  KPI calculation frequency.
+
+- `calculation_specifics`
+  Specifics/notes about KPI calculation for the assignment.
+
+- `analytics_1`
+  Additional analytics field 1. Empty in the current data.
+
+- `analytics_2`
+  Additional analytics field 2. Empty in the current data.
+
+- `analytics_3`
+  Additional analytics field 3. Empty in the current data.
+
+- `analytics_4`
+  Additional analytics field 4. Empty in the current data.
+
+How to use `kpi_values`:
+- Use it as the main table for KPI-assignment analysis.
+- Join `kpi_staff_structure` for department, employee group, and position.
+- Use `LEFT JOIN kpi_method` for method details, because some rows have no method.
+- Use `calculation_detail` to understand the intended calculation perimeter of the KPI assignment.
+- Use `pool` as a yes/no flag only.
+- Do not look for `department_*`, `employee_group`, or `position` in this table.
+
+Example: KPI assignments with department, position, and method:
+
+```sql
+SELECT
+    v.source_row,
+    s.department_1,
+    s.department_2,
+    s.department_3,
+    s.employee_group,
+    s.position,
+    v.responsibility_center,
+    v.position_group,
+    v.kpi_name,
+    v.calculation_detail,
+    v.pool,
+    m.calculation_method,
+    m.note
+FROM kpi_values AS v
+JOIN kpi_staff_structure AS s
+    ON s.staff_structure_id = v.staff_structure_ref
+LEFT JOIN kpi_method AS m
+    ON m.source_row = v.kpi_method_ref
+ORDER BY v.source_row;
+```
+
+Example: search KPI assignments by a concrete position:
+
+```sql
+SELECT
+    v.source_row,
+    v.kpi_name,
+    v.responsibility_center,
+    v.position_group,
+    v.calculation_detail,
+    v.pool,
+    s.employee_group,
+    s.department_1,
+    s.department_2,
+    s.department_3,
+    s.position,
+    m.calculation_method,
+    m.note
+FROM kpi_values AS v
+JOIN kpi_staff_structure AS s
+    ON s.staff_structure_id = v.staff_structure_ref
+LEFT JOIN kpi_method AS m
+    ON m.source_row = v.kpi_method_ref
+WHERE s.position = 'Начальник отдела'
+  AND s.employee_group = 'Сопровождение функциональное (РС)'
+  AND s.department_2 = 'Отдел информационных технологий'
+  AND s.department_1 = 'Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге'
+ORDER BY v.kpi_name, v.source_row;
+```
+
+Example: KPI assignments by a concrete `staff_structure_id`.
+Do not add department, employee group, or position filters when the id is given.
+
+```sql
+SELECT
+    v.source_row,
+    v.kpi_name,
+    v.responsibility_center,
+    v.position_group,
+    v.calculation_detail,
+    v.business_line,
+    v.pool,
+    v.calculation_frequency,
+    v.calculation_specifics,
+    s.department_1,
+    s.department_2,
+    s.department_3,
+    s.employee_group,
+    s.position,
+    m.calculation_method,
+    m.note
+FROM kpi_values AS v
+JOIN kpi_staff_structure AS s
+    ON s.staff_structure_id = v.staff_structure_ref
+LEFT JOIN kpi_method AS m
+    ON m.source_row = v.kpi_method_ref
+WHERE v.staff_structure_ref = 16
+ORDER BY v.source_row;
+```
+
+Example: search KPI assignments and methods by KPI text:
+
+```sql
+SELECT
+    v.source_row,
+    v.kpi_name AS assigned_kpi_name,
+    m.kpi_name AS method_kpi_name,
+    v.responsibility_center,
+    v.position_group,
+    s.department_1,
+    s.department_2,
+    s.employee_group,
+    s.position,
+    m.calculation_method,
+    m.note
+FROM kpi_values AS v
+JOIN kpi_staff_structure AS s
+    ON s.staff_structure_id = v.staff_structure_ref
+LEFT JOIN kpi_method AS m
+    ON m.source_row = v.kpi_method_ref
+WHERE LOWER(TRIM(v.kpi_name, ' .,:;!?()[]{}"«»')) LIKE '%' || LOWER(TRIM('продаж', ' .,:;!?()[]{}"«»')) || '%'
+   OR LOWER(TRIM(m.kpi_name, ' .,:;!?()[]{}"«»')) LIKE '%' || LOWER(TRIM('продаж', ' .,:;!?()[]{}"«»')) || '%'
+   OR LOWER(TRIM(m.calculation_method, ' .,:;!?()[]{}"«»')) LIKE '%' || LOWER(TRIM('продаж', ' .,:;!?()[]{}"«»')) || '%'
+   OR LOWER(TRIM(m.note, ' .,:;!?()[]{}"«»')) LIKE '%' || LOWER(TRIM('продаж', ' .,:;!?()[]{}"«»')) || '%'
+ORDER BY v.source_row;
+```
+
+Example: build the full KPI assignment name for `source_row = 182`:
+
+```sql
+SELECT
+    v.source_row,
+    TRIM(
+        CASE v.position_group
+            WHEN 'Исполнители' THEN 'исполнитель'
+            WHEN 'Руководитель среднего звена' THEN 'руководитель среднего звена'
+            WHEN 'Руководитель верхнего звена' THEN 'руководитель верхнего звена'
+            ELSE v.position_group
+        END || ': ' ||
+        s.position || ' ' ||
+        '(' || s.employee_group || ') ' ||
+        COALESCE(s.department_8 || ' ', '') ||
+        COALESCE(s.department_7 || ' ', '') ||
+        COALESCE(s.department_6 || ' ', '') ||
+        COALESCE(s.department_5 || ' ', '') ||
+        COALESCE(s.department_4 || ' ', '') ||
+        COALESCE(s.department_3 || ' ', '') ||
+        COALESCE(s.department_2 || ' ', '') ||
+        COALESCE(s.department_1, '')
+    ) AS full_assignment_name
+FROM kpi_values AS v
+JOIN kpi_staff_structure AS s
+    ON s.staff_structure_id = v.staff_structure_ref
+WHERE v.source_row = 182;
+```
+
+Example: KPI assignments without a linked calculation method:
+
+```sql
+SELECT
+    v.source_row,
+    v.kpi_name,
+    v.responsibility_center,
+    v.position_group,
+    s.department_1,
+    s.department_2,
+    s.employee_group,
+    s.position
+FROM kpi_values AS v
+JOIN kpi_staff_structure AS s
+    ON s.staff_structure_id = v.staff_structure_ref
+WHERE v.kpi_method_ref IS NULL
+ORDER BY v.source_row;
+```
+
+Example: count KPI assignments by calculation detail:
+
+```sql
+SELECT
+    calculation_detail,
+    COUNT(*) AS kpi_assignment_count
+FROM kpi_values
+GROUP BY calculation_detail
+ORDER BY kpi_assignment_count DESC, calculation_detail;
+```
+
+Example: count pool participation:
+
+```sql
+SELECT
+    pool,
+    COUNT(*) AS kpi_assignment_count
+FROM kpi_values
+GROUP BY pool
+ORDER BY pool;
+```
+
+==================================================
+TABLE: kpi_method
+==================================================
+
+Purpose:
+- Reference table of KPI calculation methods.
+- One row describes the calculation method and notes for a KPI that can be linked from `kpi_values`.
+- Use this table when the user asks how a KPI is calculated or what the method/note says.
+
+Fields:
+- `source_row`
+  Primary key. Technical identifier of the method row. Referenced by `kpi_values.kpi_method_ref`.
+
+- `kpi_name`
+  KPI name in the method reference table.
+  It can differ from `kpi_values.kpi_name` because of footnotes, whitespace, or clarifying text.
+
+- `calculation_method`
+  Text of the KPI calculation method/formula.
+  Can contain multi-line text.
+
+- `note`
+  Note/comment for the calculation method. Can be NULL.
+
+How to use `kpi_method`:
+- Join it through `kpi_values.kpi_method_ref = kpi_method.source_row`.
+- Use it for formula, method, and explanatory-note questions.
+- If `kpi_method_ref` is NULL, do not automatically infer the method from `kpi_name` without explicitly checking ambiguity.
+- Use `source_row` only as a technical key.
+
+Example: method details for KPI assignments:
+
+```sql
+SELECT
+    v.source_row AS kpi_assignment_id,
+    v.kpi_name AS assigned_kpi_name,
+    m.source_row AS method_id,
+    m.kpi_name AS method_kpi_name,
+    m.calculation_method,
+    m.note
+FROM kpi_values AS v
+LEFT JOIN kpi_method AS m
+    ON m.source_row = v.kpi_method_ref
+ORDER BY v.source_row;
+```
+
+==================================================
+INDEXES AND CONSTRAINTS
+==================================================
+
+Primary keys:
+- `kpi_staff_structure.staff_structure_id`
+- `kpi_values.source_row`
+- `kpi_method.source_row`
+
+Foreign keys:
+- `kpi_values.staff_structure_ref` -> `kpi_staff_structure.staff_structure_id`
+- `kpi_values.kpi_method_ref` -> `kpi_method.source_row`
+
+Indexes:
+- `idx_kpi_staff_structure_unique` on normalized uniqueness fields:
+  `department_1`, `department_2`, `department_3`, `department_4`,
+  `department_5`, `department_6`, `department_7`, `department_8`,
+  `employee_group`, `position`
+- `idx_kpi_values_staff_structure_ref` on `kpi_values.staff_structure_ref`
+- `idx_kpi_values_kpi_method_ref` on `kpi_values.kpi_method_ref`
+- `idx_kpi_values_kpi_name` on `kpi_values.kpi_name`
+
+==================================================
+PRACTICAL QUERY RULES
+==================================================
+
+- Use `kpi_values` for questions about assigned KPIs.
+- Use `kpi_staff_structure` for questions about staff plan, positions, employee groups, and department hierarchy.
+- Use `kpi_method` for calculation-method and formula questions.
+- Use all three tables for full KPI context.
+- Use `LEFT JOIN kpi_method`, not inner `JOIN`, when all KPI assignment rows must be preserved.
+- Use exact department levels for structure queries. Do not parse full display strings if structured fields are available.
+- Direct employees/positions in a unit: match the unit level and require the next lower department level to be NULL.
+- Employees/positions in subdivisions of a unit: match the unit level and require the next lower department level to be NOT NULL.
+- Employees/positions in a unit including direct and all subdivisions: match the unit level and do not filter the next lower level.
+- Use `pool IN ('да', 'нет')` logic; do not treat it as free text.
+- Use `calculation_detail` as calculation perimeter, not as a formula.
+- Preserve original Russian text values in user-facing answers.
+
+Anti-patterns:
+- Do not describe `kpi_values` as rows from an external file.
+- Do not refer to external data files in business answers.
+- Do not look for `department_1` ... `department_8`, `employee_group`, or `position` in `kpi_values`.
+- Do not join `kpi_method` by KPI name when `kpi_method_ref` is available.
+- Do not use inner `JOIN kpi_method` if the user expects all KPI assignments.
+- Do not assume `NULL` department levels are data quality errors.
+- Do not assume `position_group` and `employee_group` mean the same thing.
+- Do not treat `source_row` as a business row number or business identifier.
+- Do not use `analytics_1` ... `analytics_4` as required fields in the current data; they are currently empty.

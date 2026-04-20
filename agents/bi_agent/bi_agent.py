@@ -50,6 +50,7 @@ class BiAgentState(TypedDict, total=False):
     question: str
     answer: str
     query: str
+    row_count: Optional[int]
     data_attachment: Optional[TabularAttachment]
     image_attachment: Optional[ImageAttachment]
     graphic_type: Optional[GraphicType]
@@ -68,6 +69,31 @@ def _coerce_optional_bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _coerce_optional_int(value: Any, default: int, field_name: str) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a non-negative integer.")
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a non-negative integer.") from exc
+    if resolved < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer.")
+    return resolved
+
+
+def _coerce_row_limit(value: Any, default: int, field_name: str) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer.")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an integer.") from exc
 
 
 def _is_reset_requested(state: BiAgentState) -> bool:
@@ -213,6 +239,16 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
     default_database_prompt_context = defaults.get("database_prompt_context")
     default_return_files = _coerce_optional_bool(defaults.get("return_files"), True)
     default_return_images = _coerce_optional_bool(defaults.get("return_images"), True)
+    default_max_string_length = _coerce_optional_int(
+        defaults.get("max_string_length"),
+        300,
+        "init_context.max_string_length",
+    )
+    default_answer_row_limit = _coerce_row_limit(
+        defaults.get("answer_row_limit"),
+        0,
+        "init_context.answer_row_limit",
+    )
 
     def generate_report(state: BiAgentState, config: Optional[RunnableConfig] = None) -> BiAgentState:
         question = _extract_question(state.get("messages", []))
@@ -221,6 +257,7 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
                 "question": "",
                 "answer": "Укажите вопрос, чтобы я мог построить отчёт и подготовить данные.",
                 "query": "",
+                "row_count": None,
                 "data_attachment": None,
                 "image_attachment": None,
                 "graphic_type": None,
@@ -235,6 +272,16 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
             database_prompt_context = default_database_prompt_context
         return_files = _coerce_optional_bool(configuration.get("return_files"), default_return_files)
         return_images = _coerce_optional_bool(configuration.get("return_images"), default_return_images)
+        max_string_length = _coerce_optional_int(
+            configuration.get("max_string_length"),
+            default_max_string_length,
+            "configurable.max_string_length",
+        )
+        answer_row_limit = _coerce_row_limit(
+            configuration.get("answer_row_limit"),
+            default_answer_row_limit,
+            "configurable.answer_row_limit",
+        )
         data_paths = None if database_url else DEFAULT_DATA_SOURCES
 
         try:
@@ -245,6 +292,8 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
                 database_prompt_context=database_prompt_context,
                 return_files=return_files,
                 return_images=return_images,
+                max_string_length=max_string_length,
+                answer_row_limit=answer_row_limit,
             )
         except SQLQueryExecutionError as exc:
             logging.exception("BI agent failed to execute generated report query: %s", exc)
@@ -252,6 +301,7 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
                 "question": question,
                 "answer": f"Не удалось построить отчёт: {exc}",
                 "query": exc.query,
+                "row_count": None,
                 "data_attachment": None,
                 "image_attachment": None,
                 "graphic_type": None,
@@ -263,6 +313,7 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
                 "question": question,
                 "answer": f"Не удалось построить отчёт: {exc}",
                 "query": "",
+                "row_count": None,
                 "data_attachment": None,
                 "image_attachment": None,
                 "graphic_type": None,
@@ -286,6 +337,7 @@ def create_generate_report_node(init_context: Optional[Dict[str, Any]] = None):
             "question": question,
             "answer": answer_text,
             "query": raw_response.get("query", ""),
+            "row_count": raw_response.get("row_count"),
             "data_attachment": data_attachment,
             "image_attachment": image_attachment,
             "graphic_type": graphic_type,

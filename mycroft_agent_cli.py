@@ -26,6 +26,7 @@ from agents.mycroft_agent.configured_agent import (
 from agents.mycroft_agent.subagent_loader import initialize_configured_subagents
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 
@@ -41,6 +42,17 @@ DEFAULT_AGENT_LOCALE = {
     "save_confirmation": "[You can now download the file.]({url})"
 }
 DEFAULT_CLI_USER_ID = "mycroft-agent-cli"
+MYCROFT_CLI_CHECKPOINT_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "mycroft_agent"
+    / "cli_checkpoints.sqlite"
+)
+
+
+def _persistent_checkpoint_saver():
+    MYCROFT_CLI_CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return AsyncSqliteSaver.from_conn_string(str(MYCROFT_CLI_CHECKPOINT_PATH))
 
 
 def _parse_provider(raw_value: str) -> ModelType:
@@ -574,7 +586,10 @@ def main() -> int:
         system_prompt = system_prompt_override or cli_config.system_prompt
 
         with asyncio.Runner() as runner:
+            checkpoint_cm = _persistent_checkpoint_saver()
+            checkpoint_saver = runner.run(checkpoint_cm.__aenter__())
             try:
+                runner.run(checkpoint_saver.setup())
                 stateless_subagents = runner.run(
                     _initialize_configured_subagents(cli_config.subagents.stateless)
                 )
@@ -593,6 +608,7 @@ def main() -> int:
                     stateless_subagents=stateless_subagents,
                     stateful_subagents=stateful_subagents,
                     streaming=False,
+                    checkpoint_saver=checkpoint_saver,
                     interrupt_on=cli_config.deepagents.interrupt_on or None,
                     skills=skills,
                     backend=build_skills_backend(skills),
@@ -627,6 +643,7 @@ def main() -> int:
                 print(
                     f"mycroft_agent CLI started (thread_id={thread_id}, provider={provider.value}, model_size={model_size})."
                 )
+                print(f"Checkpoint store: {MYCROFT_CLI_CHECKPOINT_PATH}")
                 _print_runtime_summary(
                     config_path=args.config,
                     stateless_subagents=stateless_subagents,
@@ -710,6 +727,7 @@ def main() -> int:
                 from bot_service.agent_registry import agent_registry
 
                 runner.run(agent_registry.aclose())
+                runner.run(checkpoint_cm.__aexit__(None, None, None))
     except Exception as exc:
         print(f"Failed to start CLI: {exc}", file=sys.stderr)
         return 1
