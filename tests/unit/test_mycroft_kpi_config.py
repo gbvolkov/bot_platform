@@ -49,6 +49,25 @@ def test_kpi_agent_config_loads_kpi_bi_stateless_subagent_only():
     assert config.deepagents.interrupt_on == {}
 
 
+def test_kpi_agent_is_registered_as_public_configured_mycroft_agent():
+    load_config = json.loads(
+        Path("data/config/bot_service/load.json").read_text(encoding="utf-8")
+    )
+    kpi_agent = next(agent for agent in load_config["agents"] if agent["id"] == "kpi_agent")
+    kpi_bi = next(agent for agent in load_config["agents"] if agent["id"] == "kpi_bi_int")
+
+    assert kpi_agent["module"] == "agents.mycroft_agent.configured_agent"
+    assert kpi_agent["is_active"] is True
+    assert kpi_agent["supported_content_types"] == []
+    assert kpi_agent["params"]["provider"] == "openai"
+    assert kpi_agent["params"]["config_path"] == str(CONFIG_PATH).replace("\\", "/")
+    assert kpi_agent["params"]["model_size"] == "base"
+    assert kpi_agent["params"]["temperature"] == 0.1
+    assert kpi_agent["params"]["streaming"] is False
+    assert kpi_agent["params"]["checkpoint_saver"] == "SQLite"
+    assert kpi_bi["is_active"] is False
+
+
 def test_kpi_agent_prompt_defines_position_first_database_boundaries():
     config = load_cli_config(CONFIG_PATH)
     prompt = config.system_prompt.lower()
