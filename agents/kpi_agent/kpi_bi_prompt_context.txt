@@ -88,6 +88,17 @@ General SQL strategy:
 - To find all employees/positions in a department including nested subdivisions, filter the target department level and do not require lower department levels to be NULL.
 - Use `ORDER BY staff_structure_id` for stable staff-structure output.
 - Use `ORDER BY v.source_row` for stable KPI-assignment output.
+- For non-aggregated queries that return row-level data from `kpi_values`, if you
+  sort by owner-related columns, place those owner columns first and then put
+  `v.source_row` (or the matching alias `.source_row`) as the first sort key
+  among `kpi_values` columns, unless the user explicitly requested a different
+  order. Do not put other `kpi_values` columns before `v.source_row` by
+  default. If additional assignment ordering is still useful, add it after
+  `v.source_row`. This keeps ordering stable when several rows share the same
+  `kpi_name`, `calculation_detail`, `business_line`, `pool`,
+  `calculation_frequency`, or other assignment attributes. Example without
+  owner columns: `ORDER BY v.source_row, v.kpi_name`. Example with owner
+  columns: `ORDER BY s.staff_structure_id, v.source_row, v.kpi_name`.
 
 ==================================================
 TABLE: kpi_staff_structure
@@ -435,7 +446,7 @@ WHERE s.position = 'Начальник отдела'
   AND s.employee_group = 'Сопровождение функциональное (РС)'
   AND s.department_2 = 'Отдел информационных технологий'
   AND s.department_1 = 'Филиал СПАО "Ингосстрах" в г. Санкт-Петербурге'
-ORDER BY v.kpi_name, v.source_row;
+ORDER BY v.source_row, v.kpi_name;
 ```
 
 Example: KPI assignments by a concrete `staff_structure_id`.

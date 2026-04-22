@@ -288,6 +288,11 @@ def test_kpi_bi_prompt_defines_position_group_as_position_level():
     assert "do not add extra text filters" in bi_prompt
     assert "`kpi_values.staff_structure_ref = <staff_structure_id>`" in bi_prompt
     assert "where v.staff_structure_ref = 16" in bi_prompt
+    assert "sort by owner-related columns, place those owner columns first and then put" in bi_prompt
+    assert "`v.source_row` (or the matching alias `.source_row`) as the first sort key" in bi_prompt
+    assert "do not put other `kpi_values` columns before `v.source_row`" in bi_prompt
+    assert "example without\n  owner columns: `order by v.source_row, v.kpi_name`" in bi_prompt
+    assert "example with owner\n  columns: `order by s.staff_structure_id, v.source_row, v.kpi_name`" in bi_prompt
     assert "group of positions" not in bi_prompt
     assert "role groups" not in bi_prompt
     assert "`position_group` означает уровень должности" in db_description
