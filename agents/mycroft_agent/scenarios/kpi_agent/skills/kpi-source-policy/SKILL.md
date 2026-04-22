@@ -72,7 +72,10 @@ and department/employee group. Do not call fuzzy search and do not call BI.
 7. For position-first KPI requests, BI calls before KPI lookup must ask only
    about `kpi_staff_structure`.
 8. Do not request `kpi_values` rows until the exact staff-structure context is
-   resolved and, when inferred, confirmed by the user.
+   resolved. If BI validation leaves exactly one suitable official context,
+   treat it as resolved and continue to KPI lookup without asking for an extra
+   confirmation. If several official contexts still remain after BI validation,
+   ask the user to confirm or choose between them before KPI lookup.
 9. For KPI database facts, `task` with `subagent_type: kpi_bi_int` is mandatory.
 10. Never call `task` with `subagent_type: general-purpose` for KPI database
    facts.

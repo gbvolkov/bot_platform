@@ -80,7 +80,9 @@ def test_kpi_agent_prompt_defines_position_first_database_boundaries():
     assert "kpi_staff_structure" in prompt
     assert "kpi_method_ref" in prompt
     assert "kpi metrics and formula terms" in prompt
-    assert "when inferred from candidates, the context must be confirmed by the user" in prompt
+    assert "when inferred from candidates and several official contexts still remain" in prompt
+    assert "if bi validation leaves exactly one suitable official context, treat it as" in prompt
+    assert "resolved and proceed to kpi lookup without an extra confirmation step" in prompt
     assert "every kpi-list answer must state the official applied position name" in prompt
     assert "if bi returns n assignment rows" in prompt
     assert "exactly\n  n numbered kpi assignment items" in prompt
@@ -131,6 +133,8 @@ def test_kpi_agent_catalogs_describe_scenarios_and_subagent_services():
     assert "navigate org structure" in agent_catalog
     assert "mycroft must not call tools for a personal kpi question" in agent_catalog
     assert "full structure for each candidate" in agent_catalog
+    assert "if bi validation leaves exactly one suitable official context" in agent_catalog
+    assert "without asking for a number or extra confirmation" in agent_catalog
     assert "position lookup" in subagent_catalog
     assert "staff structure validation" in subagent_catalog
     assert "one official `kpi_staff_structure` row per candidate id" in subagent_catalog
@@ -191,6 +195,12 @@ def test_kpi_position_skills_require_confirmed_position_before_kpi_list():
     assert "validate these `staff_structure_id` values and return exact rows" in position_skill
     assert "do not ask the user for permission to use fuzzy search, bi, tools, or\n  subagents" in position_skill
     assert "do not ask bi what mycroft should ask the user" in position_skill
+    assert "if bi validation leaves exactly one official row that matches the" in position_skill
+    assert "do not ask the user to type a" in position_skill
+    assert "number and do not ask for an extra confirmation like \"yes\"" in position_skill
+    assert "if only one bi-validated candidate remains suitable" in position_skill
+    assert "if exactly one official bi-validated context remains suitable" in synthesis_skill
+    assert "do not ask the\n  user for a number or an extra \"yes\" confirmation" in synthesis_skill
 
 
 def test_kpi_skills_make_bi_subagent_mandatory_for_database_facts():
@@ -214,6 +224,9 @@ def test_kpi_skills_make_bi_subagent_mandatory_for_database_facts():
     assert "use bi-validated staff-structure rows" in source_policy
     assert "forbidden bi requests" in source_policy
     assert "do not ask permission before using internal tools or subagents" in source_policy
+    assert "if bi validation leaves exactly one suitable official context" in source_policy
+    assert "continue to kpi lookup without asking for an extra" in source_policy
+    assert "if several official contexts still remain after bi validation" in source_policy
     assert "call `task` with `subagent_type: kpi_bi_int`" in method_skill
     assert "call `task` with `subagent_type: kpi_bi_int`" in structure_skill
     assert "`kpi_bi_int` is stateless" in method_skill

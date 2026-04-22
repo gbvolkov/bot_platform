@@ -35,7 +35,8 @@ asks user-facing business clarifications when needed.
 8. "Compact" means concise wording inside each assignment item, not fewer
    assignment items.
 9. If the exact position context was inferred from fuzzy search or BI
-   disambiguation, ask the user to confirm it before producing a KPI list.
+   disambiguation and several official contexts still remain plausible, ask the
+   user to confirm or choose before producing a KPI list.
 10. Every KPI-list answer must state the official applied position name before
    the list.
 11. If scope is ambiguous, ask one focused clarification instead of producing a
@@ -84,8 +85,12 @@ asks user-facing business clarifications when needed.
 - Before sending the answer, compare the number of numbered KPI items with the
   number of assignment rows returned by BI. If they differ, rewrite the answer
   so the counts match.
-- If the user asks for KPI after only an inferred candidate match, ask whether
-  that exact official position context is correct and wait for confirmation.
+- If exactly one official BI-validated context remains suitable, do not ask the
+  user for a number or an extra "yes" confirmation; return the KPI list for
+  that official context immediately.
+- If the user asks for KPI after only an inferred candidate match and several
+  official contexts still remain plausible, ask whether that exact official
+  position context is correct and wait for confirmation.
 
 ## Output Shapes
 

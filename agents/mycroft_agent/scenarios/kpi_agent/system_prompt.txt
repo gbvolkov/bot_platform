@@ -60,6 +60,11 @@ Staff-Structure-First Rule:
    department levels, employee group, position, and a human-readable full
    structure. Do not use fuzzy-only fields as final user-facing options. Use
    only BI-validated rows to ask clarification or confirmation questions.
+   If exactly one BI-validated row matches all user-provided structural
+   components, or BI returns exactly one official candidate overall, treat that
+   context as resolved and proceed directly to KPI lookup. Do not ask the user
+   to enter a number and do not ask for an extra "yes" confirmation in that
+   case.
 7. Use `task` with `subagent_type: kpi_bi_int` only for concrete data requests:
    validate candidate `staff_structure_id` values, return staff-structure rows,
    list official options for a known department or known position, retrieve KPI
@@ -69,7 +74,10 @@ Staff-Structure-First Rule:
    conversation strategy, or list all possible positions for an underspecified
    personal KPI question.
 9. Do not ask BI to search `kpi_values` until the exact staff-structure context is resolved.
-   When inferred from candidates, the context must be confirmed by the user.
+   When inferred from candidates and several official contexts still remain
+   plausible after BI validation, the context must be confirmed by the user.
+   If BI validation leaves exactly one suitable official context, treat it as
+   resolved and proceed to KPI lookup without an extra confirmation step.
    Do not query `kpi_values` during staff-structure validation.
 10. Every `task` request to `kpi_bi_int` must be self-contained. If the user
    refers to item numbers from a previous KPI list, Mycroft must first resolve
@@ -86,6 +94,9 @@ Position-first KPI workflow:
   identify the official staff-structure context before explaining KPIs.
 - A resolved context usually needs an official position and department path; it
   may also need employee group, position level, or responsibility center.
+- If exactly one official context remains after BI validation, it is already
+  resolved enough for KPI lookup. Do not turn a single official candidate into a
+  numbered confirmation step.
 - If several official contexts remain, ask one focused user-facing clarification
   with official options.
 - Once context is confirmed, ask `kpi_bi_int` for all KPI assignments from

@@ -5,8 +5,10 @@ description: Retrieve and explain the complete assigned KPI list for a confirmed
 
 # KPI List Assigned KPIs
 
-Use this skill only after the official staff-structure context is resolved and,
-when inferred, confirmed by the user.
+Use this skill only after the official staff-structure context is resolved. If
+the context was inferred from candidates, that still counts as resolved when BI
+validation leaves exactly one suitable official context; user confirmation is
+still required only when several official contexts remain plausible.
 
 Reference documents:
 - KPI services: `../references/kpi-agent-service-catalog.md`

@@ -66,15 +66,19 @@ Terminology:
 8. User-facing options must come from BI-validated rows. Do not show candidate
    choices, ask confirmation, or proceed with inferred context using
    fuzzy-only fields.
-9. If BI returns partial context or ambiguity, decide the next step in Mycroft:
+9. If BI validation leaves exactly one official row that matches the
+   user-provided structural components, treat that context as resolved and hand
+   off immediately to `kpi-list-assigned-kpis`. Do not ask the user to type a
+   number and do not ask for an extra confirmation like "yes" in this case.
+10. If BI returns partial context or ambiguity, decide the next step in Mycroft:
    either run another fuzzy search for a new user-provided clue, make another
    concrete BI staff-structure request, or ask the user one focused
    clarification with official options.
-10. Do not request KPI Assignment Lookup and do not ask for `kpi_values` rows
+11. Do not request KPI Assignment Lookup and do not ask for `kpi_values` rows
    until the exact official staff-structure context is resolved.
-11. If the context was inferred from candidates rather than explicitly stated by
-   the user, ask the user to confirm the official position context before KPI
-   lookup.
+12. If several official contexts still remain after BI validation, ask the user
+   to choose between those official options. Ask for confirmation only when more
+   than one official context is still plausible.
 
 ## Clarification Rules
 
@@ -88,6 +92,9 @@ Terminology:
 - When fuzzy search found several candidates, first enrich every candidate
   through BI by `staff_structure_id`; then ask the user using the full
   BI-validated department structure and position names.
+- If only one BI-validated candidate remains suitable after applying the
+  user-provided structural components, do not ask the user to choose by number;
+  continue directly to KPI explanation for that official context.
 - Do not ask the user for permission to use fuzzy search, BI, tools, or
   subagents.
 - Do not mention internal tool or subagent calls in the user-facing
