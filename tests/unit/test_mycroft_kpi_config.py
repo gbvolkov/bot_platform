@@ -75,6 +75,7 @@ def test_kpi_agent_prompt_defines_position_first_database_boundaries():
     assert "position-first" in prompt
     assert "kpi_staff_structure_fuzzy_search" in prompt
     assert "kpi_bi_int" in prompt
+    assert "`kpi_bi_int` is stateless" in prompt
     assert "kpi_values" in prompt
     assert "kpi_staff_structure" in prompt
     assert "kpi_method_ref" in prompt
@@ -99,10 +100,16 @@ def test_kpi_agent_prompt_defines_position_first_database_boundaries():
     assert "for every returned `staff_structure_id`" in prompt
     assert "do not use fuzzy-only fields as final user-facing options" in prompt
     assert "do not query `kpi_values` during staff-structure validation" in prompt
+    assert "every `task` request to `kpi_bi_int` must be self-contained" in prompt
+    assert "never ask bi about \"item 1\", \"item 10\", \"item 13\", \"the" in prompt
     assert "use `task` with `subagent_type: kpi_bi_int` only for concrete data requests" in prompt
     assert "never ask `kpi_bi_int` to decide what mycroft should ask the user" in prompt
     assert "do not ask bi to search `kpi_values` until the exact staff-structure context is resolved" in prompt
     assert "do not mention bi calls, fuzzy search, tools, subagents, sql, or internal" in prompt
+    assert "in user-facing conversation, never mention databases, database files, source" in prompt
+    assert "refer only to the corporate kpi methodology\n  and the official corporate" in prompt
+    assert "this privacy rule applies only to conversation with the user" in prompt
+    assert "in internal\n  requests to bi, subagents, or tools, use exact technical names" in prompt
     assert "do not ask the user for permission to use internal tools or subagents" in prompt
     assert "employee group means a group of staff" in prompt
     assert "position means the job or role" in prompt
@@ -209,6 +216,13 @@ def test_kpi_skills_make_bi_subagent_mandatory_for_database_facts():
     assert "do not ask permission before using internal tools or subagents" in source_policy
     assert "call `task` with `subagent_type: kpi_bi_int`" in method_skill
     assert "call `task` with `subagent_type: kpi_bi_int`" in structure_skill
+    assert "`kpi_bi_int` is stateless" in method_skill
+    assert "do not ask bi about \"item 1\", \"point 10\"" in method_skill
+    assert "make the bi request self-contained" in method_skill
+    assert "never assume that bi remembers the previous kpi list or previous numbering" in method_skill
+    assert "staff_structure_id=8" in method_skill
+    assert "те же kpi name + business line +" in method_skill
+    assert "pool flag + calculation detail + specifics" in method_skill
     assert "complete staff structure for each candidate id" in structure_skill
     assert "do not ask the user to choose from fuzzy-only fields" in structure_skill
 
