@@ -37,8 +37,8 @@ The `run` node uses a LangChain agent with a commit tool. A second confirmation 
 - optional extra tools passed through `initialize_agent(..., tools=[...])`
 - optional fixed prompt passed through `initialize_agent(..., system_prompt="...")`
 - `agents/store_artifacts.py`
-- `platform_utils/llm_logger.JSONFileTracer`
-- optional Langfuse callbacks
+- `platform_guardrails.logging.RedactingJSONFileTracer`
+- optional Langfuse callbacks when configured; this is allowed regardless of `guardrails_enabled` because the configured Langfuse endpoint is treated as trusted platform observability
 
 ## Outputs and persistence
 

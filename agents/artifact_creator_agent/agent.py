@@ -42,7 +42,9 @@ from agents.utils import (
     get_llm,
 )
 
-from platform_utils.llm_logger import JSONFileTracer
+from platform_guardrails.logging import RedactingJSONFileTracer
+from platform_guardrails.middleware import PrivacyModelRequestMiddleware
+from platform_guardrails.privacy import PrivacyRail
 
 from .state import (
     ArtifactCreatorAgentContext
@@ -162,6 +164,7 @@ def _build_run_agent(
     model: BaseChatModel,
     tools: List[Any] | None = None,
     system_prompt: Any | None = None,
+    privacy_middleware: Any | None = None,
 ):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
@@ -176,10 +179,14 @@ def _build_run_agent(
             return f"{resolved_system_prompt}\n\n{СOMMIT_TOOL_PROMPT_RU}"
         return DEFAULT_SYSTEM_PROMPT_RU
 
+    middleware = [build_prompt]
+    if privacy_middleware is not None:
+        middleware.append(privacy_middleware)
+
     return create_agent(
         model=model,
         tools=[commit_artifact_final_text] + (tools or []),
-        middleware=[build_prompt],
+        middleware=middleware,
         state_schema=ArtifactCreatorAgentState,
         context_schema=ArtifactCreatorAgentContext,
     )
@@ -199,7 +206,7 @@ def _build_run_agent(
 #    return run_node
 
 
-def _build_confirmation_agent(model: BaseChatModel):
+def _build_confirmation_agent(model: BaseChatModel, privacy_middleware: Any | None = None):
 
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
@@ -221,16 +228,20 @@ def _build_confirmation_agent(model: BaseChatModel):
         return prompt
 
 
+    middleware = [build_prompt, provider_then_tool]
+    if privacy_middleware is not None:
+        middleware.append(privacy_middleware)
+
     confirmation_agent = create_agent(
         model=model,
-        middleware=[build_prompt, provider_then_tool],
+        middleware=middleware,
         response_format=UserConfirmation,
         state_schema=ConfirmationAgentState,
     )
     return confirmation_agent #.with_config({"tags": [_CONFIRMATION_STREAM_TAG]})
 
-def create_confirmation_node(model: BaseChatModel):
-    _confirmation_agent = _build_confirmation_agent(model)
+def create_confirmation_node(model: BaseChatModel, privacy_middleware: Any | None = None):
+    _confirmation_agent = _build_confirmation_agent(model, privacy_middleware=privacy_middleware)
     def confirmation_node(
         state: ArtifactCreatorAgentState, 
         config: RunnableConfig, 
@@ -340,11 +351,13 @@ def initialize_agent(
     checkpoint_saver=None,
     tools: List[Any] | None = None,
     system_prompt: Any | None = None,
+    guardrails_enabled: bool = False,
+    guardrails_locale: str = "ru-RU",
 ):
     #set_locale(locale)
     #set_models_locale(locale)
     log_name = f"artifact_creator_agent_{time.strftime('%Y%m%d%H%M')}"
-    json_handler = JSONFileTracer(f"./logs/{log_name}")
+    json_handler = RedactingJSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [json_handler]
     if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
         langfuse = Langfuse(
@@ -358,13 +371,29 @@ def initialize_agent(
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     llm = get_llm(model="base", provider=provider.value, temperature=0.4)
     response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0, streaming=False)
+
+    run_privacy_middleware = None
+    confirmation_privacy_middleware = None
+    if guardrails_enabled:
+        privacy_rail = PrivacyRail.from_palimpsest(locale=guardrails_locale)
+        guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
+        run_privacy_middleware = PrivacyModelRequestMiddleware(
+            privacy_rail,
+            agent_name="artifact_creator_agent.run",
+            event_log_path=guardrail_log_path,
+        )
+        confirmation_privacy_middleware = PrivacyModelRequestMiddleware(
+            privacy_rail,
+            agent_name="artifact_creator_agent.confirm",
+            event_log_path=guardrail_log_path,
+        )
     
     builder = StateGraph(ArtifactCreatorAgentState)
     builder.add_node("greetings", create_greetings_node(system_prompt))
     builder.add_node("set_prompt", create_set_prompt_node(llm))
     builder.add_node("cleanup", cleanup_messages_node)
-    builder.add_node("run", _build_run_agent(llm, tools, system_prompt))
-    builder.add_node("confirm", create_confirmation_node(response_analyser_llm))
+    builder.add_node("run", _build_run_agent(llm, tools, system_prompt, privacy_middleware=run_privacy_middleware))
+    builder.add_node("confirm", create_confirmation_node(response_analyser_llm, privacy_middleware=confirmation_privacy_middleware))
     builder.add_node("final_print", final_print_node)
     builder.add_node("ready", ready_node)
 

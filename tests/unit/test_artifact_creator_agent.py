@@ -56,7 +56,7 @@ def test_initialize_agent_passes_tools_and_system_prompt_to_run_builder(monkeypa
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(artifact_agent.config, "LANGFUSE_URL", "")
-    monkeypatch.setattr(artifact_agent, "JSONFileTracer", lambda path: "json_handler")
+    monkeypatch.setattr(artifact_agent, "RedactingJSONFileTracer", lambda path: "json_handler")
 
     def fake_get_llm(**kwargs):
         if kwargs["model"] == "base":
@@ -74,14 +74,24 @@ def test_initialize_agent_passes_tools_and_system_prompt_to_run_builder(monkeypa
     monkeypatch.setattr(
         artifact_agent,
         "_build_run_agent",
-        lambda model, tools=None, system_prompt=None: captured.update(
-            {"run_model": model, "run_tools": tools, "run_system_prompt": system_prompt}
+        lambda model, tools=None, system_prompt=None, privacy_middleware=None: captured.update(
+            {
+                "run_model": model,
+                "run_tools": tools,
+                "run_system_prompt": system_prompt,
+                "run_privacy_middleware": privacy_middleware,
+            }
         ) or (lambda *_args, **_kwargs: {}),
     )
     monkeypatch.setattr(
         artifact_agent,
         "create_confirmation_node",
-        lambda model: captured.update({"confirmation_model": model}) or (lambda *_args, **_kwargs: {}),
+        lambda model, privacy_middleware=None: captured.update(
+            {
+                "confirmation_model": model,
+                "confirmation_privacy_middleware": privacy_middleware,
+            }
+        ) or (lambda *_args, **_kwargs: {}),
     )
 
     class FakeCompiledGraph:
@@ -122,6 +132,91 @@ def test_initialize_agent_passes_tools_and_system_prompt_to_run_builder(monkeypa
     assert captured["run_model"] == "base-llm"
     assert captured["run_tools"] == [custom_tool]
     assert captured["run_system_prompt"] == "fixed prompt"
+    assert captured["run_privacy_middleware"] is None
     assert captured["confirmation_model"] == "nano-llm"
+    assert captured["confirmation_privacy_middleware"] is None
     assert captured["checkpointer"] == "checkpoint"
     assert captured["graph_config"] == {"callbacks": ["json_handler"]}
+
+
+def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(artifact_agent.config, "LANGFUSE_URL", "https://langfuse.example")
+    monkeypatch.setattr(artifact_agent, "RedactingJSONFileTracer", lambda path: "redacting_handler")
+    monkeypatch.setattr(artifact_agent, "CallbackHandler", lambda: "langfuse_handler")
+
+    def fake_get_llm(**kwargs):
+        return f"{kwargs['model']}-llm"
+
+    class FakePrivacyRail:
+        pass
+
+    def fake_from_palimpsest(**kwargs):
+        captured["privacy_rail_kwargs"] = kwargs
+        return FakePrivacyRail()
+
+    def fake_privacy_middleware(privacy_rail, **kwargs):
+        captured.setdefault("privacy_middlewares", []).append((privacy_rail, kwargs))
+        return f"privacy:{kwargs['agent_name']}"
+
+    monkeypatch.setattr(artifact_agent, "get_llm", fake_get_llm)
+    monkeypatch.setattr(artifact_agent.PrivacyRail, "from_palimpsest", staticmethod(fake_from_palimpsest))
+    monkeypatch.setattr(artifact_agent, "PrivacyModelRequestMiddleware", fake_privacy_middleware)
+    monkeypatch.setattr(
+        artifact_agent,
+        "create_greetings_node",
+        lambda system_prompt=None: (lambda *_args, **_kwargs: {}),
+    )
+    monkeypatch.setattr(
+        artifact_agent,
+        "_build_run_agent",
+        lambda model, tools=None, system_prompt=None, privacy_middleware=None: captured.update(
+            {"run_privacy_middleware": privacy_middleware}
+        ) or (lambda *_args, **_kwargs: {}),
+    )
+    monkeypatch.setattr(
+        artifact_agent,
+        "create_confirmation_node",
+        lambda model, privacy_middleware=None: captured.update(
+            {"confirmation_privacy_middleware": privacy_middleware}
+        ) or (lambda *_args, **_kwargs: {}),
+    )
+
+    class FakeCompiledGraph:
+        def with_config(self, value):
+            captured["graph_config"] = value
+            return self
+
+    class FakeStateGraph:
+        def __init__(self, state_schema):
+            return None
+
+        def add_node(self, name, node):
+            return None
+
+        def add_conditional_edges(self, *args, **kwargs):
+            return None
+
+        def add_edge(self, *args, **kwargs):
+            return None
+
+        def compile(self, checkpointer=None, debug=False):
+            return FakeCompiledGraph()
+
+    monkeypatch.setattr(artifact_agent, "StateGraph", FakeStateGraph)
+
+    artifact_agent.initialize_agent(
+        provider=ModelType.GPT,
+        checkpoint_saver="checkpoint",
+        guardrails_enabled=True,
+        guardrails_locale="ru-RU",
+    )
+
+    assert captured["privacy_rail_kwargs"] == {"locale": "ru-RU"}
+    assert captured["run_privacy_middleware"] == "privacy:artifact_creator_agent.run"
+    assert captured["confirmation_privacy_middleware"] == "privacy:artifact_creator_agent.confirm"
+    assert captured["graph_config"] == {"callbacks": ["redacting_handler", "langfuse_handler"]}
+    middlewares = captured["privacy_middlewares"]
+    assert len(middlewares) == 2
+    assert all(item[0] is middlewares[0][0] for item in middlewares)
