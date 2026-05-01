@@ -11,14 +11,32 @@ if str(ROOT) not in sys.path:
 
 fake_think = types.ModuleType("agents.tools.think")
 fake_think.ThinkTool = object
-sys.modules.setdefault("agents.tools.think", fake_think)
+_existing_think = sys.modules.get("agents.tools.think")
+if _existing_think is None:
+    sys.modules["agents.tools.think"] = fake_think
+
+
+class FakeYandexSearchTool:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
 
 fake_yandex_search = types.ModuleType("agents.tools.yandex_search")
-fake_yandex_search.YandexSearchTool = object
-sys.modules.setdefault("agents.tools.yandex_search", fake_yandex_search)
+fake_yandex_search.YandexSearchTool = FakeYandexSearchTool
+fake_yandex_search.SEARCH_TOOL_POLICY_PROMPT_EN = ""
+fake_yandex_search.SEARCH_TOOL_POLICY_PROMPT_RU = ""
+_existing_yandex_search = sys.modules.get("agents.tools.yandex_search")
+if _existing_yandex_search is None:
+    sys.modules["agents.tools.yandex_search"] = fake_yandex_search
 
 from agents.artifact_creator_agent import agent as artifact_agent
 from agents.utils import ModelType
+
+if _existing_think is None:
+    sys.modules.pop("agents.tools.think", None)
+if _existing_yandex_search is None:
+    sys.modules.pop("agents.tools.yandex_search", None)
 
 
 def test_create_greetings_node_prefers_initialize_system_prompt_over_runtime_context():

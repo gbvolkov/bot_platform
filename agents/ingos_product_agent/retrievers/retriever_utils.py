@@ -29,7 +29,7 @@ from ...retrievers.utils.load_common_retrievers import (
 
 from .vector_store import VectorStore
 
-from palimpsest import Palimpsest
+from ...palimpsest_sessions import anonymize_with_session
 
 import config
 #_faiss_reranker_retriever: Optional[TournamentCrossEncoderReranker] = None
@@ -37,6 +37,7 @@ import config
 _MAX_RETRIEVALS=5
 
 if TYPE_CHECKING:
+    from palimpsest import Palimpsest
     from services.kb_manager.notifications import KBReloadContext
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,7 @@ def get_search_tool(product: str = "default", anonymizer: Palimpsest = None):
         if found_docs:
             result = "\n\n".join([doc.page_content for doc in found_docs[:30]])
             if anonymizer:
-                result = anonymizer.anonimize(result)
+                result = anonymize_with_session(anonymizer, result)
             return result
         else:
             return "No matching information found."

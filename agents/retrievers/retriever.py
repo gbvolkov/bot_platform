@@ -25,7 +25,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import START, END, StateGraph
 from langgraph.prebuilt import tools_condition
-from palimpsest import Palimpsest
+from ..palimpsest_sessions import anonymize_with_session
 from .teamly_retriever import (
     TeamlyRetriever,
     TeamlyRetriever_Tickets,
@@ -46,6 +46,7 @@ from .utils.load_common_retrievers import (
 from .cross_encoder_reranker_with_score import CrossEncoderRerankerWithScores
 
 if TYPE_CHECKING:
+    from palimpsest import Palimpsest
     from services.kb_manager.notifications import KBReloadContext
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,7 @@ def get_retriever():
 search = get_retriever()
 
 
-def get_search_tool(anonymizer: Palimpsest = None):
+def get_search_tool(anonymizer: "Palimpsest | None" = None):
     @tool
     def search_kb(query: str) -> str:
         """Retrieves from knowledgebase context suitable for the query. Shall be always used when user asks question.
@@ -115,13 +116,13 @@ def get_search_tool(anonymizer: Palimpsest = None):
         if found_docs:
             result = "\n\n".join([doc.page_content for doc in found_docs[:30]])
             if anonymizer:
-                result = anonymizer.anonimize(result)
+                result = anonymize_with_session(anonymizer, result)
             return result
         else:
             return "No matching information found."
     return search_kb
 
-def get_tickets_search_tool(anonymizer: Palimpsest = None):
+def get_tickets_search_tool(anonymizer: "Palimpsest | None" = None):
     MAX_RETRIEVALS = 3
 
     tickets_retriever = getTeamlyTicketsRetriever()
@@ -137,13 +138,13 @@ def get_tickets_search_tool(anonymizer: Palimpsest = None):
         if found_docs:
             result = "\n\n".join([doc.page_content for doc in found_docs[:30]])
             if anonymizer:
-                result = anonymizer.anonimize(result)
+                result = anonymize_with_session(anonymizer, result)
             return result
         else:
             return "No matching information found."
     return search_tickets
 
-def get_term_and_defition_tools(anonymizer: Palimpsest = None):
+def get_term_and_defition_tools(anonymizer: "Palimpsest | None" = None):
     MAX_RETRIEVALS = 3
     glossary_retriever = getTeamlyGlossaryRetriever()
     
@@ -173,7 +174,7 @@ def get_term_and_defition_tools(anonymizer: Palimpsest = None):
         if found_docs:
             result = "\n\n".join([doc.page_content for doc in found_docs[:30]])
             if anonymizer:
-                result = anonymizer.anonimize(result)
+                result = anonymize_with_session(anonymizer, result)
             return result
         else:
             return "No matching information found."

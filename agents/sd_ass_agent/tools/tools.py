@@ -1,6 +1,8 @@
 from langchain_core.tools import tool
-from palimpsest import Palimpsest
 import logging
+from typing import Any
+
+from ...palimpsest_sessions import anonymize_with_session
 
 from ..augment_query import (
     get_term_meanings
@@ -8,7 +10,7 @@ from ..augment_query import (
     , tnd_docs
 )
 
-def get_term_and_defition_tools(anonymizer: Palimpsest = None):
+def get_term_and_defition_tools(anonymizer: Any = None):
     MAX_RETRIEVALS = 3
 
     @tool
@@ -36,7 +38,7 @@ def get_term_and_defition_tools(anonymizer: Palimpsest = None):
             if found_docs:
                 result = "\n\n".join([doc["_doc"].page_content for doc in found_docs[:30]])
                 if anonymizer:
-                    result = anonymizer.anonimize(result)
+                    result = anonymize_with_session(anonymizer, result)
                 return result
             else:
                 return "No matching information found."
@@ -69,7 +71,7 @@ def get_term_and_defition_tools(anonymizer: Palimpsest = None):
             if found_docs:
                 result = "\n\n".join([doc.page_content for doc in found_docs[:30]])
                 if anonymizer:
-                    result = anonymizer.anonimize(result)
+                    result = anonymize_with_session(anonymizer, result)
                 return result
             else:
                 return "No matching information found."

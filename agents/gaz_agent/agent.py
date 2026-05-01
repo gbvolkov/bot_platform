@@ -42,7 +42,7 @@ from .logic import (
     prioritize_missing_slots,
 )
 from .locales import DEFAULT_LOCALE, resolve_locale
-from .middleware import build_palimpsest_middleware
+from .middleware import build_palimpsest_middleware, build_palimpsest_session_manager
 from .prompts import compose_prompt, get_prompt, get_text
 from .schemas import TurnIntentExtractionResult
 from .state import GazAgentState
@@ -193,11 +193,13 @@ def _append_trace(
 
 
 
-def _build_middlewares(locale: str, summary_model: BaseChatModel) -> List[Any]:
+def _build_middlewares(locale: str, summary_model: BaseChatModel, palimpsest_sessions: Any = None) -> List[Any]:
     middleware: List[Any] = []
     if config.USE_ANONIMIZER:
         palimpsest_locale = "ru-RU" if locale == "ru" else "en-US"
-        middleware.append(build_palimpsest_middleware(locale=palimpsest_locale))
+        if palimpsest_sessions is None:
+            palimpsest_sessions = build_palimpsest_session_manager(palimpsest_locale)
+        middleware.append(build_palimpsest_middleware(locale=palimpsest_locale, sessions=palimpsest_sessions))
     middleware.append(
         SummarizationMiddleware(
             model=summary_model,
@@ -612,6 +614,7 @@ def _build_turn_intent_extractor(
     locale: str,
     structured_output_strategy: StructuredOutputStrategy,
     allowed_family_ids: Optional[List[str]],
+    palimpsest_sessions: Any = None,
 ):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
@@ -629,7 +632,11 @@ def _build_turn_intent_extractor(
     return create_agent(
         model=model,
         tools=None,
-        middleware=[*_build_middlewares(locale, summary_model), prompt, *_structured_output_middleware(structured_output_strategy)],
+        middleware=[
+            *_build_middlewares(locale, summary_model, palimpsest_sessions),
+            prompt,
+            *_structured_output_middleware(structured_output_strategy),
+        ],
         response_format=_structured_response_format(TurnIntentExtractionResult, structured_output_strategy),
         state_schema=GazAgentState,
     )
@@ -642,6 +649,7 @@ def _build_sales_response_agent(
     locale: str,
     tools: List[Any],
     allowed_family_ids: Optional[List[str]],
+    palimpsest_sessions: Any = None,
 ):
     @dynamic_prompt
     def prompt(request: ModelRequest) -> str:
@@ -661,7 +669,7 @@ def _build_sales_response_agent(
         model=model,
         tools=tools,
         middleware=[
-            *_build_middlewares(locale, summary_model),
+            *_build_middlewares(locale, summary_model, palimpsest_sessions),
             prompt,
         ],
         state_schema=GazAgentState,
@@ -1047,6 +1055,10 @@ def initialize_agent(
     structured_output_strategy: StructuredOutputStrategy = "provider_then_tool",
 ):
     locale_key = resolve_locale(locale)
+    palimpsest_sessions = None
+    if config.USE_ANONIMIZER:
+        palimpsest_locale = "ru-RU" if locale_key == "ru" else "en-US"
+        palimpsest_sessions = build_palimpsest_session_manager(palimpsest_locale)
     log_name = f"gaz_agent_{time.strftime('%Y%m%d%H%M')}"
     json_handler = JSONFileTracer(f"./logs/{log_name}")
     callback_handlers = [StreamWriterCallbackHandler(), json_handler]
@@ -1094,6 +1106,7 @@ def initialize_agent(
         locale_key,
         structured_output_strategy,
         allowed_family_ids,
+        palimpsest_sessions,
     )
 
     tool_registry: Dict[str, Any] = {
@@ -1122,11 +1135,18 @@ def initialize_agent(
         locale_key,
         list(tool_registry.values()),
         allowed_family_ids,
+        palimpsest_sessions,
     )
 
     builder = StateGraph(GazAgentState, config_schema=ConfigSchema)
     builder.add_node("init", create_init_node(docs_client))
-    builder.add_node("reset", reset_node)
+
+    def reset_node_with_palimpsest(state: GazAgentState, config: RunnableConfig) -> GazAgentState:
+        if palimpsest_sessions:
+            palimpsest_sessions.reset_from_config(config)
+        return reset_node(state, config)
+
+    builder.add_node("reset", reset_node_with_palimpsest)
     builder.add_node("opening", opening_node)
     builder.add_node("turn_intent", create_turn_intent_node(turn_intent_extractor, list(tool_registry.keys())))
     builder.add_node("sales_response", create_sales_response_node(sales_response_agent))

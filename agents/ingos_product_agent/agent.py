@@ -2,7 +2,6 @@
 import uuid
 import os
 from typing import List, Any
-from copy import copy
 
 import config as cfg
 
@@ -23,7 +22,7 @@ from langgraph.prebuilt import tools_condition
 #from agents.assistants.yandex_tools.yandex_tooling import ChatYandexGPTWithTools as ChatYandexGPT
 
 from langchain_core.messages.modifier import RemoveMessage
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from langchain.agents import create_agent
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -45,7 +44,7 @@ from ..llm_utils import get_llm
 from .retrievers.retriever_utils import get_search_tool, reload_retrievers as reload_product_retrievers, get_chroma_vectore_store
 from .retrievers.vector_store import VectorStore
 
-from palimpsest import Palimpsest
+from ..palimpsest_sessions import PalimpsestSessionManager, PalimpsestSessionMiddleware
 
 import logging
 logging.basicConfig(
@@ -103,24 +102,6 @@ def reset_memory(state: ProductAgentState) -> ProductAgentState:
     }
 
 
-def anonymize_message_content(content: Any, anonymizer: Palimpsest) -> Any:
-    # Content can be str OR a list of "content parts" dicts.
-    if isinstance(content, str):
-        return anonymizer.anonimize(content)
-    if isinstance(content, list):
-        out = []
-        for part in content:
-            if isinstance(part, dict):
-                p = dict(part)
-                for key in ("text", "content", "input", "title", "caption", "markdown", "explanation"):
-                    if isinstance(p.get(key), str):
-                        p[key] = anonymizer.anonimize(p[key])
-                out.append(p)
-            else:
-                out.append(part)
-        return out
-    return content
-
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
     product: str = "default",
@@ -145,8 +126,10 @@ def initialize_agent(
         lf_handler = CallbackHandler()
         callback_handlers += [lf_handler]
 
-    anonymizer = None
+    palimpsest_sessions = None
     if cfg.USE_ANONIMIZER:
+        from palimpsest import Palimpsest
+
         anon_entities = [
             "RU_PERSON"
             ,"CREDIT_CARD"
@@ -159,7 +142,9 @@ def initialize_agent(
             ,"RU_BANK_ACC"
             ,"TICKET_NUMBER"
         ]
-        anonymizer = Palimpsest(verbose=False, run_entities=anon_entities)
+        palimpsest_sessions = PalimpsestSessionManager(
+            Palimpsest(verbose=False, run_entities=anon_entities)
+        )
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     team_llm = get_llm(model = cfg.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     
@@ -172,28 +157,9 @@ def initialize_agent(
     ]
     
 
-    class ProductAgentAnonymizationMiddleware:
-        def __init__(self, anonymizer: Palimpsest):
-            self._anonymizer = anonymizer
-
-        def modify_model_request(self, request, state):
-            anon_msgs: List[BaseMessage] = []
-
-            with open(f"./logs/{ANON_LOG_NAME}", "a", encoding="utf-8") as f:
-                for message in request.messages:
-                    anon_msg = copy(message)
-                    f.write(f"BEFORE ANONIMIZATION:\n{anon_msg.content}\n")
-                    anon_msg.content = anonymize_message_content(
-                        message.content, self._anonymizer
-                    )
-                    f.write(f"AFTER ANONIMIZATION:\n{anon_msg.content}\n\n")
-                    anon_msgs.append(anon_msg)
-            request.messages = anon_msgs
-            return request
-
     def get_validator(agent: str):
 
-        def validate_answer(state: ProductAgentState):
+        def validate_answer(state: ProductAgentState, config: RunnableConfig | None = None):
             queries = []
             messages = state["messages"]
             last_message = messages[-1]
@@ -206,11 +172,6 @@ def initialize_agent(
                     if query_text:
                         queries.append(query_text)
             
-            if anonymizer:
-                with open(f"./logs/{ANON_LOG_NAME}", "a", encoding="utf-8") as f:
-                    f.write(f"BEFORE DEANONIMIZATION:\n{last_message.content}\n")
-                    last_message.content = anonymizer.deanonimize(last_message.content)
-                    f.write(f"AFTER DEANONIMIZATION:\n{last_message.content}\n\n")
             state.update({"verification_result": "OK",
                             "verification_reason": "OK"})
 
@@ -218,7 +179,11 @@ def initialize_agent(
 
         return validate_answer
 
-    middleware = [ProductAgentAnonymizationMiddleware(anonymizer)] if anonymizer else []
+    middleware = (
+        [PalimpsestSessionMiddleware(palimpsest_sessions, log_path=f"./logs/{ANON_LOG_NAME}")]
+        if palimpsest_sessions
+        else []
+    )
 
     def with_validator(agent_runnable, validator):
         return agent_runnable | RunnableLambda(validator)
@@ -306,7 +271,12 @@ def initialize_agent(
     builder = StateGraph(ProductAgentState, config_schema=ConfigSchema)
     # Define nodes
     builder.add_node("fetch_user_info", user_info)
-    builder.add_node("reset_memory", reset_memory)
+    def reset_memory_node(state: ProductAgentState, config: RunnableConfig) -> ProductAgentState:
+        if palimpsest_sessions:
+            palimpsest_sessions.reset_from_config(config)
+        return reset_memory(state)
+
+    builder.add_node("reset_memory", reset_memory_node)
     builder.add_node("prefetch_context", prefetch_context)
     builder.add_node("default_agent", default_agent)
 
