@@ -20,8 +20,10 @@ from langchain_core.runnables import RunnableConfig
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
+from langgraph.utils.runnable import RunnableCallable
 
 
 from langfuse import Langfuse
@@ -43,8 +45,13 @@ from agents.utils import (
 )
 
 from platform_guardrails.logging import RedactingJSONFileTracer
-from platform_guardrails.middleware import PrivacyModelRequestMiddleware
+from platform_guardrails.middleware import (
+    PrivacyModelRequestMiddleware,
+    SecurityScannerMiddleware,
+    ToolContentScannerMiddleware,
+)
 from platform_guardrails.privacy import PrivacyRail
+from platform_guardrails.scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerFailurePolicy
 
 from .state import (
     ArtifactCreatorAgentContext
@@ -160,11 +167,70 @@ def cleanup_messages_node(
         "phase" : "run"
     }
 
+
+def _message_id(message: Any) -> str | None:
+    message_id = getattr(message, "id", None)
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
+def _message_updates_with_subgraph_removals(
+    input_messages: List[Any] | None,
+    result_messages: List[Any] | None,
+) -> List[Any]:
+    """Preserve message deletions that happened inside a nested agent graph."""
+    input_messages = list(input_messages or [])
+    result_messages = list(result_messages or [])
+    if any(_message_id(message) is None for message in input_messages):
+        idless_input_keys = {
+            (getattr(message, "type", type(message).__name__), repr(getattr(message, "content", None)))
+            for message in input_messages
+            if _message_id(message) is None
+        }
+        safe_result_messages = [
+            message
+            for message in result_messages
+            if (
+                getattr(message, "type", type(message).__name__),
+                repr(getattr(message, "content", None)),
+            )
+            not in idless_input_keys
+        ]
+        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *safe_result_messages]
+    result_ids = {
+        message_id
+        for message in result_messages
+        if not isinstance(message, RemoveMessage)
+        if (message_id := _message_id(message)) is not None
+    }
+    removals = [
+        RemoveMessage(id=message_id)
+        for message in input_messages
+        if (message_id := _message_id(message)) is not None and message_id not in result_ids
+    ]
+    return [*removals, *result_messages]
+
+
+def _state_update_with_subgraph_removals(
+    input_state: Dict[str, Any],
+    result_state: Any,
+) -> Any:
+    if not isinstance(result_state, dict) or "messages" not in result_state:
+        return result_state
+    updated = dict(result_state)
+    updated["messages"] = _message_updates_with_subgraph_removals(
+        list(input_state.get("messages") or []),
+        list(result_state.get("messages") or []),
+    )
+    return updated
+
+
 def _build_run_agent(
     model: BaseChatModel,
     tools: List[Any] | None = None,
     system_prompt: Any | None = None,
+    security_middleware: Any | None = None,
     privacy_middleware: Any | None = None,
+    tool_content_middleware: Any | None = None,
 ):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
@@ -180,8 +246,12 @@ def _build_run_agent(
         return DEFAULT_SYSTEM_PROMPT_RU
 
     middleware = [build_prompt]
+    if security_middleware is not None:
+        middleware.append(security_middleware)
     if privacy_middleware is not None:
         middleware.append(privacy_middleware)
+    if tool_content_middleware is not None:
+        middleware.append(tool_content_middleware)
 
     return create_agent(
         model=model,
@@ -190,6 +260,42 @@ def _build_run_agent(
         state_schema=ArtifactCreatorAgentState,
         context_schema=ArtifactCreatorAgentContext,
     )
+
+
+def create_run_node(
+    model: BaseChatModel,
+    tools: List[Any] | None = None,
+    system_prompt: Any | None = None,
+    security_middleware: Any | None = None,
+    privacy_middleware: Any | None = None,
+    tool_content_middleware: Any | None = None,
+):
+    run_agent = _build_run_agent(
+        model,
+        tools,
+        system_prompt,
+        security_middleware=security_middleware,
+        privacy_middleware=privacy_middleware,
+        tool_content_middleware=tool_content_middleware,
+    )
+
+    def run_node(
+        state: ArtifactCreatorAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[ArtifactCreatorAgentContext],
+    ) -> Any:
+        result = run_agent.invoke(state, config=config, context=runtime.context)
+        return _state_update_with_subgraph_removals(state, result)
+
+    async def arun_node(
+        state: ArtifactCreatorAgentState,
+        config: RunnableConfig,
+        runtime: Runtime[ArtifactCreatorAgentContext],
+    ) -> Any:
+        result = await run_agent.ainvoke(state, config=config, context=runtime.context)
+        return _state_update_with_subgraph_removals(state, result)
+
+    return RunnableCallable(run_node, arun_node, trace=False)
 
 
 #def create_run_node(model: BaseChatModel):
@@ -206,7 +312,11 @@ def _build_run_agent(
 #    return run_node
 
 
-def _build_confirmation_agent(model: BaseChatModel, privacy_middleware: Any | None = None):
+def _build_confirmation_agent(
+    model: BaseChatModel,
+    security_middleware: Any | None = None,
+    privacy_middleware: Any | None = None,
+):
 
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
@@ -229,6 +339,8 @@ def _build_confirmation_agent(model: BaseChatModel, privacy_middleware: Any | No
 
 
     middleware = [build_prompt, provider_then_tool]
+    if security_middleware is not None:
+        middleware.insert(1, security_middleware)
     if privacy_middleware is not None:
         middleware.append(privacy_middleware)
 
@@ -240,8 +352,16 @@ def _build_confirmation_agent(model: BaseChatModel, privacy_middleware: Any | No
     )
     return confirmation_agent #.with_config({"tags": [_CONFIRMATION_STREAM_TAG]})
 
-def create_confirmation_node(model: BaseChatModel, privacy_middleware: Any | None = None):
-    _confirmation_agent = _build_confirmation_agent(model, privacy_middleware=privacy_middleware)
+def create_confirmation_node(
+    model: BaseChatModel,
+    security_middleware: Any | None = None,
+    privacy_middleware: Any | None = None,
+):
+    _confirmation_agent = _build_confirmation_agent(
+        model,
+        security_middleware=security_middleware,
+        privacy_middleware=privacy_middleware,
+    )
     def confirmation_node(
         state: ArtifactCreatorAgentState, 
         config: RunnableConfig, 
@@ -265,29 +385,46 @@ def create_confirmation_node(model: BaseChatModel, privacy_middleware: Any | Non
 
         result = _confirmation_agent.invoke(confirmation_state, config=confirm_config, context=runtime.context)
         structured = result.get("structured_response") or {}
-        state["is_artifact_confirmed"] = structured.is_artifact_confirmed
-        if structured.is_artifact_confirmed:
+        is_artifact_confirmed = bool(getattr(structured, "is_artifact_confirmed", False))
+        update: Dict[str, Any] = {"is_artifact_confirmed": is_artifact_confirmed}
+
+        result_messages = list(result.get("messages") or []) if isinstance(result, dict) else []
+        last_message_id = _message_id(last_message)
+        result_message_ids = {_message_id(message) for message in result_messages}
+        if last_message_id and last_message_id not in result_message_ids:
+            public_block_messages = [
+                message
+                for message in result_messages
+                if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None)
+            ]
+            update["messages"] = [RemoveMessage(id=last_message_id), *public_block_messages]
+
+        if is_artifact_confirmed:
             try:
                 store_url = store_artifacts(state["artifacts"] or [])
                 link_text = f"[{ARTIFACT_URL_PROMPT_RU}]({store_url})"
-                state["final_artifact_url"] = store_url
+                update["final_artifact_url"] = store_url
             except Exception as e:
                 logging.error(f"Error occured at store_artifacts.\nException: {e}")
+                update["final_artifact_url"] = ""
             #state["messages"].append(AIMessage(content=f"\n***Работа завершена***.\nСогласованный текст артефакта:\n\n{artifact}\n\n{link_text}\n"))
             #state["messages"].append(AIMessage(content=f"\n\n***Работа завершена***.\nСогласованный текст артефакта:\n\n{artifact}\n\n{link_text}\n"))
             
-            state["phase"] = "ready"
-        return state
+            update["phase"] = "ready"
+        return update
 
     return confirmation_node
 
 def final_print_node(
-        state: ArtifactCreatorAgentState, 
-        config: RunnableConfig, 
+        state: ArtifactCreatorAgentState,
+        config: RunnableConfig,
         runtime: Runtime[ArtifactCreatorAgentContext],
     ) -> ArtifactCreatorAgentState:
-    store_url = state["final_artifact_url"]
-    if store_url:            
+    if not state.get("is_artifact_confirmed", False):
+        return Command(update={"phase": "run"})
+
+    store_url = state.get("final_artifact_url", "")
+    if store_url:
         link_text = f"[{ARTIFACT_URL_PROMPT_RU}]({store_url})"
     else:
         link_text = ARTIFACT_STORE_ERROR_RU
@@ -302,10 +439,10 @@ def final_print_node(
 
 
 def is_confirmed(
-    state: ArtifactCreatorAgentState, 
+    state: ArtifactCreatorAgentState,
 ) -> ArtifactCreatorAgentState:
 
-    if not state["is_artifact_confirmed"]:
+    if not state.get("is_artifact_confirmed", False):
         return "run"
     else:
         #artifact_id = state.get("artifact_id", 0)
@@ -329,7 +466,7 @@ def ready_node(
     if artifacts and artifact_id in artifacts:
         artifact = artifacts[artifact_id].get("artifact_final_text", "")
 
-    store_url = state["final_artifact_url"]
+    store_url = state.get("final_artifact_url", "")
     if store_url:            
         link_text = f"[{ARTIFACT_URL_PROMPT_RU}]({store_url})"
     else:
@@ -353,6 +490,9 @@ def initialize_agent(
     system_prompt: Any | None = None,
     guardrails_enabled: bool = False,
     guardrails_locale: str = "ru-RU",
+    guardrail_scanners_enabled: bool | None = None,
+    guardrail_scanner_failure_policy: ScannerFailurePolicy = "fail_closed",
+    guardrail_banned_topics: List[str] | None = None,
 ):
     #set_locale(locale)
     #set_models_locale(locale)
@@ -374,6 +514,9 @@ def initialize_agent(
 
     run_privacy_middleware = None
     confirmation_privacy_middleware = None
+    run_security_middleware = None
+    confirmation_security_middleware = None
+    tool_content_middleware = None
     if guardrails_enabled:
         privacy_rail = PrivacyRail.from_palimpsest(locale=guardrails_locale)
         guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
@@ -387,13 +530,59 @@ def initialize_agent(
             agent_name="artifact_creator_agent.confirm",
             event_log_path=guardrail_log_path,
         )
+
+        if guardrail_scanners_enabled is None:
+            guardrail_scanners_enabled = guardrails_enabled
+        if guardrail_scanners_enabled:
+            scanner_profile = LLMGuardScannerProfile.artifact_creator_default(
+                banned_topics=guardrail_banned_topics,
+                failure_policy=guardrail_scanner_failure_policy,
+            )
+            scanner_rail = LLMGuardScannerRail(scanner_profile)
+            run_security_middleware = SecurityScannerMiddleware(
+                scanner_rail,
+                agent_name="artifact_creator_agent.run",
+                event_log_path=guardrail_log_path,
+                scan_system_prompt=True,
+                scan_state_keys=("system_prompt",),
+            )
+            confirmation_security_middleware = SecurityScannerMiddleware(
+                scanner_rail,
+                agent_name="artifact_creator_agent.confirm",
+                event_log_path=guardrail_log_path,
+                blocked_structured_response_factory=lambda _decision: UserConfirmation(
+                    is_artifact_confirmed=False
+                ),
+            )
+            tool_content_middleware = ToolContentScannerMiddleware(
+                scanner_rail,
+                agent_name="artifact_creator_agent.run",
+                event_log_path=guardrail_log_path,
+            )
     
     builder = StateGraph(ArtifactCreatorAgentState)
     builder.add_node("greetings", create_greetings_node(system_prompt))
     builder.add_node("set_prompt", create_set_prompt_node(llm))
     builder.add_node("cleanup", cleanup_messages_node)
-    builder.add_node("run", _build_run_agent(llm, tools, system_prompt, privacy_middleware=run_privacy_middleware))
-    builder.add_node("confirm", create_confirmation_node(response_analyser_llm, privacy_middleware=confirmation_privacy_middleware))
+    builder.add_node(
+        "run",
+        create_run_node(
+            llm,
+            tools,
+            system_prompt,
+            security_middleware=run_security_middleware,
+            privacy_middleware=run_privacy_middleware,
+            tool_content_middleware=tool_content_middleware,
+        ),
+    )
+    builder.add_node(
+        "confirm",
+        create_confirmation_node(
+            response_analyser_llm,
+            security_middleware=confirmation_security_middleware,
+            privacy_middleware=confirmation_privacy_middleware,
+        ),
+    )
     builder.add_node("final_print", final_print_node)
     builder.add_node("ready", ready_node)
 

@@ -154,7 +154,7 @@ def build_human_message(payload: MessagePayload, raw_text_override: Optional[str
                 content.append({"type": "text", "text": segment})
         if not content:
             content.append({"type": "text", "text": ""})
-    return HumanMessage(content=content)
+    return HumanMessage(content=content, id=f"human-{uuid.uuid4().hex}")
 
 
 def build_agent_config(

@@ -5,7 +5,7 @@ import asyncio
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from bot_service.schemas import MessagePayload
-from bot_service.service import invoke_agent_stream
+from bot_service.service import build_human_message, invoke_agent_stream
 
 
 class _FakeAgent:
@@ -14,6 +14,13 @@ class _FakeAgent:
         yield ("messages", (AIMessageChunk(content=[{"type": "text", "text": "Beta"}]), {}))
         yield ("messages", (AIMessage(content="Alpha Beta"), {}))
         yield ("values", {"messages": [AIMessage(content="Alpha Beta")]})
+
+
+def test_build_human_message_assigns_message_id() -> None:
+    message = build_human_message(MessagePayload(type="text", text="test"))
+
+    assert message.id
+    assert message.id.startswith("human-")
 
 
 def test_invoke_agent_stream_does_not_replay_final_ai_message() -> None:

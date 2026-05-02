@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from platform_guardrails.middleware import PrivacyModelRequestMiddleware
@@ -68,8 +68,11 @@ def test_model_request_anonymizes_messages_system_and_deanonymizes_response():
     )
     request = ModelRequest(
         model=object(),
+        system_prompt="system prompt",
         messages=[HumanMessage(content=[{"type": "text", "text": "hello"}])],
-        system_message=SystemMessage(content="system prompt"),
+        tool_choice=None,
+        tools=[],
+        response_format=None,
         state={"messages": []},
         runtime=runtime,
     )
@@ -77,14 +80,14 @@ def test_model_request_anonymizes_messages_system_and_deanonymizes_response():
 
     def handler(updated_request):
         captured["messages"] = updated_request.messages
-        captured["system_message"] = updated_request.system_message
+        captured["system_prompt"] = updated_request.system_prompt
         return ModelResponse(result=[AIMessage(content="fake answer")])
 
     result = middleware.wrap_model_call(request, handler)
 
     scope = "tenant|user|thread"
     assert captured["messages"][0].content[0]["text"] == f"anon[{scope}](hello)"
-    assert captured["system_message"].content == f"anon[{scope}](system prompt)"
+    assert captured["system_prompt"] == f"anon[{scope}](system prompt)"
     assert result.result[0].content == f"deanon[{scope}](fake answer)"
     assert [session.session_id for session in processor.sessions] == [scope]
 
@@ -101,7 +104,11 @@ def test_model_response_deanonymization_can_be_disabled_by_context_policy():
     )
     request = ModelRequest(
         model=object(),
+        system_prompt=None,
         messages=[HumanMessage(content="hello")],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
         state={"messages": []},
         runtime=runtime,
     )
@@ -204,7 +211,11 @@ def test_guardrail_event_log_does_not_include_raw_transformed_text(tmp_path):
     )
     request = ModelRequest(
         model=object(),
+        system_prompt=None,
         messages=[HumanMessage(content="hello raw pii")],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
         state={"messages": []},
         runtime=runtime,
     )

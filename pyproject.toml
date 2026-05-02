@@ -72,6 +72,7 @@ dependencies = [
     "zakupki-crawler",
     "pytest>=8.4.2",
     "nltk>=3.9.4",
+    "llm-guard",
     "ru-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.8.0/ru_core_news_sm-3.8.0-py3-none-any.whl",
 ]
 
@@ -79,3 +80,4 @@ dependencies = [
 palimpsest = { git = "https://github.com/gbvolkov/PalimpsestLib.git" }
 rag-lib = { git = "https://github.com/gbvolkov/rag-lib.git" }
 zakupki-crawler = { git = "https://github.com/gbvolkov/purchase_scraper.git" }
+llm-guard = { path = "../forks/llm-guard", editable = true }

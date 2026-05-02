@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import Any, Dict, Iterable, List
+from uuid import uuid4
+from typing import Any, Callable, Dict, Iterable, List
 
 from langchain.agents.middleware import AgentMiddleware, ExtendedModelResponse, ModelResponse
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages.modifier import RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
 from .context import GuardrailContext, build_guardrail_context
-from .decisions import redact
+from .decisions import GuardrailDecision, redact
+from .injection import SECURITY_BLOCK_MESSAGE_RU, SECURITY_REVIEW_MESSAGE_RU
 from .logging import GuardrailEventLogger
 from .privacy import (
     PalimpsestSessionManager,
@@ -21,6 +25,7 @@ from .privacy import (
     thread_id_from_runtime,
     transform_content,
 )
+from .scanners import LLMGuardScannerRail, ScannerScanResult
 
 
 class PalimpsestSessionMiddleware(AgentMiddleware):
@@ -131,6 +136,415 @@ class PalimpsestSessionMiddleware(AgentMiddleware):
         return result
 
 
+_SCAN_TEXT_KEYS = ("text", "content", "input", "title", "caption", "markdown", "explanation")
+
+
+def _message_is_untrusted_input(message: BaseMessage) -> bool:
+    return isinstance(message, (HumanMessage, ToolMessage)) or getattr(message, "type", None) in {"human", "tool"}
+
+
+def _message_is_model_output(message: BaseMessage) -> bool:
+    return isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+
+
+def _decision_message(decision: GuardrailDecision) -> str:
+    return SECURITY_REVIEW_MESSAGE_RU if decision["action"] == "review" else SECURITY_BLOCK_MESSAGE_RU
+
+
+def _join_message_text(messages: Iterable[BaseMessage], *, system_prompt: str | None = None) -> str:
+    parts: list[str] = []
+    if system_prompt:
+        parts.append(system_prompt)
+    for message in messages:
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content:
+            parts.append(content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str) and item:
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    for key in _SCAN_TEXT_KEYS:
+                        value = item.get(key)
+                        if isinstance(value, str) and value:
+                            parts.append(value)
+    return "\n".join(parts)
+
+
+class SecurityScannerMiddleware(AgentMiddleware):
+    """LLM Guard scanner middleware for model requests and responses."""
+
+    def __init__(
+        self,
+        scanner_rail: LLMGuardScannerRail,
+        *,
+        agent_name: str = "unknown",
+        event_logger: GuardrailEventLogger | None = None,
+        event_log_path: str | None = None,
+        scan_system_prompt: bool = False,
+        scan_state_keys: Iterable[str] = (),
+        blocked_structured_response_factory: Callable[[GuardrailDecision], Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self._scanners = scanner_rail
+        self._agent_name = agent_name
+        self._events = event_logger or GuardrailEventLogger(event_log_path)
+        self._scan_system_prompt = scan_system_prompt
+        self._state_keys_to_scan = tuple(scan_state_keys)
+        self._blocked_structured_response_factory = blocked_structured_response_factory
+
+    def _context(self, runtime: Any, state: Dict[str, Any] | None = None) -> GuardrailContext:
+        return build_guardrail_context(
+            runtime=runtime,
+            state=state,
+            agent_name=self._agent_name,
+        )
+
+    def _log_scan_result(self, result: ScannerScanResult) -> None:
+        for decision in result.decisions:
+            self._events.log_decision(decision)
+
+    def before_agent(self, state, runtime) -> Dict[str, Any] | None:
+        if state_has_reset_message(state):
+            self._scanners.reset_context(self._context(runtime, state))
+        return None
+
+    async def abefore_agent(self, state, runtime) -> Dict[str, Any] | None:
+        return self.before_agent(state, runtime)
+
+    def _blocked_model_response(
+        self,
+        decision: GuardrailDecision,
+        *,
+        remove_message_ids: Iterable[str] = (),
+        replacement_messages: Iterable[BaseMessage] | None = None,
+    ) -> ModelResponse | ExtendedModelResponse:
+        structured_response = (
+            self._blocked_structured_response_factory(decision)
+            if self._blocked_structured_response_factory is not None
+            else None
+        )
+        block_message = AIMessage(
+            content=_decision_message(decision),
+            id=f"guardrail-block-{uuid4().hex}",
+        )
+        model_response = ModelResponse(
+            result=[block_message],
+            structured_response=structured_response,
+        )
+        if replacement_messages is not None:
+            return ExtendedModelResponse(
+                model_response=model_response,
+                command=Command(
+                    update={
+                        "messages": [
+                            RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                            *replacement_messages,
+                            block_message,
+                        ]
+                    }
+                ),
+            )
+        removal_updates = [RemoveMessage(id=message_id) for message_id in remove_message_ids]
+        if not removal_updates:
+            return model_response
+        return ExtendedModelResponse(
+            model_response=model_response,
+            command=Command(update={"messages": removal_updates}),
+        )
+
+    def _scan_content(
+        self,
+        content: Any,
+        context: GuardrailContext,
+        *,
+        boundary: str,
+        prompt: str = "",
+        output: bool = False,
+    ) -> tuple[Any, GuardrailDecision | None]:
+        if isinstance(content, str):
+            result = (
+                self._scanners.scan_output_text(prompt, content, context, boundary=boundary)
+                if output
+                else self._scanners.scan_input_text(content, context, boundary=boundary)
+            )
+            self._log_scan_result(result)
+            return result.text, result.blocked_decision
+
+        if isinstance(content, list):
+            updated: list[Any] = []
+            for item in content:
+                if isinstance(item, str):
+                    scanned, decision = self._scan_content(
+                        item,
+                        context,
+                        boundary=boundary,
+                        prompt=prompt,
+                        output=output,
+                    )
+                    if decision is not None:
+                        return content, decision
+                    updated.append(scanned)
+                    continue
+                if isinstance(item, dict):
+                    part = dict(item)
+                    for key in _SCAN_TEXT_KEYS:
+                        if isinstance(part.get(key), str):
+                            scanned, decision = self._scan_content(
+                                part[key],
+                                context,
+                                boundary=boundary,
+                                prompt=prompt,
+                                output=output,
+                            )
+                            if decision is not None:
+                                return content, decision
+                            part[key] = scanned
+                    updated.append(part)
+                    continue
+                updated.append(item)
+            return updated, None
+
+        return content, None
+
+    def _scan_messages(
+        self,
+        messages: Iterable[BaseMessage],
+        context: GuardrailContext,
+        *,
+        boundary: str,
+        prompt: str = "",
+        output: bool = False,
+    ) -> tuple[list[BaseMessage], GuardrailDecision | None, list[str], list[BaseMessage] | None]:
+        source_messages = list(messages)
+        updated_messages: list[BaseMessage] = []
+        for index, message in enumerate(source_messages):
+            should_scan = _message_is_model_output(message) if output else _message_is_untrusted_input(message)
+            if not should_scan:
+                updated_messages.append(message)
+                continue
+            scanned_content, decision = self._scan_content(
+                getattr(message, "content", None),
+                context,
+                boundary=boundary,
+                prompt=prompt,
+                output=output,
+            )
+            if decision is not None:
+                message_id = getattr(message, "id", None)
+                if isinstance(message_id, str) and message_id:
+                    return source_messages, decision, [message_id], None
+                return source_messages, decision, [], [*updated_messages, *source_messages[index + 1 :]]
+            updated = copy(message)
+            updated.content = scanned_content
+            updated_messages.append(updated)
+        return updated_messages, None, [], None
+
+    def _scan_state_keys(self, state: Dict[str, Any], context: GuardrailContext) -> tuple[Dict[str, Any], GuardrailDecision | None]:
+        if not self._state_keys_to_scan:
+            return state, None
+        updated_state = dict(state)
+        for key in self._state_keys_to_scan:
+            value = updated_state.get(key)
+            if not isinstance(value, str):
+                continue
+            result = self._scanners.scan_input_text(value, context, boundary=f"state.{key}")
+            self._log_scan_result(result)
+            if result.blocked_decision is not None:
+                return state, result.blocked_decision
+            updated_state[key] = result.text
+        return updated_state, None
+
+    def _scan_model_request(self, request, context: GuardrailContext):
+        messages, decision, remove_message_ids, replacement_messages = self._scan_messages(request.messages, context, boundary="model_request")
+        if decision is not None:
+            return None, decision, remove_message_ids, replacement_messages
+
+        state, decision = self._scan_state_keys(dict(request.state or {}), context)
+        if decision is not None:
+            return None, decision, [], None
+
+        system_prompt = getattr(request, "system_prompt", None)
+        if self._scan_system_prompt and isinstance(system_prompt, str):
+            result = self._scanners.scan_input_text(system_prompt, context, boundary="system_prompt")
+            self._log_scan_result(result)
+            if result.blocked_decision is not None:
+                return None, result.blocked_decision, [], None
+            system_prompt = result.text
+
+        return request.override(messages=messages, state=state, system_prompt=system_prompt), None, [], None
+
+    def _scan_model_result(self, result: Any, context: GuardrailContext, *, prompt: str) -> Any:
+        if isinstance(result, AIMessage):
+            messages, decision, _remove_message_ids, _replacement_messages = self._scan_messages([result], context, boundary="model_response", prompt=prompt, output=True)
+            if decision is not None:
+                return self._blocked_model_response(decision)
+            return messages[0]
+        if isinstance(result, ModelResponse):
+            messages, decision, _remove_message_ids, _replacement_messages = self._scan_messages(result.result, context, boundary="model_response", prompt=prompt, output=True)
+            if decision is not None:
+                return self._blocked_model_response(decision)
+            return ModelResponse(result=messages, structured_response=result.structured_response)
+        return result
+
+    def wrap_model_call(self, request, handler):
+        context = self._context(request.runtime, request.state)
+        updated_request, decision, remove_message_ids, replacement_messages = self._scan_model_request(request, context)
+        if decision is not None:
+            return self._blocked_model_response(
+                decision,
+                remove_message_ids=remove_message_ids,
+                replacement_messages=replacement_messages,
+            )
+        prompt = _join_message_text(updated_request.messages, system_prompt=getattr(updated_request, "system_prompt", None))
+        return self._scan_model_result(handler(updated_request), context, prompt=prompt)
+
+    async def awrap_model_call(self, request, handler):
+        context = self._context(request.runtime, request.state)
+        updated_request, decision, remove_message_ids, replacement_messages = self._scan_model_request(request, context)
+        if decision is not None:
+            return self._blocked_model_response(
+                decision,
+                remove_message_ids=remove_message_ids,
+                replacement_messages=replacement_messages,
+            )
+        prompt = _join_message_text(updated_request.messages, system_prompt=getattr(updated_request, "system_prompt", None))
+        return self._scan_model_result(await handler(updated_request), context, prompt=prompt)
+
+
+class ToolContentScannerMiddleware(AgentMiddleware):
+    """Scans model-generated tool arguments before tool execution."""
+
+    def __init__(
+        self,
+        scanner_rail: LLMGuardScannerRail,
+        *,
+        agent_name: str = "unknown",
+        event_logger: GuardrailEventLogger | None = None,
+        event_log_path: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._scanners = scanner_rail
+        self._agent_name = agent_name
+        self._events = event_logger or GuardrailEventLogger(event_log_path)
+
+    def _context(self, request: ToolCallRequest) -> GuardrailContext:
+        tool_name = str(request.tool_call.get("name") or "")
+        return build_guardrail_context(
+            runtime=request.runtime,
+            state=request.state,
+            agent_name=self._agent_name,
+            tool_name=tool_name,
+        )
+
+    def _log_scan_result(self, result: ScannerScanResult) -> None:
+        for decision in result.decisions:
+            self._events.log_decision(decision)
+
+    def _scan_tool_value(
+        self,
+        value: Any,
+        context: GuardrailContext,
+        *,
+        prompt: str = "",
+    ) -> tuple[Any, GuardrailDecision | None]:
+        if isinstance(value, str):
+            result = self._scanners.scan_output_text(prompt, value, context, boundary="tool_arguments")
+            self._log_scan_result(result)
+            return result.text, result.blocked_decision
+        if isinstance(value, dict):
+            updated = {}
+            for key, item in value.items():
+                scanned, decision = self._scan_tool_value(item, context, prompt=prompt)
+                if decision is not None:
+                    return value, decision
+                updated[key] = scanned
+            return updated, None
+        if isinstance(value, list):
+            updated = []
+            for item in value:
+                scanned, decision = self._scan_tool_value(item, context, prompt=prompt)
+                if decision is not None:
+                    return value, decision
+                updated.append(scanned)
+            return updated, None
+        return value, None
+
+    def _tool_prompt(self, request: ToolCallRequest) -> str:
+        if not isinstance(request.state, dict):
+            return ""
+        return _join_message_text(request.state.get("messages") or [])
+
+    def _tool_call_message_ids(self, request: ToolCallRequest) -> list[str]:
+        tool_call_id = request.tool_call.get("id")
+        if not tool_call_id or not isinstance(request.state, dict):
+            return []
+        message_ids: list[str] = []
+        for message in request.state.get("messages") or []:
+            if not _message_is_model_output(message):
+                continue
+            for tool_call in getattr(message, "tool_calls", None) or []:
+                if isinstance(tool_call, dict) and tool_call.get("id") == tool_call_id:
+                    message_id = getattr(message, "id", None)
+                    if isinstance(message_id, str) and message_id:
+                        message_ids.append(message_id)
+                    break
+        return message_ids
+
+    def _blocked_tool_result(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage | Command:
+        tool_call_id = request.tool_call.get("id")
+        tool_message_id = f"guardrail-blocked-tool-{tool_call_id}" if isinstance(tool_call_id, str) and tool_call_id else None
+        tool_message = ToolMessage(
+            content=_decision_message(decision),
+            tool_call_id=tool_call_id,
+            id=tool_message_id,
+        )
+        removal_updates = [RemoveMessage(id=message_id) for message_id in self._tool_call_message_ids(request)]
+        if not removal_updates:
+            return tool_message
+        tool_updates: list[BaseMessage] = [tool_message]
+        if tool_message_id is not None:
+            tool_updates.append(RemoveMessage(id=tool_message_id))
+        return Command(
+            update={
+                "messages": [
+                    *removal_updates,
+                    *tool_updates,
+                    AIMessage(
+                        content=_decision_message(decision),
+                        id=f"guardrail-block-{uuid4().hex}",
+                    ),
+                ]
+            }
+        )
+
+    def wrap_tool_call(self, request: ToolCallRequest, handler):
+        context = self._context(request)
+        tool_call = dict(request.tool_call)
+        scanned_args, decision = self._scan_tool_value(
+            tool_call.get("args", {}),
+            context,
+            prompt=self._tool_prompt(request),
+        )
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        tool_call["args"] = scanned_args
+        return handler(request.override(tool_call=tool_call))
+
+    async def awrap_tool_call(self, request: ToolCallRequest, handler):
+        context = self._context(request)
+        tool_call = dict(request.tool_call)
+        scanned_args, decision = self._scan_tool_value(
+            tool_call.get("args", {}),
+            context,
+            prompt=self._tool_prompt(request),
+        )
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        tool_call["args"] = scanned_args
+        return await handler(request.override(tool_call=tool_call))
+
+
 class PrivacyModelRequestMiddleware(AgentMiddleware):
     """Context-aware privacy middleware for guarded agents."""
 
@@ -193,15 +607,12 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         self._log(context, boundary="model_request", reason="Model request text anonymized.", categories=["privacy", "pii"])
         return transformed
 
-    def _anonymize_system_message(self, message: SystemMessage | None, context: GuardrailContext) -> SystemMessage | None:
-        if message is None:
+    def _anonymize_system_prompt(self, prompt: str | None, context: GuardrailContext) -> str | None:
+        if prompt is None:
             return None
-        updated = clone_message_with_transform(
-            message,
-            lambda text: self._privacy.anonymize_text(text, context, boundary="system_message"),
-        )
-        self._log(context, boundary="system_message", reason="System message text anonymized.", categories=["privacy", "pii"])
-        return updated if isinstance(updated, SystemMessage) else SystemMessage(content=updated.content)
+        updated = self._privacy.anonymize_text(prompt, context, boundary="system_prompt")
+        self._log(context, boundary="system_prompt", reason="System prompt text anonymized.", categories=["privacy", "pii"])
+        return updated
 
     def _deanonymize_ai_message(self, message: BaseMessage, context: GuardrailContext) -> BaseMessage:
         if not isinstance(message, AIMessage):
@@ -239,7 +650,7 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
     def _override_model_request(self, request, context: GuardrailContext):
         return request.override(
             messages=self._anonymize_messages(request.messages, context),
-            system_message=self._anonymize_system_message(request.system_message, context),
+            system_prompt=self._anonymize_system_prompt(getattr(request, "system_prompt", None), context),
         )
 
     def wrap_model_call(self, request, handler):
@@ -253,6 +664,8 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         return self._deanonymize_model_result(await handler(updated_request), context)
 
     def _anonymize_tool_messages(self, messages: Any, context: GuardrailContext) -> Any:
+        if isinstance(messages, RemoveMessage):
+            return messages
         if isinstance(messages, BaseMessage):
             return clone_message_with_transform(
                 messages,
@@ -320,4 +733,6 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
 __all__ = [
     "PalimpsestSessionMiddleware",
     "PrivacyModelRequestMiddleware",
+    "SecurityScannerMiddleware",
+    "ToolContentScannerMiddleware",
 ]

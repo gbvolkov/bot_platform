@@ -1,4 +1,4 @@
-﻿__pycache__
+__pycache__
 .venv
 data
 keys
@@ -7,6 +7,8 @@ models
 gv.env
 .env
 .*
+!.start.ps1
+!.stop.ps1
 .langgraph_api
 auth.json
 auth_tickets.json
@@ -17,10 +19,10 @@ nohup.out
 docs/*
 !docs/platform/
 !docs/platform/**
+!docs/guardrails/
+!docs/guardrails/**
 uv.lock
 *.db-shm
 *.db-wal
 .tmp_sysadmin_mcp_kit/
 pytest-cache*
-
-

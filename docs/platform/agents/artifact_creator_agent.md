@@ -38,6 +38,7 @@ The `run` node uses a LangChain agent with a commit tool. A second confirmation 
 - optional fixed prompt passed through `initialize_agent(..., system_prompt="...")`
 - `agents/store_artifacts.py`
 - `platform_guardrails.logging.RedactingJSONFileTracer`
+- Phase 2 scanner enforcement for guarded runs; see [Scanner Enforcement Vulnerability Catalog](../../guardrails/scanner_enforcement_vulnerabilities.md)
 - optional Langfuse callbacks when configured; this is allowed regardless of `guardrails_enabled` because the configured Langfuse endpoint is treated as trusted platform observability
 
 ## Outputs and persistence
