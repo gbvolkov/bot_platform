@@ -29,11 +29,12 @@ Receive:
 5. For GAZ-only validation, explicitly pass `manufacturer_brand_lat=GAZ`.
 6. For competitor validation, use `manufacturer_brand_lat` only when the manufacturer is one of the known BI manufacturers: `AVIOR`, `DONGFENG`, `FOTON`, `GAZ`, `ISUZU`, `JAC`, `KAMAZ`, `LADA`, `LIAZ`, `MAZ`, `PAZ`, `PROMTEKH`, `SAZ`, `SIMAZ`, `SOLLERS`, `UAZ`, `VOLGABUS`, `YUTONG`.
 7. Ask for gaps explicitly: fields present and fields missing.
-8. If BI returns no candidates or no records for marketing candidates, do not stop there. Make one corrected BI follow-up request using more formal lookup terms: concrete family names, model name fragments, manufacturer scope through `manufacturer_brand_lat`, body/platform type, payload or mass range, drive, fuel, price range, or other structured filters already known from the user or marketing evidence.
-9. When reformulating after an empty BI result, explicitly ask BI to check whether the issue is naming, manufacturer restriction, body-type synonym, missing field coverage, or true absence of matching records.
-10. If the corrected BI follow-up still lacks a required fact, decide whether the missing fact is public/current and can be checked externally. If yes, use `web_search_agent` only for that missing fact or source links.
-11. Do not use web to override a BI value. Use web only to fill BI gaps, provide public links, or check current public facts.
-12. Do not ask BI to choose a sales winner without formal criteria.
+8. Do not infer BI absence from prior BI output that did not request the exact field. Before saying "нет в BI", "не возвращается", or "BI does not contain this", make a focused BI request for the active model(s) and requested attribute(s), unless the exact field is already present in the visible context.
+9. If BI returns no candidates or no records for marketing candidates, do not stop there. Make one corrected BI follow-up request using more formal lookup terms: concrete family names, model name fragments, manufacturer scope through `manufacturer_brand_lat`, body/platform type, payload or mass range, drive, fuel, price range, or other structured filters already known from the user or marketing evidence.
+10. When reformulating after an empty BI result, explicitly ask BI to check whether the issue is naming, manufacturer restriction, body-type synonym, missing field coverage, or true absence of matching records.
+11. If the corrected BI follow-up still lacks a required fact, decide whether the missing fact is public/current and can be checked externally. If yes, use `web_search_agent` only for that missing fact or source links.
+12. Do not use web to override a BI value. Use web only to fill BI gaps, provide public links, or check current public facts.
+13. Do not ask BI to choose a sales winner without formal criteria.
 
 ## Routing shortcut
 
@@ -47,6 +48,7 @@ Check:
 - whether records are in scope;
 - whether manufacturer scope was passed through `manufacturer_brand_lat` when relevant;
 - whether missing fields affect the answer;
+- whether a previous BI result actually returned the newly requested exact attribute, rather than only adjacent fields for the same model;
 - whether a marketing candidate was missed due to naming/body synonym;
 - whether a follow-up BI request is needed;
 - whether an empty BI result has been retried with concrete families, body/platform type, and formal filters before treating the fact as unavailable;

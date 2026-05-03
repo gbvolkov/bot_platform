@@ -136,13 +136,20 @@ def test_build_skills_backend_loads_mycroft_orchestrator_skills():
     skills = _list_skills(backend, "/skills/mycroft")
 
     assert {skill["name"] for skill in skills} == {
+        "answer-service-or-operation-question",
         "answer-synthesis",
         "artifact-export",
-        "consultative-sales-dialogue",
-        "dealer-service-lookup",
+        "build-tco-case",
+        "build-vehicle-recommendation",
+        "capture-customer-requirements",
+        "compare-customer-options",
         "email-followup",
+        "handle-competitor-comparison",
+        "prepare-programs-and-financing",
+        "prepare-sales-argumentation",
+        "shortlist-gaz-solutions",
         "source-authority-and-routing",
-        "vin-and-recall",
+        "validate-vehicle-facts",
     }
 
 
@@ -153,21 +160,18 @@ def test_mycroft_routing_skill_defines_source_capability_boundaries():
         .lower()
     )
 
-    assert "broad model and family overviews" in skill_text
-    assert "model search/filtering by concrete operational parameters" in skill_text
-    assert "do not ask bi to design questionnaires" in skill_text
-    assert "field lists" in skill_text
-    assert "calculation methodology" in skill_text
-    assert "preserve the user's brand/scope constraint" in skill_text
-    assert "gaz models only" in skill_text
+    assert "broad fit or initial candidate discovery" in skill_text
+    assert "formal filter parameters suitable for bi" in skill_text
+    assert "do not ask bi to" in skill_text
+    assert "create questionnaires" in skill_text
+    assert "plan the sales dialogue" in skill_text
+    assert "preserve the user's scope" in skill_text
     assert "gaz-only; exclude non-gaz and competitor models" in skill_text
-    assert "do not relabel out-of-scope models" in skill_text
-    assert "do not stop at \"i can search again\"" in skill_text
-    assert "a follow-up `gaz_pricing_bi_int` request for those candidates is required" in skill_text
-    assert "make an additional `gaz_pricing_bi_int` request" in skill_text
-    assert "do not seed `gaz_pricing_bi_int` with only mycroft's guessed models" in skill_text
-    assert "do not include example models" in skill_text
-    assert "never use the `general-purpose` subagent" in skill_text
+    assert "if one source returns a gap, use the next appropriate source" in skill_text
+    assert "exact vehicle dimensions and geometry" in skill_text
+    assert "a concrete bi target may be composed from" in skill_text
+    assert "that exact attribute is not already present in the visible context" in skill_text
+    assert "do not infer bi absence from a previous bi answer" in skill_text
 
 
 def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
@@ -177,8 +181,21 @@ def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
         .lower()
     )
 
-    assert "exact latest mix first" in skill_text
-    assert "check the conversation history before agreeing" in skill_text
-    assert "generic checklist" in skill_text
-    assert "candidate lacks bi confirmation" in skill_text
-    assert "do not present a fleet ratio that repeats the same model/modification" in skill_text
+    assert "preserve the latest active recommendation" in skill_text
+    assert "do not revert to an older preliminary mix" in skill_text
+    assert "a candidate from marketing is missing bi confirmation" in skill_text
+    assert "a fleet split repeats the same model/modification" in skill_text
+    assert "for the exact requested attributes" in skill_text
+    assert "previous bi output may be reused only for the exact fields it returned" in skill_text
+
+
+def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
+    skill_text = (
+        Path("skills/mycroft/validate-vehicle-facts/SKILL.md")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert "do not infer bi absence from prior bi output" in skill_text
+    assert "make a focused bi request for the active model(s) and requested attribute(s)" in skill_text
+    assert "newly requested exact attribute" in skill_text

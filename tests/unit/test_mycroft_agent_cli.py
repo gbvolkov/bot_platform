@@ -401,6 +401,11 @@ def test_default_cli_config_uses_generic_config_file():
     assert "reconcile them" in config.system_prompt
     assert "make an additional `gaz_pricing_bi_int` request" in config.system_prompt
     assert "structured search/filtering by concrete operational parameters" in config.system_prompt
+    assert "BI context sufficiency" in config.system_prompt
+    assert "Absence of a requested exact fact from the current conversation context is not evidence" in config.system_prompt
+    assert "A previous BI response may be reused only for the exact fields it explicitly returned" in config.system_prompt
+    assert "For short follow-ups such as" in config.system_prompt
+    assert "dimensions, vehicle geometry, body/platform fields, cargo/platform/loading fields" in config.system_prompt
     assert "Do not delegate requirement collection" in config.system_prompt
     assert "Preserve the user's requested brand and portfolio scope" in config.system_prompt
     assert "GAZ-only; exclude non-GAZ and competitor models" in config.system_prompt

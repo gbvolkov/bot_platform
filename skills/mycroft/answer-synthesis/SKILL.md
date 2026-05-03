@@ -28,7 +28,7 @@ Receive:
 3. Separate source categories: BI-backed facts, internal marketing-material framing, public web context, assumptions, and unconfirmed gaps.
 4. Resolve conflicts by source authority. BI prevails for exact BI-owned facts.
 5. Filter outputs by user scope. Do not present non-GAZ models as GAZ recommendations.
-6. If a final recommendation needs exact price, TTX, configuration, service, or warranty facts and BI has not checked the concrete candidates, call BI before finalizing.
+6. If a final recommendation or follow-up answer needs exact price, TTX, dimensions, vehicle geometry, body/platform, cargo/loading, configuration, option, service, warranty, or ownership facts and BI has not checked the concrete candidates for the exact requested attributes, call BI before finalizing.
 
 ## What to analyze
 
@@ -37,7 +37,8 @@ Check:
 - whether a candidate from marketing is missing BI confirmation where BI is required;
 - whether BI output is too narrow because of synonym or body-type mismatch;
 - whether web context is fresh and linked;
-- whether a fleet split repeats the same model/modification without real difference.
+- whether a fleet split repeats the same model/modification without real difference;
+- whether the answer would say that an exact BI-owned fact is unavailable even though BI has not been called for that exact fact in the current turn and the exact fact is not already present in visible context.
 
 ## Materials and tools
 
@@ -46,6 +47,8 @@ Use additional `task` calls only for material gaps:
 - `gaz_pricing_bi_int` for missing exact facts;
 - `marketing_analyst` for missing sales framing;
 - `web_search_agent` for missing current public context.
+
+Previous BI output may be reused only for the exact fields it returned. If the user asks a short follow-up for a new exact BI-owned attribute about the active model, comparison, candidate set, or fleet mix, call `gaz_pricing_bi_int` before claiming the fact is missing.
 
 ## Output
 
