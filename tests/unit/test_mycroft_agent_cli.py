@@ -403,14 +403,26 @@ def test_default_cli_config_uses_generic_config_file():
     assert "structured search/filtering by concrete operational parameters" in config.system_prompt
     assert "BI context sufficiency" in config.system_prompt
     assert "Absence of a requested exact fact from the current conversation context is not evidence" in config.system_prompt
+    assert "complete non-duplicate model field profile" in config.system_prompt
+    assert 'Do not phrase the request as a curated "important fields" subset' in config.system_prompt
+    assert "BI must still return every other populated non-duplicate user-facing field" in config.system_prompt
+    assert "exclude duplicate mirror fields such as `_nocase`" in config.system_prompt
     assert "A previous BI response may be reused only for the exact fields it explicitly returned" in config.system_prompt
-    assert "For short follow-ups such as" in config.system_prompt
+    assert "For short or multi-attribute follow-ups such as" in config.system_prompt
+    assert "габариты, свесы?" in config.system_prompt
+    assert "immediately make a targeted follow-up `gaz_pricing_bi_int` request" in config.system_prompt
+    assert "before asking the user to clarify units" in config.system_prompt
     assert "dimensions, vehicle geometry, body/platform fields, cargo/platform/loading fields" in config.system_prompt
+    assert "For TCO or ownership-cost follow-ups" in config.system_prompt
+    assert "call `gaz_pricing_bi_int` first for available BI ownership-cost" in config.system_prompt
+    assert "Ask calculation-assumption clarifications only after BI has returned" in config.system_prompt
+    assert "For ownership economics, split the work" in config.system_prompt
     assert "Do not delegate requirement collection" in config.system_prompt
     assert "Preserve the user's requested brand and portfolio scope" in config.system_prompt
     assert "GAZ-only; exclude non-GAZ and competitor models" in config.system_prompt
     assert "do not stop by offering to search again" in config.system_prompt
     assert "make a follow-up `gaz_pricing_bi_int` request for those candidates" in config.system_prompt
+    assert "The BI request must not be phrased as a curated list of important fields" in config.system_prompt
     assert "latest recommended mix first" in config.system_prompt
     assert "Do not blindly accept an incorrect premise" in config.system_prompt
     assert "Do not write a procurement mix like" in config.system_prompt

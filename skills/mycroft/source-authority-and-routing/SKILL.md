@@ -53,6 +53,14 @@ For follow-up turns, a concrete BI target may be composed from:
 
 If the user asks for an exact BI-owned attribute and that exact attribute is not already present in the visible context for the active target models, route to `gaz_pricing_bi_int`. Do not infer BI absence from a previous BI answer that did not request or return that exact field.
 
+When routing a concrete model, modification, or candidate set to BI, ask for the Complete Model Field Profile service and a complete non-duplicate model field profile for each concrete model, not just the attribute named in the current turn. Complete means every user-facing original BI field available for each matched row, including fields outside the current topic; it is not a curated "important fields" subset. If the BI prompt lists examples such as dimensions, wheelbase, maneuverability, payload, platform, service, warranty, options, ownership cost, or price, explicitly say those examples are a minimum checklist and BI must still return every other populated non-duplicate user-facing field.
+
+The BI request must say to exclude `_nocase` mirror fields and only duplicate or non-user-facing fields: normalized duplicate copies, raw/import/source technical columns, and duplicate aliases that repeat another returned value. Use this full profile for later short follow-ups; answer the user with only the fields they asked for unless they requested the full list.
+
+For short or multi-attribute follow-ups such as "свесы, габариты?", "а гарантия?", "а кондиционер?", or "расходы на ТО?", inherit the latest active model, comparison, candidate set, or fleet mix and route to BI for the complete non-duplicate profile when that profile is not already visible.
+
+If a previous BI result exists but the current answer needs a BI-owned field that was not returned, route to BI again for Specific Missing Field Recovery before answering. Pass the active model(s), the missing user-facing field(s), and likely aliases or schema names when known, for example `front_overhang_mm`, `rear_overhang_mm`, "передний свес", and "задний свес". Do this before asking the user to clarify units and before saying the field is absent.
+
 When asking BI to restrict by manufacturer, use the structured field `manufacturer_brand_lat`.
 The value must be Latin uppercase, for example `manufacturer_brand_lat=GAZ`.
 For GAZ-only requests, explicitly pass `manufacturer_brand_lat=GAZ`.

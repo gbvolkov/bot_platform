@@ -172,6 +172,12 @@ def test_mycroft_routing_skill_defines_source_capability_boundaries():
     assert "a concrete bi target may be composed from" in skill_text
     assert "that exact attribute is not already present in the visible context" in skill_text
     assert "do not infer bi absence from a previous bi answer" in skill_text
+    assert "complete non-duplicate model field profile" in skill_text
+    assert "exclude `_nocase` mirror fields" in skill_text
+    assert "свесы, габариты?" in skill_text
+    assert 'not a curated "important fields" subset' in skill_text
+    assert "specific missing field recovery" in skill_text
+    assert "front_overhang_mm" in skill_text
 
 
 def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
@@ -187,6 +193,10 @@ def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
     assert "a fleet split repeats the same model/modification" in skill_text
     assert "for the exact requested attributes" in skill_text
     assert "previous bi output may be reused only for the exact fields it returned" in skill_text
+    assert "complete non-duplicate model profile" in skill_text
+    assert "only a narrow previous lookup" in skill_text
+    assert "specific missing field recovery" in skill_text
+    assert "that specific field and aliases" in skill_text
 
 
 def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
@@ -197,5 +207,59 @@ def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
     )
 
     assert "do not infer bi absence from prior bi output" in skill_text
-    assert "make a focused bi request for the active model(s) and requested attribute(s)" in skill_text
-    assert "newly requested exact attribute" in skill_text
+    assert "request a complete non-duplicate model field profile" in skill_text
+    assert "even when the user asks for one field, two fields, or shorthand" in skill_text
+    assert "exclude duplicate mirror fields" in skill_text
+    assert 'not a curated "important fields" subset' in skill_text
+    assert "minimum checklist" in skill_text
+    assert "targeted bi follow-up" in skill_text
+    assert "front_overhang_mm" in skill_text
+    assert "before asking the user to clarify units" in skill_text
+    assert "complete model field profile" in skill_text
+    assert "specific missing field recovery" in skill_text
+
+
+def test_mycroft_recommendation_skill_requests_complete_bi_profiles_and_recovery():
+    skill_text = (
+        Path("skills/mycroft/build-vehicle-recommendation/SKILL.md")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert "request a complete non-duplicate model field profile for each candidate" in skill_text
+    assert "not a curated list of important fields" in skill_text
+    assert "every user-facing original bi field" in skill_text
+    assert "minimum checklist" in skill_text
+    assert "specific missing field recovery" in skill_text
+    assert "targeted bi follow-up" in skill_text
+
+
+def test_mycroft_comparison_skill_requests_complete_bi_profiles_and_recovery():
+    skill_text = (
+        Path("skills/mycroft/compare-customer-options/SKILL.md")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert "request a complete non-duplicate model field profile for each option" in skill_text
+    assert 'not a curated "important fields" subset' in skill_text
+    assert "every user-facing original bi field" in skill_text
+    assert "minimum checklist" in skill_text
+    assert "specific missing field recovery" in skill_text
+    assert "targeted bi follow-up" in skill_text
+
+
+def test_mycroft_bi_service_catalog_defines_complete_model_profile():
+    catalog_text = (
+        Path("skills/mycroft/references/subagents-service-catalog.md")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert "complete model field profile" in catalog_text
+    assert "returns every user-facing original bi field" in catalog_text
+    assert 'not a curated "important fields" subset' in catalog_text
+    assert "`_nocase` mirror fields" in catalog_text
+    assert "raw/import/source technical columns" in catalog_text
+    assert "specific missing field recovery" in catalog_text
+    assert "does not ask the user to clarify units before checking bi" in catalog_text
