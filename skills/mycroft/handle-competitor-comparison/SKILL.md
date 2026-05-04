@@ -22,9 +22,10 @@ Receive:
 ## What to do
 
 1. Use `marketing_analyst` for internal GAZ positioning against the competitor or competitor class.
-2. Use `gaz_pricing_bi_int` when concrete competitor records or GAZ records must be compared by structured facts.
+2. Use `gaz_pricing_bi_int` analytical / comparison mode when concrete competitor records or GAZ records must be compared by structured facts.
 3. Use `web_search_agent` for current public competitor facts and links.
-4. Keep internal, BI, and web conclusions separate.
+4. Do not ask BI for complete DB model profiles for competitor comparison unless the user asks for full concrete details of one model.
+5. Keep internal, BI, and web conclusions separate.
 
 ## What to analyze
 
@@ -32,6 +33,7 @@ Check:
 - whether the competitor is explicitly in scope;
 - whether competitor facts are current enough;
 - whether BI has competitor records;
+- whether selected comparison fields are enough and complete profile mode is unnecessary;
 - whether marketing arguments are supported by materials.
 
 ## Materials and tools

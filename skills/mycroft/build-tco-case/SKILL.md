@@ -23,17 +23,23 @@ Receive:
 
 ## What to do
 
-1. Use `marketing_analyst` for internal TCO, fuel, service, and operations argumentation.
-2. Use `gaz_pricing_bi_int` for available exact price, warranty, service interval, service-cost, and ownership-cost fields.
-3. Use web only for current external assumptions if the user asks for them.
-4. Do not calculate exact TCO from scratch when source inputs are missing. State assumptions and missing data.
+1. If the user asks about TCO, cost per km, ownership cost, "стоимость владения", "стоимость владения в BI", "руб/км", or a similar ownership-cost fact and the current turn or conversation history contains concrete active models, families, candidates, comparison rows, or fleet mix, call `gaz_pricing_bi_int` first in analytical / selected-field mode.
+2. In that BI request, include the active target model names and ask for available ownership-cost/TCO/cost-per-km fields, price, service interval, service-cost, warranty, and the calculation conditions stored in BI such as period, mileage, fuel basis, and assumptions. Ask BI to return the value or `NA` for each requested BI field.
+3. Do not replace this BI ownership-cost lookup with a generic TCO template, marketing argument, or request for customer assumptions. Use a template or assumptions only after BI has been checked for the active targets and the missing BI fields are known.
+4. Use `marketing_analyst` for internal TCO, fuel, service, and operations argumentation after exact BI-owned ownership/service facts have been checked, or when there is no concrete BI target yet.
+5. Use web only for current external assumptions if the user asks for them, or after BI has no exact field and the user explicitly accepts external estimation.
+6. Do not request complete DB model profiles for TCO analytics unless the user also asks for a full concrete model card.
+7. Do not calculate exact TCO from scratch when source inputs are missing. State assumptions and missing data.
 
 ## What to analyze
 
 Check:
 - which cost drivers are confirmed;
 - which are assumptions;
+- whether active concrete models, candidates, comparison rows, or a fleet mix already define the BI targets;
 - whether BI has ownership-cost fields;
+- whether BI returned exact ownership-cost/TCO/cost-per-km fields or `NA` for each active target before Mycroft produced a calculated template;
+- whether the BI request is analytical / selected-field mode rather than complete profile mode;
 - whether the requested calculation needs external current rates.
 
 ## Materials and tools

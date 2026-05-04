@@ -24,8 +24,9 @@ Receive:
 1. Do not choose GAZ candidates from memory.
 2. Ask `marketing_analyst` for internal-material candidate directions.
 3. Pass the customer task neutrally. Do not seed example models unless the user named them.
-4. If the user provided formal filter parameters, optionally ask `gaz_pricing_bi_int` for formal GAZ catalog filtering.
+4. If the user provided formal filter parameters, optionally ask `gaz_pricing_bi_int` in analytical / selected-field mode for formal GAZ catalog filtering.
 5. Keep the shortlist preliminary until BI validates exact facts.
+6. Do not request complete DB model profiles during initial shortlisting. Save complete profile requests for concrete model-detail turns.
 
 ## What to analyze
 
@@ -33,7 +34,8 @@ Check:
 - whether candidates are in GAZ scope;
 - whether marketing output includes internal evidence;
 - which candidate facts require BI validation;
-- whether BI filtering is needed now or later.
+- whether BI filtering is needed now or later;
+- whether the user has shifted from shortlisting to concrete model-detail retrieval.
 
 ## Materials and tools
 

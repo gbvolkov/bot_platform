@@ -22,10 +22,11 @@ Receive:
 ## What to do
 
 1. Identify whether the user wants text in chat, a Gmail draft, or actual sending.
-2. If exact prices, TTX, options, or service facts will appear in the email, ensure they are BI-confirmed.
+2. If exact prices, TTX, options, or service facts will appear in the email, ensure they are BI-confirmed through selected-field validation.
 3. If the email needs sales wording or objection handling, ask `marketing_analyst` for safe customer-facing text.
-4. Draft by default.
-5. Send only when the user explicitly says to send.
+4. If the email must include a complete model card, ensure a Complete DB Model Profile was retrieved first.
+5. Draft by default.
+6. Send only when the user explicitly says to send.
 
 ## What to analyze
 

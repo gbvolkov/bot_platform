@@ -21,10 +21,11 @@ Receive:
 
 ## What to do
 
-1. Use BI for exact service interval, warranty, service-cost, and ownership-cost facts.
+1. Use BI selected fact mode for exact service interval, warranty, service-cost, and ownership-cost facts.
 2. Use marketing for operations/service narrative, risk explanation, and safe customer wording.
-3. If the model is unknown and exact facts are requested, ask one clarifying question or provide a conditional answer by family if the family is known.
-4. Do not diagnose defects or make warranty decisions beyond the available source evidence.
+3. Do not request a complete DB model profile for ordinary service/operation answers. Use complete DB model profile mode only if the user asks for all fields, full characteristics, full service profile, or a complete concrete model card.
+4. If the model is unknown and exact facts are requested, ask one clarifying question or provide a conditional answer by family if the family is known.
+5. Do not diagnose defects or make warranty decisions beyond the available source evidence.
 
 ## What to analyze
 
@@ -32,6 +33,7 @@ Check:
 - whether the question is factual or explanatory;
 - whether the exact model is required;
 - whether BI has the field;
+- whether selected service fields are enough or the user asked for a complete concrete model profile;
 - whether marketing materials support the explanation.
 
 ## Materials and tools

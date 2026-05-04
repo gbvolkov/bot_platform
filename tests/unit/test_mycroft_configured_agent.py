@@ -172,12 +172,38 @@ def test_mycroft_routing_skill_defines_source_capability_boundaries():
     assert "a concrete bi target may be composed from" in skill_text
     assert "that exact attribute is not already present in the visible context" in skill_text
     assert "do not infer bi absence from a previous bi answer" in skill_text
-    assert "complete non-duplicate model field profile" in skill_text
-    assert "exclude `_nocase` mirror fields" in skill_text
+    assert '"стоимость владения"' in skill_text
+    assert '"руб/км"' in skill_text
+    assert "bi-owned ownership-cost attributes" in skill_text
+    assert "before `marketing_analyst`, web, a calculated template, or a request for assumptions" in skill_text
+    assert "bi request modes" in skill_text
+    assert "analytical / comparison mode" in skill_text
+    assert "bi does not return a complete model profile in this mode" in skill_text
+    assert "do not require bi to return all db fields" in skill_text
+    assert "concrete model detail mode" in skill_text
+    assert "complete db model profile" in skill_text
+    assert "null/empty values as `na`" in skill_text
+    assert "mycroft forms the complete model profile" in skill_text
     assert "свесы, габариты?" in skill_text
-    assert 'not a curated "important fields" subset' in skill_text
     assert "specific missing field recovery" in skill_text
     assert "front_overhang_mm" in skill_text
+
+
+def test_mycroft_tco_skill_requires_bi_lookup_before_template_for_active_models():
+    skill_text = (
+        Path("skills/mycroft/build-tco-case/SKILL.md")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert '"стоимость владения"' in skill_text
+    assert '"руб/км"' in skill_text
+    assert "call `gaz_pricing_bi_int` first in analytical / selected-field mode" in skill_text
+    assert "active target model names" in skill_text
+    assert "ownership-cost/tco/cost-per-km fields" in skill_text
+    assert "return the value or `na` for each requested bi field" in skill_text
+    assert "do not replace this bi ownership-cost lookup with a generic tco template" in skill_text
+    assert "after bi has been checked for the active targets" in skill_text
 
 
 def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
@@ -192,11 +218,10 @@ def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
     assert "a candidate from marketing is missing bi confirmation" in skill_text
     assert "a fleet split repeats the same model/modification" in skill_text
     assert "for the exact requested attributes" in skill_text
-    assert "previous bi output may be reused only for the exact fields it returned" in skill_text
-    assert "complete non-duplicate model profile" in skill_text
-    assert "only a narrow previous lookup" in skill_text
-    assert "specific missing field recovery" in skill_text
-    assert "that specific field and aliases" in skill_text
+    assert "bi analytical/comparison output as sufficient only for the fields it returned" in skill_text
+    assert "complete db model profile mode" in skill_text
+    assert "including null/empty values as `na`" in skill_text
+    assert "choose the bi follow-up mode by intent" in skill_text
 
 
 def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
@@ -207,59 +232,80 @@ def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
     )
 
     assert "do not infer bi absence from prior bi output" in skill_text
-    assert "request a complete non-duplicate model field profile" in skill_text
-    assert "even when the user asks for one field, two fields, or shorthand" in skill_text
-    assert "exclude duplicate mirror fields" in skill_text
-    assert 'not a curated "important fields" subset' in skill_text
-    assert "minimum checklist" in skill_text
-    assert "targeted bi follow-up" in skill_text
+    assert "selected fact mode" in skill_text
+    assert "not a complete model profile request" in skill_text
+    assert "bi does not need to return all db fields" in skill_text
+    assert "complete db model profile mode" in skill_text
+    assert "complete set of db fields" in skill_text
+    assert "null/empty value as `na`" in skill_text
+    assert "mycroft will form a complete model profile" in skill_text
     assert "front_overhang_mm" in skill_text
-    assert "before asking the user to clarify units" in skill_text
-    assert "complete model field profile" in skill_text
-    assert "specific missing field recovery" in skill_text
+    assert "ask bi to return the value or `na` if the db value is null" in skill_text
+    assert "complete db model profile" in skill_text
 
 
-def test_mycroft_recommendation_skill_requests_complete_bi_profiles_and_recovery():
+def test_mycroft_recommendation_skill_uses_analytical_bi_until_full_details_are_requested():
     skill_text = (
         Path("skills/mycroft/build-vehicle-recommendation/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
 
-    assert "request a complete non-duplicate model field profile for each candidate" in skill_text
-    assert "not a curated list of important fields" in skill_text
-    assert "every user-facing original bi field" in skill_text
-    assert "minimum checklist" in skill_text
-    assert "specific missing field recovery" in skill_text
-    assert "targeted bi follow-up" in skill_text
+    assert "analytical / comparison mode" in skill_text
+    assert "do not require bi to return complete model profiles or all db fields" in skill_text
+    assert "selected fields relevant to the recommendation" in skill_text
+    assert "complete db model profile mode" in skill_text
 
 
-def test_mycroft_comparison_skill_requests_complete_bi_profiles_and_recovery():
+def test_mycroft_comparison_skill_does_not_request_complete_profiles_for_analytics():
     skill_text = (
         Path("skills/mycroft/compare-customer-options/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
 
-    assert "request a complete non-duplicate model field profile for each option" in skill_text
-    assert 'not a curated "important fields" subset' in skill_text
-    assert "every user-facing original bi field" in skill_text
-    assert "minimum checklist" in skill_text
-    assert "specific missing field recovery" in skill_text
-    assert "targeted bi follow-up" in skill_text
+    assert "analytical / comparison mode" in skill_text
+    assert "do not ask bi for a complete model profile" in skill_text
+    assert "do not require bi to return all db fields" in skill_text
+    assert "selected comparison columns" in skill_text
+    assert "complete db model profile mode" in skill_text
 
 
-def test_mycroft_bi_service_catalog_defines_complete_model_profile():
+def test_mycroft_other_bi_using_skills_default_to_selected_field_mode():
+    skill_paths = [
+        Path("skills/mycroft/answer-service-or-operation-question/SKILL.md"),
+        Path("skills/mycroft/build-tco-case/SKILL.md"),
+        Path("skills/mycroft/handle-competitor-comparison/SKILL.md"),
+        Path("skills/mycroft/shortlist-gaz-solutions/SKILL.md"),
+        Path("skills/mycroft/prepare-sales-argumentation/SKILL.md"),
+        Path("skills/mycroft/prepare-programs-and-financing/SKILL.md"),
+        Path("skills/mycroft/email-followup/SKILL.md"),
+    ]
+
+    combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in skill_paths)
+
+    assert "selected fact mode" in combined
+    assert "analytical / selected-field mode" in combined
+    assert "analytical / comparison mode" in combined
+    assert "selected-field validation" in combined
+    assert "do not request complete db model profiles" in combined
+    assert "complete db model profile" in combined
+
+
+def test_mycroft_bi_service_catalog_defines_analytical_and_complete_profile_modes():
     catalog_text = (
         Path("skills/mycroft/references/subagents-service-catalog.md")
         .read_text(encoding="utf-8")
         .lower()
     )
 
-    assert "complete model field profile" in catalog_text
-    assert "returns every user-facing original bi field" in catalog_text
-    assert 'not a curated "important fields" subset' in catalog_text
-    assert "`_nocase` mirror fields" in catalog_text
-    assert "raw/import/source technical columns" in catalog_text
+    assert "bi request modes" in catalog_text
+    assert "analytical / comparison services return selected fields" in catalog_text
+    assert "they do not return complete model profiles" in catalog_text
+    assert "complete db model profile" in catalog_text
+    assert "complete set of db fields" in catalog_text
+    assert "render every null/empty value as `na`" in catalog_text
+    assert "mycroft will form a complete model profile" in catalog_text
+    assert "do not ask for all db fields" in catalog_text
     assert "specific missing field recovery" in catalog_text
-    assert "does not ask the user to clarify units before checking bi" in catalog_text
+    assert "ask for value or `na` if the db value is null" in catalog_text

@@ -23,14 +23,16 @@ Receive:
 
 1. Ask `marketing_analyst` for document-backed arguments and safe wording.
 2. Identify exact claims inside the argument.
-3. Validate exact claims through BI if they will be stated as facts.
-4. Mark unsupported or weak claims instead of strengthening them.
+3. Validate exact claims through BI selected-field mode if they will be stated as facts.
+4. Do not request complete DB model profiles for sales wording unless the user asks to include a complete concrete model card.
+5. Mark unsupported or weak claims instead of strengthening them.
 
 ## What to analyze
 
 Check:
 - whether the argument is supported by internal materials;
 - whether it contains factual claims requiring BI;
+- whether selected-field validation is enough;
 - whether wording overpromises price, discount, availability, service, or financing.
 
 ## Materials and tools

@@ -25,9 +25,10 @@ Receive:
 ## What to do
 
 1. Ask `marketing_analyst` for internal program and financing material summary.
-2. Ask BI for vehicle prices if the financing answer depends on a vehicle price base.
+2. Ask BI in selected-field mode for vehicle prices if the financing answer depends on a vehicle price base.
 3. Ask web only for current public program/rate context or source links.
-4. Do not guarantee eligibility, approval, availability, or current bank rates unless a source confirms them.
+4. Do not request complete DB model profiles for financing answers unless the user asks for a complete concrete model card.
+5. Do not guarantee eligibility, approval, availability, or current bank rates unless a source confirms them.
 
 ## What to analyze
 
@@ -35,6 +36,7 @@ Check:
 - whether the program is from internal materials or current public sources;
 - whether time sensitivity requires web validation;
 - whether exact vehicle price is needed;
+- whether selected price/model identity fields are enough;
 - which terms must be confirmed by dealer, bank, or program owner.
 
 ## Materials and tools

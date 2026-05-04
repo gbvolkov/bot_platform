@@ -13,9 +13,9 @@ Each skill must keep its `SKILL.md` body focused on the workflow and refer to:
 | `source-authority-and-routing` | Mycroft must decide which source or subagent owns the answer. | Source plan and delegation order. |
 | `capture-customer-requirements` | The customer describes a vehicle/fleet/business task and the useful inputs must be extracted. | Known inputs, assumptions, missing high-impact inputs. |
 | `shortlist-gaz-solutions` | The customer needs GAZ directions, families, or candidate models before exact BI validation. | Candidate directions and validation needs. |
-| `validate-vehicle-facts` | Exact model/family/candidate facts are needed. | BI-backed factual fields and gaps. |
+| `validate-vehicle-facts` | Exact selected facts are needed, or the user asks for a complete concrete model profile/all DB fields. | BI-backed selected facts, or a complete model profile formed from all returned DB fields with `NA` for nulls. |
 | `build-vehicle-recommendation` | Mycroft must recommend a model, configuration, or fleet mix. | Recommendation with source boundaries and caveats. |
-| `compare-customer-options` | The user asks to compare GAZ models, configurations, body types, fuels, or purchase options. | Comparison separating factual table and sales interpretation. |
+| `compare-customer-options` | The user asks to compare GAZ models, configurations, body types, fuels, or purchase options. | Analytical comparison using selected BI fields, not complete model profiles. |
 | `prepare-sales-argumentation` | The user needs customer-facing sales arguments, objection handling, or safe wording. | Arguments, caveats, safe claims. |
 | `handle-competitor-comparison` | The user asks to compare GAZ with a competitor or respond to competitor pressure. | Internal narrative, BI facts, web facts if needed. |
 | `prepare-programs-and-financing` | The user asks about promotions, sales programs, subsidies, FFP, leasing, credit, or financing terms. | Program/financing summary and confirmation needs. |
