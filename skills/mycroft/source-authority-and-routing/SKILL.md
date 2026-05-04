@@ -1,6 +1,6 @@
 ---
 name: source-authority-and-routing
-description: Decide which configured Mycroft GAZ subagent or direct tool should answer a sales request. Use for recommendations, comparisons, exact vehicle facts, internal sales arguments, programs/financing, TCO, service/operation questions, current external facts, and mixed requests requiring several sources.
+description: Decide which configured Mycroft GAZ subagent or direct tool should answer a sales request. Use for recommendations, comparisons, exact vehicle facts, internal sales arguments, programs/financing, TCO, service/operation questions, current external facts, and mixed requests requiring several sources. For TCO, "стоимость владения", or "руб/км" over active concrete models/candidates, route to gaz_pricing_bi_int for BI ownership-cost fields before marketing, web, templates, or assumptions.
 ---
 
 # Source Authority And Routing

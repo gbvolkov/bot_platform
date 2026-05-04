@@ -1,6 +1,6 @@
 ---
 name: build-tco-case
-description: Build a GAZ ownership-cost, operating-cost, fuel, service, maintenance, or economic-justification case. Use when the user asks about TCO, cost per km, service cost, fuel choice, ownership economics, or how to justify price through operating value.
+description: Build a GAZ ownership-cost, operating-cost, fuel, service, maintenance, or economic-justification case. Use when the user asks about TCO, cost per km, "стоимость владения", "руб/км", service cost, fuel choice, ownership economics, or how to justify price through operating value. If concrete active models, candidates, comparison rows, or a fleet mix are in scope, BI ownership-cost lookup through gaz_pricing_bi_int is mandatory first before a template, marketing argument, web estimate, or request for assumptions.
 ---
 
 # Build TCO Case

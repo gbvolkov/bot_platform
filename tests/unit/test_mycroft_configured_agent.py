@@ -204,6 +204,8 @@ def test_mycroft_tco_skill_requires_bi_lookup_before_template_for_active_models(
     assert "return the value or `na` for each requested bi field" in skill_text
     assert "do not replace this bi ownership-cost lookup with a generic tco template" in skill_text
     assert "after bi has been checked for the active targets" in skill_text
+    assert "bi ownership-cost lookup through gaz_pricing_bi_int is mandatory first" in skill_text
+    assert "before a template, marketing argument, web estimate, or request for assumptions" in skill_text
 
 
 def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
