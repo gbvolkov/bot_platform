@@ -26,3 +26,8 @@ uv.lock
 *.db-wal
 .tmp_sysadmin_mcp_kit/
 pytest-cache*
+
+.python-version
+bi_bot.pid
+gv.env.bak.20260316093924
+scripts/install_gaz_service_bundle.sh
