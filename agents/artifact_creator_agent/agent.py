@@ -509,7 +509,7 @@ def initialize_agent(
         callback_handlers += [lf_handler]
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model="base", provider=provider.value, temperature=0.4)
+    llm = get_llm(model="nano", provider=provider.value, temperature=0)
     response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0, streaming=False)
 
     run_privacy_middleware = None
