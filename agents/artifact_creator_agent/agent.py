@@ -49,6 +49,7 @@ from platform_guardrails.middleware import (
     PrivacyModelRequestMiddleware,
     SecurityScannerMiddleware,
     ToolContentScannerMiddleware,
+    guarded_node,
 )
 from platform_guardrails.privacy import PrivacyRail
 from platform_guardrails.scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerFailurePolicy
@@ -493,6 +494,8 @@ def initialize_agent(
     guardrail_scanners_enabled: bool | None = None,
     guardrail_scanner_failure_policy: ScannerFailurePolicy = "fail_closed",
     guardrail_banned_topics: List[str] | None = None,
+    guardrail_composite_input_scanners: tuple[str, ...] | None = None,
+    guardrail_composite_recent_message_limit: int = 20,
 ):
     #set_locale(locale)
     #set_models_locale(locale)
@@ -509,17 +512,24 @@ def initialize_agent(
         callback_handlers += [lf_handler]
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model="nano", provider=provider.value, temperature=0)
+    llm = get_llm(model="base", provider=provider.value, temperature=0)
     response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0, streaming=False)
 
     run_privacy_middleware = None
     confirmation_privacy_middleware = None
+    set_prompt_privacy_middleware = None
     run_security_middleware = None
     confirmation_security_middleware = None
+    set_prompt_security_middleware = None
     tool_content_middleware = None
     if guardrails_enabled:
         privacy_rail = PrivacyRail.from_palimpsest(locale=guardrails_locale)
         guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
+        set_prompt_privacy_middleware = PrivacyModelRequestMiddleware(
+            privacy_rail,
+            agent_name="artifact_creator_agent.set_prompt",
+            event_log_path=guardrail_log_path,
+        )
         run_privacy_middleware = PrivacyModelRequestMiddleware(
             privacy_rail,
             agent_name="artifact_creator_agent.run",
@@ -539,17 +549,30 @@ def initialize_agent(
                 failure_policy=guardrail_scanner_failure_policy,
             )
             scanner_rail = LLMGuardScannerRail(scanner_profile)
+            set_prompt_security_middleware = SecurityScannerMiddleware(
+                scanner_rail,
+                agent_name="artifact_creator_agent.set_prompt",
+                event_log_path=guardrail_log_path,
+                scan_state_keys=("system_prompt",),
+                composite_input_scanners=guardrail_composite_input_scanners,
+                composite_recent_message_limit=guardrail_composite_recent_message_limit,
+                composite_message_roles=("human", "tool"),
+            )
             run_security_middleware = SecurityScannerMiddleware(
                 scanner_rail,
                 agent_name="artifact_creator_agent.run",
                 event_log_path=guardrail_log_path,
                 scan_system_prompt=True,
                 scan_state_keys=("system_prompt",),
+                composite_input_scanners=guardrail_composite_input_scanners,
+                composite_recent_message_limit=guardrail_composite_recent_message_limit,
             )
             confirmation_security_middleware = SecurityScannerMiddleware(
                 scanner_rail,
                 agent_name="artifact_creator_agent.confirm",
                 event_log_path=guardrail_log_path,
+                composite_input_scanners=guardrail_composite_input_scanners,
+                composite_recent_message_limit=guardrail_composite_recent_message_limit,
                 blocked_structured_response_factory=lambda _decision: UserConfirmation(
                     is_artifact_confirmed=False
                 ),
@@ -559,10 +582,21 @@ def initialize_agent(
                 agent_name="artifact_creator_agent.run",
                 event_log_path=guardrail_log_path,
             )
-    
+
     builder = StateGraph(ArtifactCreatorAgentState)
     builder.add_node("greetings", create_greetings_node(system_prompt))
-    builder.add_node("set_prompt", create_set_prompt_node(llm))
+    set_prompt_node = create_set_prompt_node(llm)
+    if guardrails_enabled:
+        set_prompt_node = guarded_node(
+            set_prompt_node,
+            security_middleware=set_prompt_security_middleware,
+            privacy_middleware=set_prompt_privacy_middleware,
+            scan_state_keys=("system_prompt",),
+            composite_input_scanners=guardrail_composite_input_scanners,
+            composite_recent_message_limit=guardrail_composite_recent_message_limit,
+            composite_message_roles=("human", "tool"),
+        )
+    builder.add_node("set_prompt", set_prompt_node)
     builder.add_node("cleanup", cleanup_messages_node)
     builder.add_node(
         "run",

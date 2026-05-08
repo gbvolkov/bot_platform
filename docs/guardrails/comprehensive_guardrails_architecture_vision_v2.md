@@ -4,6 +4,9 @@
 
 This document proposes a target architecture for a comprehensive guardrails layer in `bot_platform`.
 
+For the repository's current implementation status, see
+[Guardrails Implementation Status](implementation_status.md).
+
 The core decision for the next implementation phase is:
 
 ```text
@@ -967,7 +970,7 @@ Decision table:
 
 ## 25. Implementation Roadmap
 
-### Phase 1 — Foundation. Status: Implemented
+### Phase 1 — Foundation. Status: Platform primitives implemented, rollout partial
 
 Create:
 
@@ -990,7 +993,16 @@ Add guardrail decision logging
 Document trusted Langfuse observability assumption
 ```
 
-### Phase 2 — Scanner Enforcement
+Current implementation details:
+
+```text
+context.py, decisions.py, privacy.py, logging.py, and middleware.py exist
+PrivacyRail and PrivacyModelRequestMiddleware are implemented
+artifact_creator_agent uses the common privacy middleware when guardrails are enabled
+legacy/global migration for every agent is not complete
+```
+
+### Phase 2 — Scanner Enforcement. Status: Mostly implemented for artifact_creator_agent
 
 Create:
 
@@ -1017,6 +1029,41 @@ Run scanner layer before Palimpsest anonymization
 Do not run Sensitive on default user-facing responses after de-anonymization
 Block or review high-risk requests
 Record scanner decisions in audit logs
+```
+
+Current implementation details:
+
+```text
+scanners.py and injection.py exist
+SecurityScannerMiddleware and ToolContentScannerMiddleware are implemented
+guarded_node exists for scanner/privacy enforcement around graph nodes
+artifact_creator_agent is the sample guarded integration
+artifact_creator_agent.set_prompt is guarded before writing user-defined prompt state
+composite PromptInjection scanning covers privileged prompt state plus recent messages
+scanner policy trusts LLM Guard allow/block decisions
+deterministic phishing URL policy is not implemented in Phase 2
+```
+
+Current status note:
+
+```text
+Phase 2 platform wiring is mostly done for the sample integration.
+The remaining Phase 2 hardening item is scanner-model quality for Russian and mixed Russian/English traffic.
+The default LLM Guard models need benchmark evaluation, threshold calibration, and likely fine-tuning or replacement before broad production rollout.
+This is not an invitation to add deterministic prompt-policy heuristics; LLM Guard remains the scanner decision source.
+```
+
+### Phase 2 Hardening — Russian Scanner Model Quality
+
+Actions:
+
+```text
+Build Russian and mixed Russian/English scanner evaluation sets
+Measure PromptInjection, Toxicity, BanTopics, and MaliciousURLs behavior on product-domain traffic
+Calibrate scanner thresholds per deployment profile
+Fine-tune or replace LLM Guard-compatible scanner models where recall is insufficient
+Keep Palimpsest as the only anonymizer/de-anonymizer
+Keep deterministic prompt-policy checks out of the common scanner layer unless a later policy phase explicitly adds them
 ```
 
 ### Phase 3 — Execution Safety

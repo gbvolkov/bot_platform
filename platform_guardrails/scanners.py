@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from .context import GuardrailContext
@@ -53,12 +53,18 @@ class ScannerScanResult:
 class LLMGuardScannerProfile:
     input_scanners: Sequence[ScannerSpec] = field(default_factory=tuple)
     output_scanners: Sequence[ScannerSpec] = field(default_factory=tuple)
+    composite_input_scanners: Sequence[ScannerSpec] = field(default_factory=tuple)
     failure_policy: ScannerFailurePolicy = "fail_closed"
     fail_fast: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_scanners", tuple(_coerce_spec(spec) for spec in self.input_scanners))
         object.__setattr__(self, "output_scanners", tuple(_coerce_spec(spec) for spec in self.output_scanners))
+        object.__setattr__(
+            self,
+            "composite_input_scanners",
+            tuple(_coerce_spec(spec) for spec in self.composite_input_scanners),
+        )
         if self.failure_policy not in {"fail_closed", "fail_open"}:
             raise ValueError("failure_policy must be 'fail_closed' or 'fail_open'.")
 
@@ -71,10 +77,11 @@ class LLMGuardScannerProfile:
         token_limit: int = 8192,
     ) -> "LLMGuardScannerProfile":
         topics = list(GENERIC_BANNED_TOPICS if banned_topics is None else banned_topics)
+        prompt_injection = ScannerSpec("PromptInjection", {"threshold": 0.92, "match_type": "sentence"})
         input_scanners = [
             ScannerSpec("TokenLimit", {"limit": token_limit}),
             ScannerSpec("Secrets", {"redact_mode": "all"}),
-            ScannerSpec("PromptInjection", {"threshold": 0.92, "match_type": "full"}),
+            prompt_injection,
             ScannerSpec("Toxicity", {"threshold": 0.8, "match_type": "sentence"}),
         ]
         output_scanners = [
@@ -88,6 +95,7 @@ class LLMGuardScannerProfile:
         return cls(
             input_scanners=tuple(input_scanners),
             output_scanners=tuple(output_scanners),
+            composite_input_scanners=(prompt_injection,),
             failure_policy=failure_policy,
         )
 
@@ -157,6 +165,29 @@ class LLMGuardScannerRail:
             scan_one=lambda scanner, value: scanner.scan(prompt, value),
         )
 
+    def scan_composite_input_text(
+        self,
+        text: str,
+        context: GuardrailContext,
+        *,
+        scanner_names: Iterable[str] | None = None,
+        boundary: str = "composite_model_request",
+    ) -> ScannerScanResult:
+        specs = self._composite_specs(scanner_names)
+        return _scan_text(
+            text,
+            context,
+            specs=specs,
+            stage="input",
+            boundary=boundary,
+            prompt="",
+            source_urls=set(),
+            failure_policy=self._profile.failure_policy,
+            fail_fast=self._profile.fail_fast,
+            instance_for_spec=lambda spec: self._instance_for_spec(spec, "input"),
+            scan_one=lambda scanner, value: scanner.scan(value),
+        )
+
     def _instance_for_spec(self, spec: ScannerSpec, stage: Literal["input", "output"]) -> Any:
         if spec.scanner is not None:
             return spec.scanner
@@ -180,6 +211,23 @@ class LLMGuardScannerRail:
     def _source_urls_for_context(self, context: GuardrailContext) -> set[str]:
         return set(self._source_urls_by_scope.get(_source_url_scope(context), set()))
 
+    def _composite_specs(self, scanner_names: Iterable[str] | None) -> tuple[ScannerSpec, ...]:
+        if scanner_names is None:
+            return tuple(self._profile.composite_input_scanners)
+        selected: list[ScannerSpec] = []
+        for name in scanner_names:
+            name_text = str(name)
+            matching = next(
+                (
+                    spec
+                    for spec in (*self._profile.composite_input_scanners, *self._profile.input_scanners)
+                    if spec.name == name_text
+                ),
+                None,
+            )
+            selected.append(matching or ScannerSpec(name_text))
+        return tuple(selected)
+
 
 def scan_input_text(
     rail: LLMGuardScannerRail,
@@ -202,6 +250,22 @@ def scan_output_text(
     return rail.scan_output_text(prompt, output, context, boundary=boundary)
 
 
+def scan_composite_input_text(
+    rail: LLMGuardScannerRail,
+    text: str,
+    context: GuardrailContext,
+    *,
+    scanner_names: Iterable[str] | None = None,
+    boundary: str = "composite_model_request",
+) -> ScannerScanResult:
+    return rail.scan_composite_input_text(
+        text,
+        context,
+        scanner_names=scanner_names,
+        boundary=boundary,
+    )
+
+
 def _coerce_spec(value: ScannerSpec | Mapping[str, Any]) -> ScannerSpec:
     if isinstance(value, ScannerSpec):
         return value
@@ -211,6 +275,8 @@ def _coerce_spec(value: ScannerSpec | Mapping[str, Any]) -> ScannerSpec:
             config=value.get("config") or {},
             scanner=value.get("scanner"),
         )
+    if isinstance(value, str):
+        return ScannerSpec(value)
     raise TypeError(f"Unsupported scanner spec: {value!r}")
 
 
@@ -434,6 +500,7 @@ __all__ = [
     "ScannerFailurePolicy",
     "ScannerScanResult",
     "ScannerSpec",
+    "scan_composite_input_text",
     "scan_input_text",
     "scan_output_text",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
+import inspect
 from uuid import uuid4
 from typing import Any, Callable, Dict, Iterable, List
 
@@ -8,8 +9,10 @@ from langchain.agents.middleware import AgentMiddleware, ExtendedModelResponse, 
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
+from langgraph.utils.runnable import RunnableCallable
 
 from .context import GuardrailContext, build_guardrail_context
 from .decisions import GuardrailDecision, redact
@@ -171,6 +174,38 @@ def _join_message_text(messages: Iterable[BaseMessage], *, system_prompt: str | 
     return "\n".join(parts)
 
 
+def _message_text(message: BaseMessage) -> str:
+    return _join_message_text([message])
+
+
+def _message_role(message: BaseMessage) -> str:
+    return str(getattr(message, "type", None) or type(message).__name__)
+
+
+def _normalize_message_roles(message_roles: Iterable[str] | None) -> tuple[str, ...] | None:
+    if message_roles is None:
+        return None
+    return tuple(str(role).lower() for role in message_roles)
+
+
+def _latest_human_message_index(messages: Iterable[BaseMessage]) -> int | None:
+    source_messages = list(messages)
+    for index in range(len(source_messages) - 1, -1, -1):
+        message = source_messages[index]
+        if isinstance(message, HumanMessage) or getattr(message, "type", None) == "human":
+            return index
+    return None
+
+
+def _command_with_update(command: Command, update: dict[str, Any]) -> Command:
+    return Command(
+        graph=command.graph,
+        update=update,
+        resume=command.resume,
+        goto=command.goto,
+    )
+
+
 class SecurityScannerMiddleware(AgentMiddleware):
     """LLM Guard scanner middleware for model requests and responses."""
 
@@ -183,6 +218,9 @@ class SecurityScannerMiddleware(AgentMiddleware):
         event_log_path: str | None = None,
         scan_system_prompt: bool = False,
         scan_state_keys: Iterable[str] = (),
+        composite_input_scanners: Iterable[str] | None = None,
+        composite_recent_message_limit: int = 20,
+        composite_message_roles: Iterable[str] | None = None,
         blocked_structured_response_factory: Callable[[GuardrailDecision], Any] | None = None,
     ) -> None:
         super().__init__()
@@ -191,6 +229,11 @@ class SecurityScannerMiddleware(AgentMiddleware):
         self._events = event_logger or GuardrailEventLogger(event_log_path)
         self._scan_system_prompt = scan_system_prompt
         self._state_keys_to_scan = tuple(scan_state_keys)
+        self._composite_input_scanners = (
+            None if composite_input_scanners is None else tuple(composite_input_scanners)
+        )
+        self._composite_recent_message_limit = max(0, int(composite_recent_message_limit))
+        self._composite_message_roles = _normalize_message_roles(composite_message_roles)
         self._blocked_structured_response_factory = blocked_structured_response_factory
 
     def _context(self, runtime: Any, state: Dict[str, Any] | None = None) -> GuardrailContext:
@@ -340,11 +383,18 @@ class SecurityScannerMiddleware(AgentMiddleware):
             updated_messages.append(updated)
         return updated_messages, None, [], None
 
-    def _scan_state_keys(self, state: Dict[str, Any], context: GuardrailContext) -> tuple[Dict[str, Any], GuardrailDecision | None]:
-        if not self._state_keys_to_scan:
+    def _scan_state_keys(
+        self,
+        state: Dict[str, Any],
+        context: GuardrailContext,
+        *,
+        state_keys: Iterable[str] | None = None,
+    ) -> tuple[Dict[str, Any], GuardrailDecision | None]:
+        keys_to_scan = self._state_keys_to_scan if state_keys is None else tuple(state_keys)
+        if not keys_to_scan:
             return state, None
         updated_state = dict(state)
-        for key in self._state_keys_to_scan:
+        for key in keys_to_scan:
             value = updated_state.get(key)
             if not isinstance(value, str):
                 continue
@@ -354,6 +404,133 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 return state, result.blocked_decision
             updated_state[key] = result.text
         return updated_state, None
+
+    def _composite_input_text(
+        self,
+        state: Dict[str, Any],
+        messages: Iterable[BaseMessage],
+        *,
+        system_prompt: str | None = None,
+        recent_message_limit: int | None = None,
+        message_roles: Iterable[str] | None = None,
+    ) -> str:
+        parts: list[str] = []
+        state_system_prompt = state.get("system_prompt")
+        if isinstance(state_system_prompt, str) and state_system_prompt:
+            parts.append("[STATE SYSTEM PROMPT]\n" + state_system_prompt)
+        if system_prompt:
+            parts.append("[RUNTIME SYSTEM PROMPT]\n" + system_prompt)
+
+        source_messages = list(messages)
+        limit = self._composite_recent_message_limit if recent_message_limit is None else max(0, int(recent_message_limit))
+        if limit > 0:
+            source_messages = source_messages[-limit:]
+        allowed_roles = (
+            self._composite_message_roles
+            if message_roles is None
+            else _normalize_message_roles(message_roles)
+        )
+        message_parts: list[str] = []
+        for message in source_messages:
+            role = _message_role(message).lower()
+            if allowed_roles is not None and role not in allowed_roles:
+                continue
+            text = _message_text(message)
+            if text:
+                message_parts.append(f"[{role.upper()}]\n{text}")
+        if message_parts:
+            parts.append("[RECENT MESSAGES]\n" + "\n\n".join(message_parts))
+        return "\n\n".join(parts)
+
+    def _composite_block_cleanup(
+        self,
+        messages: Iterable[BaseMessage],
+    ) -> tuple[list[str], list[BaseMessage] | None]:
+        source_messages = list(messages)
+        index = _latest_human_message_index(source_messages)
+        if index is None:
+            return [], None
+        message = source_messages[index]
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, str) and message_id:
+            return [message_id], None
+        return [], [*source_messages[:index], *source_messages[index + 1 :]]
+
+    def _scan_composite_input(
+        self,
+        state: Dict[str, Any],
+        messages: Iterable[BaseMessage],
+        context: GuardrailContext,
+        *,
+        system_prompt: str | None = None,
+        boundary: str = "composite_model_request",
+        scanner_names: Iterable[str] | None = None,
+        recent_message_limit: int | None = None,
+        message_roles: Iterable[str] | None = None,
+    ) -> tuple[GuardrailDecision | None, list[str], list[BaseMessage] | None]:
+        composite_text = self._composite_input_text(
+            state,
+            messages,
+            system_prompt=system_prompt,
+            recent_message_limit=recent_message_limit,
+            message_roles=message_roles,
+        )
+        if not composite_text:
+            return None, [], None
+        result = self._scanners.scan_composite_input_text(
+            composite_text,
+            context,
+            scanner_names=self._composite_input_scanners if scanner_names is None else scanner_names,
+            boundary=boundary,
+        )
+        self._log_scan_result(result)
+        if result.blocked_decision is None:
+            return None, [], None
+        remove_ids, replacement_messages = self._composite_block_cleanup(messages)
+        return result.blocked_decision, remove_ids, replacement_messages
+
+    def scan_node_state(
+        self,
+        state: Dict[str, Any],
+        runtime: Any,
+        *,
+        boundary: str = "node_request",
+        scan_state_keys: Iterable[str] | None = None,
+        composite_input_scanners: Iterable[str] | None = None,
+        composite_recent_message_limit: int | None = None,
+        composite_message_roles: Iterable[str] | None = None,
+    ) -> tuple[Dict[str, Any] | None, GuardrailDecision | None, list[str], list[BaseMessage] | None]:
+        context = self._context(runtime, state)
+        if state_has_reset_message(state):
+            self._scanners.reset_context(context)
+
+        source_state = dict(state or {})
+        messages, decision, remove_message_ids, replacement_messages = self._scan_messages(
+            source_state.get("messages") or [],
+            context,
+            boundary=boundary,
+        )
+        if decision is not None:
+            return None, decision, remove_message_ids, replacement_messages
+        source_state["messages"] = messages
+
+        scanned_state, decision = self._scan_state_keys(source_state, context, state_keys=scan_state_keys)
+        if decision is not None:
+            return None, decision, [], None
+
+        decision, remove_message_ids, replacement_messages = self._scan_composite_input(
+            scanned_state,
+            scanned_state.get("messages") or [],
+            context,
+            boundary=f"composite_{boundary}",
+            scanner_names=composite_input_scanners,
+            recent_message_limit=composite_recent_message_limit,
+            message_roles=composite_message_roles,
+        )
+        if decision is not None:
+            return None, decision, remove_message_ids, replacement_messages
+
+        return scanned_state, None, [], None
 
     def _scan_model_request(self, request, context: GuardrailContext):
         messages, decision, remove_message_ids, replacement_messages = self._scan_messages(request.messages, context, boundary="model_request")
@@ -371,6 +548,15 @@ class SecurityScannerMiddleware(AgentMiddleware):
             if result.blocked_decision is not None:
                 return None, result.blocked_decision, [], None
             system_prompt = result.text
+
+        decision, remove_message_ids, replacement_messages = self._scan_composite_input(
+            state,
+            messages,
+            context,
+            system_prompt=system_prompt,
+        )
+        if decision is not None:
+            return None, decision, remove_message_ids, replacement_messages
 
         return request.override(messages=messages, state=state, system_prompt=system_prompt), None, [], None
 
@@ -653,6 +839,95 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
             system_prompt=self._anonymize_system_prompt(getattr(request, "system_prompt", None), context),
         )
 
+    def _transform_node_messages(
+        self,
+        messages: Any,
+        context: GuardrailContext,
+        transform: Callable[[str], str],
+    ) -> Any:
+        if isinstance(messages, RemoveMessage):
+            return messages
+        if isinstance(messages, BaseMessage):
+            return clone_message_with_transform(messages, transform)
+        if isinstance(messages, list):
+            return [
+                self._transform_node_messages(message, context, transform)
+                if isinstance(message, (BaseMessage, RemoveMessage))
+                else message
+                for message in messages
+            ]
+        return messages
+
+    def anonymize_node_state(
+        self,
+        state: Dict[str, Any],
+        runtime: Any,
+        *,
+        state_keys: Iterable[str] = ("system_prompt",),
+    ) -> Dict[str, Any]:
+        context = self._context(runtime, state)
+        if state_has_reset_message(state):
+            self._privacy.reset_context(context)
+        updated = dict(state)
+        if "messages" in updated:
+            updated["messages"] = self._transform_node_messages(
+                updated["messages"],
+                context,
+                lambda text: self._privacy.anonymize_text(text, context, boundary="node_input"),
+            )
+            self._log(context, boundary="node_input", reason="Node input messages anonymized.", categories=["privacy", "pii"])
+        for key in state_keys:
+            value = updated.get(key)
+            if isinstance(value, str):
+                updated[key] = self._privacy.anonymize_text(value, context, boundary=f"node_state.{key}")
+                self._log(context, boundary=f"node_state.{key}", reason="Node state text anonymized.", categories=["privacy", "pii"])
+        return updated
+
+    def deanonymize_node_result(
+        self,
+        result: Any,
+        runtime: Any,
+        state: Dict[str, Any],
+        *,
+        state_keys: Iterable[str] = ("system_prompt",),
+    ) -> Any:
+        context = self._context(runtime, state)
+        if not context.get("allow_deanonymization", True):
+            self._log(
+                context,
+                boundary="node_output",
+                reason="Node output de-anonymization skipped by policy.",
+                categories=["privacy", "policy"],
+            )
+            return result
+
+        def deanonymize(text: str) -> str:
+            return self._privacy.deanonymize_text(text, context, boundary="node_output")
+
+        def transform_update(update: Any) -> Any:
+            if not isinstance(update, dict):
+                return update
+            updated = dict(update)
+            if "messages" in updated:
+                updated["messages"] = self._transform_node_messages(updated["messages"], context, deanonymize)
+            for key in state_keys:
+                value = updated.get(key)
+                if isinstance(value, str):
+                    updated[key] = deanonymize(value)
+            return updated
+
+        if isinstance(result, Command):
+            update = transform_update(getattr(result, "update", None))
+            if update is getattr(result, "update", None):
+                return result
+            self._log(context, boundary="node_output", reason="Node command output de-anonymized.", categories=["privacy", "pii"])
+            return _command_with_update(result, update)
+        if isinstance(result, dict):
+            updated_result = transform_update(result)
+            self._log(context, boundary="node_output", reason="Node output state de-anonymized.", categories=["privacy", "pii"])
+            return updated_result
+        return result
+
     def wrap_model_call(self, request, handler):
         context = self._context(request.runtime, request.state)
         updated_request = self._override_model_request(request, context)
@@ -730,7 +1005,117 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         return self._anonymize_tool_result(result, context)
 
 
+def _blocked_node_command(
+    decision: GuardrailDecision,
+    *,
+    remove_message_ids: Iterable[str] = (),
+    replacement_messages: Iterable[BaseMessage] | None = None,
+) -> Command:
+    block_message = AIMessage(
+        content=_decision_message(decision),
+        id=f"guardrail-block-{uuid4().hex}",
+    )
+    if replacement_messages is not None:
+        return Command(
+            update={
+                "messages": [
+                    RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                    *replacement_messages,
+                    block_message,
+                ]
+            }
+        )
+    return Command(
+        update={
+            "messages": [
+                *[RemoveMessage(id=message_id) for message_id in remove_message_ids],
+                block_message,
+            ]
+        }
+    )
+
+
+def _call_graph_node(node: Callable[..., Any], state: Dict[str, Any], config: RunnableConfig, runtime: Any) -> Any:
+    return node(state, config=config, runtime=runtime)
+
+
+async def _acall_graph_node(node: Callable[..., Any], state: Dict[str, Any], config: RunnableConfig, runtime: Any) -> Any:
+    result = _call_graph_node(node, state, config, runtime)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def guarded_node(
+    node: Callable[..., Any],
+    *,
+    security_middleware: SecurityScannerMiddleware | None = None,
+    privacy_middleware: PrivacyModelRequestMiddleware | None = None,
+    scan_state_keys: Iterable[str] = ("system_prompt",),
+    composite_input_scanners: Iterable[str] | None = ("PromptInjection",),
+    composite_recent_message_limit: int = 20,
+    composite_message_roles: Iterable[str] | None = None,
+) -> RunnableCallable:
+    """Wrap a LangGraph node with common scanner and privacy guardrails."""
+
+    def _prepare_state(state: Dict[str, Any], runtime: Any) -> Dict[str, Any] | Command:
+        guarded_state = dict(state or {})
+        if security_middleware is not None:
+            scanned_state, decision, remove_message_ids, replacement_messages = security_middleware.scan_node_state(
+                guarded_state,
+                runtime,
+                scan_state_keys=scan_state_keys,
+                composite_input_scanners=composite_input_scanners,
+                composite_recent_message_limit=composite_recent_message_limit,
+                composite_message_roles=composite_message_roles,
+            )
+            if decision is not None:
+                return _blocked_node_command(
+                    decision,
+                    remove_message_ids=remove_message_ids,
+                    replacement_messages=replacement_messages,
+                )
+            guarded_state = scanned_state or guarded_state
+
+        if privacy_middleware is not None:
+            guarded_state = privacy_middleware.anonymize_node_state(
+                guarded_state,
+                runtime,
+                state_keys=scan_state_keys,
+            )
+        return guarded_state
+
+    def _finish_result(result: Any, runtime: Any, scanned_state: Dict[str, Any]) -> Any:
+        if privacy_middleware is None:
+            return result
+        return privacy_middleware.deanonymize_node_result(
+            result,
+            runtime,
+            scanned_state,
+            state_keys=scan_state_keys,
+        )
+
+    def invoke(state: Dict[str, Any], config: RunnableConfig = None, runtime: Any = None) -> Any:
+        prepared_state = _prepare_state(state, runtime)
+        if isinstance(prepared_state, Command):
+            return prepared_state
+        result = _call_graph_node(node, prepared_state, config, runtime)
+        if inspect.isawaitable(result):
+            raise RuntimeError("guarded_node sync path received an awaitable node result.")
+        return _finish_result(result, runtime, prepared_state)
+
+    async def ainvoke(state: Dict[str, Any], config: RunnableConfig = None, runtime: Any = None) -> Any:
+        prepared_state = _prepare_state(state, runtime)
+        if isinstance(prepared_state, Command):
+            return prepared_state
+        result = await _acall_graph_node(node, prepared_state, config, runtime)
+        return _finish_result(result, runtime, prepared_state)
+
+    return RunnableCallable(invoke, ainvoke, trace=False)
+
+
 __all__ = [
+    "guarded_node",
     "PalimpsestSessionMiddleware",
     "PrivacyModelRequestMiddleware",
     "SecurityScannerMiddleware",

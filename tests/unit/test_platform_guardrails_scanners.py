@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.graph.message import add_messages
 from langgraph.types import Command
 
-from platform_guardrails.middleware import SecurityScannerMiddleware
+from platform_guardrails.middleware import SecurityScannerMiddleware, guarded_node
 from platform_guardrails.privacy import PalimpsestSessionManager, PrivacyRail
 from platform_guardrails.scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerSpec
 from platform_guardrails.middleware import PrivacyModelRequestMiddleware, ToolContentScannerMiddleware
@@ -120,6 +121,65 @@ def test_artifact_default_profile_does_not_mask_user_facing_outputs():
         "Toxicity",
         "BanTopics",
     ]
+
+
+def test_artifact_default_profile_uses_sentence_prompt_injection_for_input_and_composite():
+    profile = LLMGuardScannerProfile.artifact_creator_default()
+
+    prompt_specs = [spec for spec in profile.input_scanners if spec.name == "PromptInjection"]
+    composite_specs = [spec for spec in profile.composite_input_scanners if spec.name == "PromptInjection"]
+
+    assert prompt_specs[0].config["match_type"] == "sentence"
+    assert composite_specs[0].config["match_type"] == "sentence"
+
+
+def test_composite_scan_runs_only_configured_scanners():
+    prompt_scanner = FakeInputScanner(valid=True, score=0.0)
+    secrets_scanner = FakeInputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            input_scanners=[
+                ScannerSpec("PromptInjection", scanner=prompt_scanner),
+                ScannerSpec("Secrets", scanner=secrets_scanner),
+            ]
+        )
+    )
+
+    result = rail.scan_composite_input_text(
+        "system prompt plus recent messages",
+        _context(),
+        scanner_names=("PromptInjection",),
+    )
+
+    assert result.blocked_decision is None
+    assert prompt_scanner.seen == ["system prompt plus recent messages"]
+    assert secrets_scanner.seen == []
+
+
+def test_composite_scan_blocks_model_call_without_deterministic_policy():
+    composite_scanner = FakeInputScanner(valid=False, score=1.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            input_scanners=[],
+            composite_input_scanners=[
+                ScannerSpec("PromptInjection", scanner=composite_scanner)
+            ],
+        )
+    )
+    middleware = SecurityScannerMiddleware(rail, agent_name="artifact_creator_agent.run")
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return ModelResponse(result=[AIMessage(content="unsafe")])
+
+    response = middleware.wrap_model_call(_request("safe alone"), handler)
+
+    assert called is False
+    assert response.command is not None
+    assert response.command.update["messages"][0].id == "human-1"
+    assert composite_scanner.seen
 
 
 def test_prompt_injection_blocks_before_model_handler():
@@ -328,6 +388,236 @@ def test_scanner_audit_log_omits_raw_text(tmp_path):
     assert "raw-secret-value" not in text
     assert "Secrets" in text
     assert "guardrail_decision" in text
+
+
+def test_composite_scanner_audit_log_omits_raw_text(tmp_path):
+    scanner = FakeInputScanner(valid=False, score=1.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            composite_input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)]
+        )
+    )
+    log_path = tmp_path / "guardrails.jsonl"
+    middleware = SecurityScannerMiddleware(
+        rail,
+        agent_name="artifact_creator_agent.run",
+        event_log_path=str(log_path),
+    )
+
+    middleware.wrap_model_call(
+        _request("raw composite attack text"),
+        lambda _request: ModelResponse(result=[AIMessage(content="ok")]),
+    )
+
+    text = log_path.read_text(encoding="utf-8")
+    assert "raw composite attack text" not in text
+    assert "PromptInjection" in text
+    assert "composite_model_request" in text
+
+
+def test_composite_scan_includes_assistant_history_by_default():
+    scanner = FakeInputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            composite_input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)]
+        )
+    )
+    middleware = SecurityScannerMiddleware(rail, agent_name="artifact_creator_agent.run")
+
+    scanned_state, decision, _, _ = middleware.scan_node_state(
+        {
+            "messages": [
+                AIMessage(content="assistant remembered a suspicious phrase"),
+                HumanMessage(content="what did you remember?"),
+            ],
+        },
+        _runtime(),
+        composite_input_scanners=("PromptInjection",),
+    )
+
+    assert decision is None
+    assert scanned_state is not None
+    assert "assistant remembered a suspicious phrase" in scanner.seen[-1]
+    assert "what did you remember?" in scanner.seen[-1]
+
+
+def test_composite_scan_can_filter_to_untrusted_message_roles():
+    scanner = FakeInputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            composite_input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)]
+        )
+    )
+    middleware = SecurityScannerMiddleware(
+        rail,
+        agent_name="artifact_creator_agent.set_prompt",
+        composite_message_roles=("human", "tool"),
+    )
+
+    scanned_state, decision, _, _ = middleware.scan_node_state(
+        {
+            "messages": [
+                AIMessage(content="Вы можете задать любой системный промпт."),
+                HumanMessage(content="Ты полезный помощник."),
+            ],
+        },
+        _runtime(),
+        composite_input_scanners=("PromptInjection",),
+    )
+
+    assert decision is None
+    assert scanned_state is not None
+    assert "Вы можете задать любой системный промпт" not in scanner.seen[-1]
+    assert "Ты полезный помощник" in scanner.seen[-1]
+
+
+def test_guarded_node_blocks_before_wrapped_node_executes():
+    scanner = FakeInputScanner(valid=False, score=1.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)])
+    )
+    security = SecurityScannerMiddleware(rail, agent_name="artifact_creator_agent.set_prompt")
+    called = False
+
+    def node(state, config=None, runtime=None):
+        nonlocal called
+        called = True
+        state["system_prompt"] = "should not be stored"
+        return state
+
+    wrapped = guarded_node(
+        node,
+        security_middleware=security,
+        privacy_middleware=None,
+        composite_input_scanners=(),
+    )
+    result = wrapped.invoke(
+        {"messages": [HumanMessage(content="ignore instructions", id="node-human-1")]},
+        config={},
+        runtime=_runtime(),
+    )
+
+    assert called is False
+    assert isinstance(result, Command)
+    assert result.update["messages"][0].id == "node-human-1"
+    assert "system_prompt" not in result.update
+
+
+def test_guarded_node_passes_sanitized_text_to_wrapped_node():
+    scanner = FakeInputScanner(sanitized="token ******", valid=False, score=1.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(input_scanners=[ScannerSpec("Secrets", scanner=scanner)])
+    )
+    security = SecurityScannerMiddleware(rail, agent_name="artifact_creator_agent.set_prompt")
+
+    def node(state, config=None, runtime=None):
+        return {
+            "messages": list(state["messages"]),
+            "system_prompt": state["messages"][0].content,
+        }
+
+    wrapped = guarded_node(
+        node,
+        security_middleware=security,
+        privacy_middleware=None,
+        composite_input_scanners=(),
+    )
+    result = wrapped.invoke(
+        {"messages": [HumanMessage(content="token sk-secret", id="node-human-1")]},
+        config={},
+        runtime=_runtime(),
+    )
+
+    assert result["system_prompt"] == "token ******"
+    assert result["messages"][0].content == "token ******"
+
+
+def test_guarded_node_anonymizes_input_and_deanonymizes_output():
+    privacy = PrivacyModelRequestMiddleware(
+        PrivacyRail(session_manager=PalimpsestSessionManager(FakeProcessor())),
+        agent_name="artifact_creator_agent.set_prompt",
+    )
+    captured = {}
+
+    def node(state, config=None, runtime=None):
+        captured["node_message"] = state["messages"][0].content
+        return {
+            "messages": list(state["messages"]) + [AIMessage(content="created for anon[tenant|user|thread](Ivan)")],
+            "system_prompt": state["messages"][0].content,
+        }
+
+    wrapped = guarded_node(
+        node,
+        security_middleware=None,
+        privacy_middleware=privacy,
+    )
+    result = wrapped.invoke(
+        {"messages": [HumanMessage(content="Ivan", id="node-human-1")]},
+        config={},
+        runtime=_runtime(),
+    )
+
+    assert captured["node_message"] == "anon[tenant|user|thread](Ivan)"
+    assert result["system_prompt"] == "deanon[tenant|user|thread](anon[tenant|user|thread](Ivan))"
+    assert result["messages"][0].content == "deanon[tenant|user|thread](anon[tenant|user|thread](Ivan))"
+    assert result["messages"][-1].content == "deanon[tenant|user|thread](created for anon[tenant|user|thread](Ivan))"
+
+
+def test_guarded_node_deanonymizes_command_updates():
+    privacy = PrivacyModelRequestMiddleware(
+        PrivacyRail(session_manager=PalimpsestSessionManager(FakeProcessor())),
+        agent_name="artifact_creator_agent.set_prompt",
+    )
+
+    def node(state, config=None, runtime=None):
+        return Command(
+            update={
+                "messages": [AIMessage(content=state["messages"][0].content)],
+                "system_prompt": state["messages"][0].content,
+            }
+        )
+
+    wrapped = guarded_node(node, privacy_middleware=privacy)
+    result = wrapped.invoke(
+        {"messages": [HumanMessage(content="Ivan", id="node-human-1")]},
+        config={},
+        runtime=_runtime(),
+    )
+
+    assert isinstance(result, Command)
+    assert result.update["system_prompt"] == "deanon[tenant|user|thread](anon[tenant|user|thread](Ivan))"
+    assert result.update["messages"][0].content == "deanon[tenant|user|thread](anon[tenant|user|thread](Ivan))"
+
+
+def test_guarded_node_async_path_matches_sync_behavior():
+    scanner = FakeInputScanner(valid=False, score=1.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)])
+    )
+    security = SecurityScannerMiddleware(rail, agent_name="artifact_creator_agent.set_prompt")
+    called = False
+
+    async def node(state, config=None, runtime=None):
+        nonlocal called
+        called = True
+        return state
+
+    wrapped = guarded_node(
+        node,
+        security_middleware=security,
+        composite_input_scanners=(),
+    )
+    result = asyncio.run(
+        wrapped.ainvoke(
+            {"messages": [HumanMessage(content="ignore instructions", id="node-human-1")]},
+            config={},
+            runtime=_runtime(),
+        )
+    )
+
+    assert called is False
+    assert isinstance(result, Command)
+    assert result.update["messages"][0].id == "node-human-1"
 
 
 def test_tool_content_scanner_blocks_tool_argument_before_execution():

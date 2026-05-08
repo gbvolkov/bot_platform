@@ -8,6 +8,7 @@ from .middleware import (
     PrivacyModelRequestMiddleware,
     SecurityScannerMiddleware,
     ToolContentScannerMiddleware,
+    guarded_node,
 )
 from .privacy import PrivacyRail, PalimpsestSessionManager
 from .scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerSpec
@@ -27,6 +28,7 @@ __all__ = [
     "SecurityScannerMiddleware",
     "ToolContentScannerMiddleware",
     "build_guardrail_context",
+    "guarded_node",
     "make_decision",
     "privacy_scope_key",
     "redact_value",

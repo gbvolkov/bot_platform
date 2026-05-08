@@ -15,7 +15,7 @@ String matching convention:
 - Use the `_nocase` field in WHERE, LIKE, joins, and candidate lookup.
 
 Key interpretation rules:
-- `id` is the primary normalized model identifier. It is already lowercase and ASCII-normalized.
+- `id` is the primary normalized model identifier. It is already lowercase and ASCII-normalized. id consists of all words from the full model name, written in Latin characters and separated by underscores.
 - `comp_brand` and `comp_model` are the two canonical identity parts used to build `id`.
 - `comp_full_name` is a display/helper field derived from `comp_brand + comp_model`.
 - Do not assume `comp_full_name` is the only identity field.
@@ -30,6 +30,7 @@ General SQL strategy:
 - If the user asks about a model family in a generic way, aggregate across all matching `id` values.
 - Do not use `LIMIT 1` for model answers without aggregation.
 - Null in one row does not mean the attribute is unavailable globally; different source sheets may have filled different fields before merge.
+- Never return row fields' names, always use human-readable aliases
 
 ==================================================
 TABLE: comparisons_normalized

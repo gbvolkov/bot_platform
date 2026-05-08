@@ -9,7 +9,7 @@ Interactive drafting agent for user-defined artifacts. It captures a prompt, gen
 ## Entry module and initialization
 
 - Implementation: `agents/artifact_creator_agent/agent.py`
-- Contract: exposes `initialize_agent(provider, use_platform_store, locale, checkpoint_saver, tools=None, system_prompt=None)`
+- Contract: exposes `initialize_agent(provider, use_platform_store, locale, checkpoint_saver, tools=None, system_prompt=None, guardrails_enabled=False, guardrails_locale="ru-RU", guardrail_scanners_enabled=None, guardrail_scanner_failure_policy="fail_closed", guardrail_banned_topics=None, guardrail_composite_input_scanners=None, guardrail_composite_recent_message_limit=20)`
 - Registry variant: `artifact_creator_agent`
 
 ## State graph / phases / routing
@@ -38,7 +38,9 @@ The `run` node uses a LangChain agent with a commit tool. A second confirmation 
 - optional fixed prompt passed through `initialize_agent(..., system_prompt="...")`
 - `agents/store_artifacts.py`
 - `platform_guardrails.logging.RedactingJSONFileTracer`
+- Phase 1 privacy foundation for guarded runs; see [Guardrails Implementation Status](../../guardrails/implementation_status.md)
 - Phase 2 scanner enforcement for guarded runs; see [Scanner Enforcement Vulnerability Catalog](../../guardrails/scanner_enforcement_vulnerabilities.md)
+- The prompt-setup node is wrapped with the common guardrail node wrapper when guardrails are enabled, so user-provided system prompts are scanned before being stored.
 - optional Langfuse callbacks when configured; this is allowed regardless of `guardrails_enabled` because the configured Langfuse endpoint is treated as trusted platform observability
 
 ## Outputs and persistence
