@@ -178,7 +178,6 @@ def test_registry_can_create_conservative_read_only_profile_when_enabled():
     bundle = registry.build_bundle(agent_name="test_agent")
 
     assert bundle.policy_rail.profile_for("extra").side_effect == "read"
-    assert bundle.policy_rail.profile_for("extra").allow_external_access is False
     assert bundle.policy_rail.profile_for("extra").allow_file_export is False
     assert bundle.policy_rail.profile_for("extra").privacy.argument_transform == "none"
     assert bundle.policy_rail.profile_for("extra").privacy.result_transform == "none"
@@ -265,7 +264,7 @@ def test_approval_required_tool_reviews_without_execution():
     ("profile", "blocked_context", "allowed_context"),
     [
         (
-            _profile("lookup", allow_external_access=True),
+            _profile("lookup", category="external_access"),
             {},
             {"allow_external_tool_access": True},
         ),
@@ -426,7 +425,6 @@ def test_external_tool_result_is_marked_untrusted_for_composite_scanning():
         name="web_search",
         allowed_roles=("default",),
         category="external_access",
-        allow_external_access=True,
     )
     middleware = _middleware(profile)
 

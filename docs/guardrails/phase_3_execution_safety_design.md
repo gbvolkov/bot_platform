@@ -351,7 +351,7 @@ Required checks:
 
 - unprofiled tools are blocked by default for guarded agents;
 - `context.user_role` must be in `profile.allowed_roles`;
-- `profile.allow_external_access` requires `context.allow_external_tool_access`;
+- `profile.category == "external_access"` requires `context.allow_external_tool_access`;
 - `profile.allow_file_export` requires `context.allow_file_export`;
 - `profile.data_sensitivity in {"confidential", "regulated"}` requires
   `context.allow_sensitive_data`, unless the profile explicitly allows the role;

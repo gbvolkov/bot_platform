@@ -172,8 +172,7 @@ def _tool_result_is_untrusted(message: BaseMessage) -> bool:
 
 def _tool_profile_result_is_untrusted(profile: ToolSecurityProfile) -> bool:
     return (
-        profile.allow_external_access
-        or profile.side_effect == "external"
+        profile.side_effect == "external"
         or profile.category in {"retrieval", "external_access"}
     )
 

@@ -59,7 +59,6 @@ class ToolSecurityProfile:
     category: ToolCategory = "internal_state"
     sensitivity: ToolSensitivity = "internal"
     requires_approval: bool = False
-    allow_external_access: bool = False
     allow_file_export: bool = False
     allow_sensitive_data_roles: tuple[str, ...] = ()
     privacy: ToolPrivacyProfile = field(default_factory=ToolPrivacyProfile)
@@ -119,7 +118,6 @@ def coerce_tool_security_profile(value: ToolSecurityProfile | Mapping[str, Any])
         category=value.get("category", "internal_state"),
         sensitivity=value.get("sensitivity", "internal"),
         requires_approval=bool(value.get("requires_approval", False)),
-        allow_external_access=bool(value.get("allow_external_access", False)),
         allow_file_export=bool(value.get("allow_file_export", False)),
         allow_sensitive_data_roles=_tuple(value.get("allow_sensitive_data_roles", ())),
         privacy=coerce_tool_privacy_profile(privacy_config),
@@ -137,7 +135,6 @@ def read_only_unprofiled_tool_profile(name: str) -> ToolSecurityProfile:
         category="internal_state",
         sensitivity="internal",
         requires_approval=False,
-        allow_external_access=False,
         allow_file_export=False,
         result_policy=ToolResultPolicy(scan_result=True, max_text_chars=4_000, max_items=20),
     )
@@ -200,7 +197,7 @@ class ToolPolicyRail:
                 metadata={"tool": tool_name},
             )
 
-        if profile.allow_external_access and not _external_tool_access_allowed(context):
+        if profile.category == "external_access" and not _external_tool_access_allowed(context):
             return block(
                 reason="External tool access is disabled for this context.",
                 categories=["tool_policy"],

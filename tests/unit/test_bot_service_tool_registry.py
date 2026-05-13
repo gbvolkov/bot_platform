@@ -68,7 +68,6 @@ def test_build_tool_registry_from_config_accepts_custom_editable_entries(monkeyp
                     "allowed_roles": ["default"],
                     "side_effect": "read",
                     "category": "external_access",
-                    "allow_external_access": True,
                     "result_policy": {"scan_result": False},
                 }
             },
@@ -105,7 +104,7 @@ def test_build_tool_registry_from_config_accepts_custom_editable_entries(monkeyp
         require_guardrail_profiles=True,
     )
     assert [tool.name for tool in bundle.tools] == ["demo_runtime_tool_profiled"]
-    assert bundle.guardrail_profiles["demo_runtime_tool_profiled"]["allow_external_access"] is True
+    assert bundle.guardrail_profiles["demo_runtime_tool_profiled"]["category"] == "external_access"
     assert bundle.guardrail_profiles["demo_runtime_tool_profiled"]["name"] == "demo_runtime_tool_profiled"
 
 
@@ -167,7 +166,6 @@ def test_build_agent_tools_combines_internal_and_mcp_tools(monkeypatch):
             "allowed_roles": ["default"],
             "side_effect": "read",
             "category": "external_access",
-            "allow_external_access": True,
             "result_policy": {"scan_result": False},
         },
     )
