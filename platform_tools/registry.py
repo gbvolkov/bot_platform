@@ -206,12 +206,19 @@ class PlatformToolRegistry:
                 else mcp_config.tool_name_prefix
             )
             resolved_connection = _expand_mcp_connection_env(server.connection, server.name)
-            server_tools = await load_mcp_tools(
-                None,
-                connection=resolved_connection,
-                server_name=server.name,
-                tool_name_prefix=use_prefix,
-            )
+            try:
+                server_tools = await load_mcp_tools(
+                    None,
+                    connection=resolved_connection,
+                    server_name=server.name,
+                    tool_name_prefix=use_prefix,
+                )
+            except Exception as exc:
+                raise ToolRegistryError(
+                    "Could not load MCP tools from "
+                    f"{_mcp_server_description(server, resolved_connection)}: "
+                    f"{_summarize_exception(exc)}"
+                ) from exc
             selected_tools = select_mcp_tools(server, server_tools)
             tools.extend(selected_tools)
             for tool in selected_tools:
@@ -462,6 +469,41 @@ def _add_guardrail_profile(
             f"Conflicting guardrail profiles resolved for runtime tool {profile_name!r}."
         )
     profiles[profile_name] = profile
+
+
+def _mcp_server_description(server: MCPServerSpec, connection: Mapping[str, Any]) -> str:
+    url = connection.get("url")
+    if isinstance(url, str) and url:
+        return f"MCP server {server.name!r} at {url!r}"
+    command = connection.get("command")
+    if isinstance(command, str) and command:
+        return f"MCP server {server.name!r} command {command!r}"
+    return f"MCP server {server.name!r}"
+
+
+def _summarize_exception(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        leaves = _exception_group_leaves(exc)
+        if leaves:
+            return "; ".join(_single_exception_summary(item) for item in leaves[:3])
+    return _single_exception_summary(exc)
+
+
+def _exception_group_leaves(exc: BaseExceptionGroup) -> list[BaseException]:
+    leaves: list[BaseException] = []
+    for item in exc.exceptions:
+        if isinstance(item, BaseExceptionGroup):
+            leaves.extend(_exception_group_leaves(item))
+        else:
+            leaves.append(item)
+    return leaves
+
+
+def _single_exception_summary(exc: BaseException) -> str:
+    text = str(exc).strip()
+    if text:
+        return f"{type(exc).__name__}: {text}"
+    return type(exc).__name__
 
 
 def load_tool_registry_config(path: str | Path | None = None) -> dict[str, Any]:

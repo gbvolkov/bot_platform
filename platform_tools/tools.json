@@ -103,6 +103,8 @@
       "aliases": ["maps", "google_maps"],
       "transport": "http",
       "url": "https://mapstools.googleapis.com/mcp",
+      "timeout": 90,
+      "sse_read_timeout": 300,
       "headers": {
         "X-Goog-Api-Key": "${GOOGLE_MAPS_GROUNDING_LITE_API_KEY}"
       },

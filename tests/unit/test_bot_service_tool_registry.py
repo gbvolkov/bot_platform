@@ -34,6 +34,8 @@ def test_default_tool_registry_is_backed_by_editable_config_file():
     assert maps_template is not None
     assert maps_template.name == "maps"
     assert maps_template.connection["url"] == "https://mapstools.googleapis.com/mcp"
+    assert maps_template.connection["timeout"] == 90
+    assert maps_template.connection["sse_read_timeout"] == 300
     assert maps_template.guardrail_profiles["maps_search_places"] == "external_public_no_result_anonymization"
     assert registry.mcp_server_template("google_maps") is maps_template
 
@@ -213,6 +215,35 @@ def test_build_agent_tools_combines_internal_and_mcp_tools(monkeypatch):
 
     assert set(bundle.guardrail_profiles) == {"web_search", "maps_search_places"}
     assert bundle.guardrail_profiles["web_search"]["name"] == "web_search"
+
+
+def test_build_agent_tools_wraps_mcp_connection_failure(monkeypatch):
+    registry = PlatformToolRegistry()
+    registry.register_mcp_server(
+        "googleapis_maps",
+        name="maps",
+        connection={"transport": "http", "url": "https://mapstools.googleapis.com/mcp"},
+        tool_name_prefix=True,
+    )
+
+    async def fake_load_mcp_tools(_session, *, connection, server_name, tool_name_prefix):
+        raise ExceptionGroup("mcp task group", [TimeoutError("connect timed out")])
+
+    monkeypatch.setattr("platform_tools.registry.load_mcp_tools", fake_load_mcp_tools)
+
+    config = registry.parse_agent_tools_config(
+        [
+            {
+                "type": "mcp",
+                "server": "googleapis_maps",
+                "tools": ["search_places"],
+            },
+        ],
+        agent_id="artifact_creator_agent",
+    )
+
+    with pytest.raises(ToolRegistryError, match="MCP server 'maps'.*TimeoutError: connect timed out"):
+        asyncio.run(registry.build_tools(config))
 
 
 def test_agent_registry_injects_configured_tools_into_any_tool_aware_agent(monkeypatch):
