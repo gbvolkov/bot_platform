@@ -9,7 +9,7 @@ Interactive drafting agent for user-defined artifacts. It captures a prompt, gen
 ## Entry module and initialization
 
 - Implementation: `agents/artifact_creator_agent/agent.py`
-- Contract: exposes `initialize_agent(provider, use_platform_store, locale, checkpoint_saver, tools=None, system_prompt=None, guardrails_enabled=False, guardrails_locale="ru-RU", guardrail_scanners_enabled=None, guardrail_scanner_failure_policy="fail_closed", guardrail_banned_topics=None, guardrail_composite_input_scanners=None, guardrail_composite_recent_message_limit=20, guardrail_palimpsest_run_entities=None, guardrail_palimpsest_entity_replacements=None, guardrail_palimpsest_options=None, guardrail_palimpsest_session_options=None)`
+- Contract: exposes `initialize_agent(provider, use_platform_store, locale, checkpoint_saver, tools=None, system_prompt=None, guardrails_locale="ru-RU", guardrail_privacy_enabled=False, guardrail_scanners_enabled=False, guardrail_tool_execution_enabled=False, guardrail_scanner_failure_policy="fail_closed", guardrail_banned_topics=None, guardrail_composite_input_scanners=None, guardrail_composite_recent_message_limit=20, guardrail_palimpsest_run_entities=None, guardrail_palimpsest_entity_replacements=None, guardrail_palimpsest_options=None, guardrail_palimpsest_session_options=None, guardrail_tool_profiles=None, guardrail_unprofiled_tools="block")`
 - Registry variant: `artifact_creator_agent`
 
 ## State graph / phases / routing
@@ -40,9 +40,11 @@ The `run` node uses a LangChain agent with a commit tool. A second confirmation 
 - `platform_guardrails.logging.RedactingJSONFileTracer`
 - Phase 1 privacy foundation for guarded runs; see [Guardrails Implementation Status](../../guardrails/implementation_status.md)
 - Phase 2 scanner enforcement for guarded runs; see [Scanner Enforcement Vulnerability Catalog](../../guardrails/scanner_enforcement_vulnerabilities.md)
-- The prompt-setup node is wrapped with the common guardrail node wrapper when guardrails are enabled, so user-provided system prompts are scanned before being stored.
-- optional Langfuse callbacks when configured; this is allowed regardless of `guardrails_enabled` because the configured Langfuse endpoint is treated as trusted platform observability
-- Palimpsest privacy can be configured per registry variant. `guardrail_palimpsest_entity_replacements` is passed to Palimpsest 0.1.36 `create_session(entity_replacements=...)` and is the single place to choose `fake` or `typed_placeholder` per entity. `guardrail_palimpsest_options` / `guardrail_palimpsest_session_options` pass through library-specific constructor/session options.
+- The prompt-setup node is wrapped with the common guardrail node wrapper when scanner or privacy guardrails are enabled, so user-provided system prompts are scanned or anonymized before being stored.
+- optional Langfuse callbacks when configured; this is allowed regardless of guardrail layer flags because the configured Langfuse endpoint is treated as trusted platform observability
+- Registry config uses `guardrail_policy` in `data/config/bot_service/load.json`; the resolved policy is read from `data/config/guardrails/policies.json` before calling `initialize_agent(...)`.
+- Palimpsest privacy is configured by policy. `privacy.entity_replacements` is passed through as `guardrail_palimpsest_entity_replacements` and is the single place to choose `fake` or `typed_placeholder` per entity. `palimpsest_options` / `palimpsest_session_options` pass through library-specific constructor/session options.
+- Tool result anonymization is configured independently in `platform_tools/tools.json` tool guardrail profiles with `anonymize_result: true` or `privacy.result_transform: "anonymize"`. Agent input anonymization does not automatically anonymize tool results.
 
 ## Outputs and persistence
 

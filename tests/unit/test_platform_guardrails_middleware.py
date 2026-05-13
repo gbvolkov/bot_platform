@@ -94,7 +94,7 @@ def test_model_request_anonymizes_messages_system_and_deanonymizes_response():
     assert [session.session_id for session in processor.sessions] == [scope]
 
 
-def test_model_request_anonymizes_tool_results_for_llm_context():
+def test_model_request_leaves_tool_results_to_per_tool_policy():
     middleware, _processor = _middleware(guard_tool_calls=False)
     runtime = _runtime(
         {
@@ -130,7 +130,7 @@ def test_model_request_anonymizes_tool_results_for_llm_context():
 
     scope = "tenant|user|thread"
     assert captured["messages"][0].content == f"anon[{scope}](hello)"
-    assert captured["messages"][1].content == f"anon[{scope}](raw tool result)"
+    assert captured["messages"][1].content == "raw tool result"
 
 
 def test_model_response_deanonymizes_tool_call_arguments():

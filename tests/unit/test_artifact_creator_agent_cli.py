@@ -104,16 +104,18 @@ def test_save_thread_export_writes_json(tmp_path):
         path=path,
         thread_id="thread-1",
         provider="openai",
-        guardrails_enabled=True,
-        scanners_enabled=None,
+        privacy_enabled=True,
+        scanners_enabled=False,
+        tool_execution_enabled=True,
         turns=[{"user": "u", "assistant": "a"}],
     )
 
     assert saved_path == path
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["thread_id"] == "thread-1"
-    assert payload["guardrails_enabled"] is True
-    assert payload["scanners_enabled"] is None
+    assert payload["privacy_enabled"] is True
+    assert payload["scanners_enabled"] is False
+    assert payload["tool_execution_enabled"] is True
     assert payload["turns"] == [{"user": "u", "assistant": "a"}]
 
 
@@ -127,7 +129,7 @@ def test_resolve_system_prompt_path_prefers_prompts_dir(tmp_path, monkeypatch):
     assert cli._resolve_system_prompt_path("artifact.txt") == prompt_path
 
 
-def test_load_agent_registry_settings_reads_tools_and_guardrail_profiles(tmp_path):
+def test_load_agent_registry_settings_reads_tools_and_guardrail_policy(tmp_path, monkeypatch):
     config_path = tmp_path / "load.json"
     prompt_model_config = {
         "path": "custom/prompt-injection-model",
@@ -138,6 +140,28 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_profiles(tmp_pat
         "pipeline_kwargs": {"max_length": 256, "truncation": True},
         "tokenizer_kwargs": {"extra_special_tokens": {}},
     }
+    monkeypatch.setattr(
+        cli,
+        "resolve_guardrail_policy",
+        lambda policy_id: {
+            "guardrails_locale": "ru-RU",
+            "guardrail_privacy_enabled": True,
+            "guardrail_scanners_enabled": True,
+            "guardrail_tool_execution_enabled": True,
+            "guardrail_scanner_failure_policy": "fail_open",
+            "guardrail_banned_topics": ["topic"],
+            "guardrail_prompt_injection_model": prompt_model_config,
+            "guardrail_prompt_injection_threshold": 0.5,
+            "guardrail_composite_input_scanners": ("PromptInjection",),
+            "guardrail_composite_recent_message_limit": 7,
+            "guardrail_palimpsest_run_entities": ["RU_PERSON"],
+            "guardrail_palimpsest_entity_replacements": {
+                "RU_PERSON": "typed_placeholder"
+            },
+            "guardrail_palimpsest_options": {"placeholder_mode": "typed"},
+            "guardrail_palimpsest_session_options": {"placeholder_style": "typed"},
+        },
+    )
     config_path.write_text(
         json.dumps(
             {
@@ -153,23 +177,7 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_profiles(tmp_pat
                             },
                         ],
                         "params": {
-                            "guardrail_tool_profiles": {
-                                "web_search": {
-                                    "name": "web_search",
-                                    "allowed_roles": ["default"],
-                                    "side_effect": "read",
-                                    "category": "external_access",
-                                }
-                            },
-                            "guardrail_unprofiled_tools": "allow_read_only",
-                            "guardrail_prompt_injection_model": prompt_model_config,
-                            "guardrail_prompt_injection_threshold": 0.5,
-                            "guardrail_palimpsest_run_entities": ["RU_PERSON"],
-                            "guardrail_palimpsest_entity_replacements": {
-                                "RU_PERSON": "typed_placeholder"
-                            },
-                            "guardrail_palimpsest_options": {"placeholder_mode": "typed"},
-                            "guardrail_palimpsest_session_options": {"placeholder_style": "typed"},
+                            "guardrail_policy": "artifact_creator_default"
                         },
                     }
                 ]
@@ -183,11 +191,17 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_profiles(tmp_pat
     assert settings.tools_config.internal_tools[0].name == "web_search_tool"
     assert settings.tools_config.mcp.servers[0].name == "maps"
     assert settings.tools_config.mcp.servers[0].tools == ("search_places",)
-    assert settings.guardrail_tool_profiles["web_search"]["allowed_roles"] == ["default"]
-    assert settings.guardrail_unprofiled_tools == "allow_read_only"
+    assert settings.guardrails_locale == "ru-RU"
+    assert settings.guardrail_privacy_enabled is True
+    assert settings.guardrail_scanners_enabled is True
+    assert settings.guardrail_tool_execution_enabled is True
+    assert settings.guardrail_scanner_failure_policy == "fail_open"
+    assert settings.guardrail_banned_topics == ["topic"]
     assert settings.guardrail_prompt_injection_model == prompt_model_config
     assert settings.guardrail_prompt_injection_model_revision is None
     assert settings.guardrail_prompt_injection_threshold == 0.5
+    assert settings.guardrail_composite_input_scanners == ("PromptInjection",)
+    assert settings.guardrail_composite_recent_message_limit == 7
     assert settings.guardrail_palimpsest_run_entities == ["RU_PERSON"]
     assert settings.guardrail_palimpsest_entity_replacements == {
         "RU_PERSON": "typed_placeholder"
@@ -201,18 +215,24 @@ def test_build_registry_tools_delegates_to_platform_tool_registry(monkeypatch):
     expected_tools = [SimpleNamespace(name="web_search")]
     settings = cli.ArtifactAgentRegistrySettings(
         tools_config=cli.parse_agent_tools_config(["web_search_tool"], agent_id="artifact_creator_agent"),
-        guardrail_tool_profiles={},
-        guardrail_unprofiled_tools="block",
     )
 
-    async def fake_build_agent_tools(tools_config):
+    async def fake_build_agent_tool_bundle(tools_config, *, require_guardrail_profiles=False):
         captured["tools_config"] = tools_config
-        return expected_tools
+        captured["require_guardrail_profiles"] = require_guardrail_profiles
+        return cli.BuiltAgentTools(
+            tools=expected_tools,
+            guardrail_profiles={"web_search": {"name": "web_search"}},
+        )
 
-    monkeypatch.setattr(cli, "build_agent_tools", fake_build_agent_tools)
+    monkeypatch.setattr(cli, "build_agent_tool_bundle", fake_build_agent_tool_bundle)
 
-    assert asyncio.run(cli._build_registry_tools(settings)) == expected_tools
+    bundle = asyncio.run(cli._build_registry_tools(settings, require_guardrail_profiles=True))
+
+    assert bundle.tools == expected_tools
+    assert bundle.guardrail_profiles == {"web_search": {"name": "web_search"}}
     assert captured["tools_config"] is settings.tools_config
+    assert captured["require_guardrail_profiles"] is True
 
 
 def test_normalize_export_path_adds_markdown_suffix(tmp_path, monkeypatch):

@@ -148,6 +148,7 @@ class PalimpsestSessionMiddleware(AgentMiddleware):
 _SCAN_TEXT_KEYS = ("text", "content", "input", "title", "caption", "markdown", "explanation")
 _TOOL_RESULT_TRUSTED_KEY = "guardrail_tool_result_trusted"
 _TOOL_RESULT_TOOL_NAME_KEY = "guardrail_tool_name"
+_TOOL_RESULT_ANONYMIZED_KEY = "guardrail_tool_result_anonymized"
 
 
 def _message_is_untrusted_input(message: BaseMessage) -> bool:
@@ -175,6 +176,10 @@ def _tool_profile_result_is_untrusted(profile: ToolSecurityProfile) -> bool:
         or profile.side_effect == "external"
         or profile.category in {"retrieval", "external_access"}
     )
+
+
+def _tool_profile_anonymizes_result(profile: ToolSecurityProfile) -> bool:
+    return profile.privacy.result_transform == "anonymize"
 
 
 def _decision_is_prompt_injection_block(decision: GuardrailDecision | None) -> bool:
@@ -937,8 +942,12 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         boundary: str,
         transform: ToolPrivacyTransform,
     ) -> Any:
-        if self._privacy is None or transform == "none":
+        if transform == "none":
             return value
+        if self._privacy is None:
+            raise RuntimeError(
+                f"Tool privacy transform {transform!r} for {boundary!r} requires a PrivacyRail."
+            )
         if transform == "anonymize":
             updated = map_strings(
                 value,
@@ -963,6 +972,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         additional_kwargs = dict(getattr(updated, "additional_kwargs", None) or {})
         additional_kwargs[_TOOL_RESULT_TRUSTED_KEY] = not _tool_profile_result_is_untrusted(profile)
         additional_kwargs[_TOOL_RESULT_TOOL_NAME_KEY] = profile.name
+        additional_kwargs[_TOOL_RESULT_ANONYMIZED_KEY] = _tool_profile_anonymizes_result(profile)
         updated.additional_kwargs = additional_kwargs
         return updated
 
@@ -1057,8 +1067,14 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         if decision is not None:
             return message, decision
         minimized = minimize_tool_result(scanned_content, profile.result_policy)
+        transformed = self._apply_privacy_transform(
+            minimized,
+            context,
+            boundary="tool_result",
+            transform=profile.privacy.result_transform,
+        )
         updated = copy(message)
-        updated.content = minimized
+        updated.content = transformed
         return self._mark_tool_result_trust(updated, profile), None
 
     def _process_command_messages(
@@ -1121,7 +1137,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
                             minimize_tool_result(value, profile.result_policy),
                             context,
                             boundary="tool_result",
-                            transform="none",
+                            transform=profile.privacy.result_transform,
                         )
                 return _command_with_update(result, updated_update)
             return result
@@ -1135,7 +1151,12 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         if decision is not None:
             return self._blocked_tool_result(request, decision)
         minimized = minimize_tool_result(scanned, profile.result_policy)
-        return minimized
+        return self._apply_privacy_transform(
+            minimized,
+            context,
+            boundary="tool_result",
+            transform=profile.privacy.result_transform,
+        )
 
     def _authorize(
         self,
@@ -1233,14 +1254,20 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         return self.before_agent(state, runtime)
 
     def _anonymize_messages(self, messages: Iterable[BaseMessage], context: GuardrailContext) -> List[BaseMessage]:
-        transformed = [
-            clone_message_with_transform(
+        transformed: list[BaseMessage] = []
+        changed = False
+        for message in messages:
+            if _message_is_tool_result(message):
+                transformed.append(message)
+                continue
+            updated = clone_message_with_transform(
                 message,
                 lambda text: self._privacy.anonymize_text(text, context, boundary="model_request"),
             )
-            for message in messages
-        ]
-        self._log(context, boundary="model_request", reason="Model request text anonymized.", categories=["privacy", "pii"])
+            transformed.append(updated)
+            changed = True
+        if changed:
+            self._log(context, boundary="model_request", reason="Model request text anonymized.", categories=["privacy", "pii"])
         return transformed
 
     def _anonymize_system_prompt(self, prompt: str | None, context: GuardrailContext) -> str | None:
@@ -1311,14 +1338,23 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         messages: Any,
         context: GuardrailContext,
         transform: Callable[[str], str],
+        *,
+        skip_tool_messages: bool = False,
     ) -> Any:
         if isinstance(messages, RemoveMessage):
             return messages
         if isinstance(messages, BaseMessage):
+            if skip_tool_messages and _message_is_tool_result(messages):
+                return messages
             return clone_message_with_transform(messages, transform)
         if isinstance(messages, list):
             return [
-                self._transform_node_messages(message, context, transform)
+                self._transform_node_messages(
+                    message,
+                    context,
+                    transform,
+                    skip_tool_messages=skip_tool_messages,
+                )
                 if isinstance(message, (BaseMessage, RemoveMessage))
                 else message
                 for message in messages
@@ -1341,6 +1377,7 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
                 updated["messages"],
                 context,
                 lambda text: self._privacy.anonymize_text(text, context, boundary="node_input"),
+                skip_tool_messages=True,
             )
             self._log(context, boundary="node_input", reason="Node input messages anonymized.", categories=["privacy", "pii"])
         for key in state_keys:

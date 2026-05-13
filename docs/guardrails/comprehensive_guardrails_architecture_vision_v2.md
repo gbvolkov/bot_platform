@@ -828,9 +828,9 @@ class RedactingJSONFileTracer(BaseCallbackHandler):
 
 ### Trusted Langfuse Deployment Decision
 
-Langfuse may be enabled regardless of `guardrails_enabled` when the configured
-Langfuse endpoint is part of the trusted platform environment. This is a
-deployment trust decision, not a privacy transformation guarantee.
+Langfuse may be enabled regardless of the individual guardrail layer flags when
+the configured Langfuse endpoint is part of the trusted platform environment.
+This is a deployment trust decision, not a privacy transformation guarantee.
 
 Required operating assumptions:
 

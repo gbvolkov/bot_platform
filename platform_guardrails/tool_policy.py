@@ -24,6 +24,7 @@ ToolCategory = Literal[
 ToolSensitivity = Literal["public", "internal", "confidential", "restricted"]
 ToolPrivacyTransform = Literal["none", "anonymize", "deanonymize"]
 UnprofiledToolPolicy = Literal["block", "allow_read_only"]
+_TOOL_PRIVACY_TRANSFORMS = {"none", "anonymize", "deanonymize"}
 
 
 @dataclass(frozen=True)
@@ -70,9 +71,18 @@ def coerce_tool_privacy_profile(value: ToolPrivacyProfile | Mapping[str, Any] | 
         return ToolPrivacyProfile()
     if isinstance(value, ToolPrivacyProfile):
         return value
+    result_transform = value.get("result_transform")
+    if result_transform is None and "anonymize_result" in value:
+        result_transform = "anonymize" if bool(value["anonymize_result"]) else "none"
     return ToolPrivacyProfile(
-        argument_transform=value.get("argument_transform", "none"),
-        result_transform=value.get("result_transform", "none"),
+        argument_transform=_coerce_tool_privacy_transform(
+            value.get("argument_transform", "none"),
+            field_name="argument_transform",
+        ),
+        result_transform=_coerce_tool_privacy_transform(
+            result_transform or "none",
+            field_name="result_transform",
+        ),
         transform_command_messages_only=bool(value.get("transform_command_messages_only", True)),
         preserve_command_update_keys=_tuple(value.get("preserve_command_update_keys", ())),
     )
@@ -96,6 +106,12 @@ def coerce_tool_result_policy(value: ToolResultPolicy | Mapping[str, Any] | None
 def coerce_tool_security_profile(value: ToolSecurityProfile | Mapping[str, Any]) -> ToolSecurityProfile:
     if isinstance(value, ToolSecurityProfile):
         return value
+    privacy_config = value.get("privacy")
+    if "anonymize_result" in value:
+        privacy_config = {
+            **(dict(privacy_config) if isinstance(privacy_config, Mapping) else {}),
+            "anonymize_result": value["anonymize_result"],
+        }
     return ToolSecurityProfile(
         name=str(value["name"]),
         allowed_roles=_tuple(value.get("allowed_roles", ("default",))),
@@ -106,7 +122,7 @@ def coerce_tool_security_profile(value: ToolSecurityProfile | Mapping[str, Any])
         allow_external_access=bool(value.get("allow_external_access", False)),
         allow_file_export=bool(value.get("allow_file_export", False)),
         allow_sensitive_data_roles=_tuple(value.get("allow_sensitive_data_roles", ())),
-        privacy=coerce_tool_privacy_profile(value.get("privacy")),
+        privacy=coerce_tool_privacy_profile(privacy_config),
         result_policy=coerce_tool_result_policy(value.get("result_policy")),
     )
 
@@ -265,6 +281,14 @@ def _tuple(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
     return tuple(str(item) for item in value)
+
+
+def _coerce_tool_privacy_transform(value: Any, *, field_name: str) -> ToolPrivacyTransform:
+    normalized = str(value or "none").strip().lower()
+    if normalized not in _TOOL_PRIVACY_TRANSFORMS:
+        allowed = ", ".join(sorted(_TOOL_PRIVACY_TRANSFORMS))
+        raise ValueError(f"Tool privacy {field_name} must be one of: {allowed}.")
+    return normalized  # type: ignore[return-value]
 
 
 def _context_value(context: GuardrailContext | Mapping[str, Any], key: str, default: Any = None) -> Any:

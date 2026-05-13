@@ -56,7 +56,11 @@ from platform_guardrails.scanners import (
     LLMGuardScannerRail,
     ScannerFailurePolicy,
 )
-from platform_guardrails.tool_policy import ARTIFACT_CREATOR_TOOL_PROFILES, ToolSecurityProfile
+from platform_guardrails.tool_policy import (
+    ARTIFACT_CREATOR_TOOL_PROFILES,
+    ToolSecurityProfile,
+    coerce_tool_security_profile,
+)
 from platform_guardrails.tool_registry import GuardedToolRegistry
 
 from .state import (
@@ -493,7 +497,7 @@ def _build_guarded_run_tool_bundle(
     extra_tools: List[Any] | None,
     *,
     scanner_rail: LLMGuardScannerRail | None,
-    privacy_rail: PrivacyRail,
+    privacy_rail: PrivacyRail | None,
     guardrail_log_path: str,
     guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None,
     guardrail_unprofiled_tools: Literal["block", "allow_read_only"],
@@ -512,6 +516,26 @@ def _build_guarded_run_tool_bundle(
     )
 
 
+def _tool_profiles_require_privacy(
+    guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None,
+) -> bool:
+    profiles: dict[str, ToolSecurityProfile | Mapping[str, Any]] = dict(ARTIFACT_CREATOR_TOOL_PROFILES)
+    profiles.update(dict(guardrail_tool_profiles or {}))
+    for profile in profiles.values():
+        privacy = coerce_tool_security_profile(profile).privacy
+        if privacy.argument_transform != "none" or privacy.result_transform != "none":
+            return True
+    return False
+
+
+def _tool_profiles_require_scanners(
+    guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None,
+) -> bool:
+    profiles: dict[str, ToolSecurityProfile | Mapping[str, Any]] = dict(ARTIFACT_CREATOR_TOOL_PROFILES)
+    profiles.update(dict(guardrail_tool_profiles or {}))
+    return any(coerce_tool_security_profile(profile).result_policy.scan_result for profile in profiles.values())
+
+
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
     use_platform_store: bool = False,
@@ -519,9 +543,10 @@ def initialize_agent(
     checkpoint_saver=None,
     tools: List[Any] | None = None,
     system_prompt: Any | None = None,
-    guardrails_enabled: bool = False,
     guardrails_locale: str = "ru-RU",
-    guardrail_scanners_enabled: bool | None = None,
+    guardrail_privacy_enabled: bool = False,
+    guardrail_scanners_enabled: bool = False,
+    guardrail_tool_execution_enabled: bool = False,
     guardrail_scanner_failure_policy: ScannerFailurePolicy = "fail_closed",
     guardrail_banned_topics: List[str] | None = None,
     guardrail_prompt_injection_model: str | Mapping[str, Any] | None = None,
@@ -563,7 +588,21 @@ def initialize_agent(
     tool_execution_middleware = None
     scanner_rail = None
     run_tools = [commit_artifact_final_text, *(tools or [])]
-    if guardrails_enabled:
+    guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
+    privacy_rail = None
+    if (
+        guardrail_tool_execution_enabled
+        and not guardrail_scanners_enabled
+        and _tool_profiles_require_scanners(guardrail_tool_profiles)
+    ):
+        raise RuntimeError(
+            "Tool execution guardrails selected a profile with result_policy.scan_result=true, "
+            "but guardrail_scanners_enabled is false."
+        )
+    if guardrail_privacy_enabled or (
+        guardrail_tool_execution_enabled
+        and _tool_profiles_require_privacy(guardrail_tool_profiles)
+    ):
         palimpsest_kwargs: dict[str, Any] = {"locale": guardrails_locale}
         if guardrail_palimpsest_run_entities is not None:
             palimpsest_kwargs["run_entities"] = guardrail_palimpsest_run_entities
@@ -574,7 +613,10 @@ def initialize_agent(
         if guardrail_palimpsest_session_options is not None:
             palimpsest_kwargs["palimpsest_session_options"] = guardrail_palimpsest_session_options
         privacy_rail = PrivacyRail.from_palimpsest(**palimpsest_kwargs)
-        guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
+
+    if guardrail_privacy_enabled:
+        if privacy_rail is None:
+            raise RuntimeError("guardrail_privacy_enabled requires PrivacyRail initialization.")
         set_prompt_privacy_middleware = PrivacyModelRequestMiddleware(
             privacy_rail,
             agent_name="artifact_creator_agent.set_prompt",
@@ -592,51 +634,51 @@ def initialize_agent(
             event_log_path=guardrail_log_path,
         )
 
-        if guardrail_scanners_enabled is None:
-            guardrail_scanners_enabled = guardrails_enabled
-        if guardrail_scanners_enabled:
-            scanner_profile_kwargs: dict[str, Any] = {
-                "banned_topics": guardrail_banned_topics,
-                "failure_policy": guardrail_scanner_failure_policy,
-            }
-            if guardrail_prompt_injection_model is not None:
-                scanner_profile_kwargs["prompt_injection_model"] = guardrail_prompt_injection_model
-            if guardrail_prompt_injection_model_revision is not None:
-                scanner_profile_kwargs["prompt_injection_model_revision"] = guardrail_prompt_injection_model_revision
-            if guardrail_prompt_injection_threshold is not None:
-                scanner_profile_kwargs["prompt_injection_threshold"] = guardrail_prompt_injection_threshold
-            scanner_profile = LLMGuardScannerProfile.artifact_creator_default(
-                **scanner_profile_kwargs,
-            )
-            scanner_rail = LLMGuardScannerRail(scanner_profile)
-            set_prompt_security_middleware = SecurityScannerMiddleware(
-                scanner_rail,
-                agent_name="artifact_creator_agent.set_prompt",
-                event_log_path=guardrail_log_path,
-                scan_state_keys=("system_prompt",),
-                composite_input_scanners=guardrail_composite_input_scanners,
-                composite_recent_message_limit=guardrail_composite_recent_message_limit,
-                composite_message_roles=("human", "tool"),
-            )
-            run_security_middleware = SecurityScannerMiddleware(
-                scanner_rail,
-                agent_name="artifact_creator_agent.run",
-                event_log_path=guardrail_log_path,
-                scan_system_prompt=True,
-                scan_state_keys=("system_prompt",),
-                composite_input_scanners=guardrail_composite_input_scanners,
-                composite_recent_message_limit=guardrail_composite_recent_message_limit,
-            )
-            confirmation_security_middleware = SecurityScannerMiddleware(
-                scanner_rail,
-                agent_name="artifact_creator_agent.confirm",
-                event_log_path=guardrail_log_path,
-                composite_input_scanners=guardrail_composite_input_scanners,
-                composite_recent_message_limit=guardrail_composite_recent_message_limit,
-                blocked_structured_response_factory=lambda _decision: UserConfirmation(
-                    is_artifact_confirmed=False
-                ),
-            )
+    if guardrail_scanners_enabled:
+        scanner_profile_kwargs: dict[str, Any] = {
+            "banned_topics": guardrail_banned_topics,
+            "failure_policy": guardrail_scanner_failure_policy,
+        }
+        if guardrail_prompt_injection_model is not None:
+            scanner_profile_kwargs["prompt_injection_model"] = guardrail_prompt_injection_model
+        if guardrail_prompt_injection_model_revision is not None:
+            scanner_profile_kwargs["prompt_injection_model_revision"] = guardrail_prompt_injection_model_revision
+        if guardrail_prompt_injection_threshold is not None:
+            scanner_profile_kwargs["prompt_injection_threshold"] = guardrail_prompt_injection_threshold
+        scanner_profile = LLMGuardScannerProfile.artifact_creator_default(
+            **scanner_profile_kwargs,
+        )
+        scanner_rail = LLMGuardScannerRail(scanner_profile)
+        set_prompt_security_middleware = SecurityScannerMiddleware(
+            scanner_rail,
+            agent_name="artifact_creator_agent.set_prompt",
+            event_log_path=guardrail_log_path,
+            scan_state_keys=("system_prompt",),
+            composite_input_scanners=guardrail_composite_input_scanners,
+            composite_recent_message_limit=guardrail_composite_recent_message_limit,
+            composite_message_roles=("human", "tool"),
+        )
+        run_security_middleware = SecurityScannerMiddleware(
+            scanner_rail,
+            agent_name="artifact_creator_agent.run",
+            event_log_path=guardrail_log_path,
+            scan_system_prompt=True,
+            scan_state_keys=("system_prompt",),
+            composite_input_scanners=guardrail_composite_input_scanners,
+            composite_recent_message_limit=guardrail_composite_recent_message_limit,
+        )
+        confirmation_security_middleware = SecurityScannerMiddleware(
+            scanner_rail,
+            agent_name="artifact_creator_agent.confirm",
+            event_log_path=guardrail_log_path,
+            composite_input_scanners=guardrail_composite_input_scanners,
+            composite_recent_message_limit=guardrail_composite_recent_message_limit,
+            blocked_structured_response_factory=lambda _decision: UserConfirmation(
+                is_artifact_confirmed=False
+            ),
+        )
+
+    if guardrail_tool_execution_enabled:
         guarded_tool_bundle = _build_guarded_run_tool_bundle(
             tools,
             scanner_rail=scanner_rail,
@@ -651,7 +693,7 @@ def initialize_agent(
     builder = StateGraph(ArtifactCreatorAgentState)
     builder.add_node("greetings", create_greetings_node(system_prompt))
     set_prompt_node = create_set_prompt_node(llm)
-    if guardrails_enabled:
+    if set_prompt_security_middleware is not None or set_prompt_privacy_middleware is not None:
         set_prompt_node = guarded_node(
             set_prompt_node,
             security_middleware=set_prompt_security_middleware,

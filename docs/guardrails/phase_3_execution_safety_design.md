@@ -520,18 +520,25 @@ Expected behavior:
 
 ### 7.8 Optional extra tools in `artifact_creator_agent`
 
-`initialize_agent(..., tools=[...])` currently accepts arbitrary extra tools.
-For guarded execution, extra tools need profiles.
+`initialize_agent(..., tools=[...])` accepts arbitrary extra tools. For guarded
+execution, extra tools need profiles. The platform registry now resolves those
+profiles from `platform_tools/tools.json` before agent initialization and passes
+the concrete runtime-name mapping into the agent.
 
-Add optional parameters:
+The agent still accepts optional resolved parameters for direct tests or
+non-registry bootstraps:
 
 ```python
 guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None = None
 guardrail_unprofiled_tools: Literal["block", "allow_read_only"] = "block"
 ```
 
-When `guardrails_enabled=True`, unprofiled extra tools should be blocked by
-default. This is safer and makes tool exposure explicit.
+When `guardrail_tool_execution_enabled=True`, unprofiled extra tools should be
+blocked by default. This is safer and makes tool exposure explicit. If the
+profile asks for `result_policy.scan_result=true`, scanner guardrails must also
+be enabled. If the profile asks for `anonymize_result=true` or
+`privacy.result_transform="anonymize"`, a shared `PrivacyRail` must be
+available; this can be true even when model input anonymization is disabled.
 
 ## 8. New Module: `platform_guardrails/retrieval.py`
 
@@ -839,7 +846,8 @@ so Phase 3 does not need a tool guard there unless future tools are added.
 
 ## 12. Configuration Additions
 
-`artifact_creator_agent.initialize_agent(...)` should add:
+`artifact_creator_agent.initialize_agent(...)` accepts resolved tool profile
+parameters:
 
 ```python
 guardrail_tool_profiles: Mapping[str, Any] | None = None
@@ -848,8 +856,14 @@ guardrail_sql_enabled: bool = False
 guardrail_retrieval_enabled: bool = False
 ```
 
-Only `guardrail_tool_profiles` and `guardrail_unprofiled_tools` are expected to
-be used by the artifact creator sample immediately.
+Agent load config should not define `guardrail_tool_profiles`. The runtime
+contract is:
+
+- `data/config/bot_service/load.json` selects `guardrail_policy`;
+- `data/config/guardrails/policies.json` defines agent-level layer switches and
+  scanner/privacy settings;
+- `platform_tools/tools.json` defines `tool_guardrail_profiles` and attaches
+  them to internal tool templates or MCP server templates.
 
 For BI/reporting agents, guarded SQL should be configured through `init_context`
 or future policy files:

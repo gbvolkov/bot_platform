@@ -80,7 +80,7 @@ agents.
 ### Phase 1 Adoption
 
 `artifact_creator_agent` uses the Phase 1 privacy middleware when
-`guardrails_enabled=True`.
+`guardrail_privacy_enabled=True`.
 
 Other agents may still use older patterns or no guardrail middleware. Migrating
 all agents to the common foundation remains rollout work, not a Phase 2 scanner
@@ -228,11 +228,12 @@ Examples:
 
 ### Artifact Creator Integration
 
-`initialize_agent(...)` accepts these guardrail scanner parameters:
+`initialize_agent(...)` accepts these guardrail parameters:
 
-- `guardrails_enabled`
 - `guardrails_locale`
+- `guardrail_privacy_enabled`
 - `guardrail_scanners_enabled`
+- `guardrail_tool_execution_enabled`
 - `guardrail_scanner_failure_policy`
 - `guardrail_banned_topics`
 - `guardrail_prompt_injection_model`
@@ -252,18 +253,30 @@ to `fake` or `typed_placeholder`. These configured options are required: if the
 installed Palimpsest API cannot accept them, initialization fails instead of
 falling back to another anonymization mode.
 
-`set_prompt` is guarded with the common node wrapper when guardrails are
-enabled, so user-provided system prompt text is scanned before it can be stored
-in `state.system_prompt`.
+`set_prompt` is guarded with the common node wrapper when either scanner or
+privacy guardrails are enabled, so user-provided system prompt text is scanned
+or anonymized before it can be stored in `state.system_prompt`.
 
-`data/config/bot_service/load.json` enables guardrails for
-`artifact_creator_agent`, sets scanner failure policy explicitly, and configures
-`gbv/mdeberta-ru-prompt-injection` as the prompt-injection scanner model. The
-configuration follows the current model README's balanced threshold `0.5`, uses
-`max_length=256`, maps model labels to LLM Guard's expected `INJECTION` label,
-and carries the tokenizer compatibility override locally in config. The
-revision is not pinned by default, so the Hugging Face repo default branch or a
-local downloaded copy can be used.
+`data/config/bot_service/load.json` now references guardrails by policy id only:
+`guardrail_policy: "artifact_creator_default"`. The policy definition lives in
+`data/config/guardrails/policies.json` and independently controls privacy,
+scanner, and tool-execution layers. Inline agent params such as
+`guardrail_privacy_enabled` or `guardrail_tool_profiles` are intentionally not
+part of the load config contract.
+
+Tool execution profiles live with the tool registry in
+`platform_tools/tools.json`. Internal tool templates use `guardrail_profile`;
+MCP server templates use `guardrail_profiles` keyed by runtime tool name, with
+unprefixed MCP names also accepted. When `tool_execution_enabled=false`, these
+tool profile references are inert. When it is true, every selected runtime tool
+must resolve a valid profile or startup fails.
+
+Tool result anonymization is controlled independently per tool profile. Set
+`anonymize_result: true` on a tool registry profile, or use
+`privacy.result_transform: "anonymize"` for the equivalent lower-level form.
+When it is false or omitted, the tool result is not anonymized merely because
+user/model input anonymization is enabled for the agent. A profile with
+`result_policy.scan_result=true` requires scanner guardrails to be enabled.
 
 `artifact_creator_agent_cli.py` provides a manual CLI for exercising the guarded
 agent path with persistent SQLite checkpoints.

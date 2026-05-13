@@ -15,11 +15,12 @@ from collections.abc import AsyncIterator
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from agents.utils import ModelType
+from platform_guardrails.config import inline_guardrail_config_keys, resolve_guardrail_policy
 
 from .config import settings
 from .initialize_agents import parse_yaml
 from .schemas import AgentInfo, ContentType
-from .tool_registry import AgentToolsConfig, build_agent_tools, parse_agent_tools_config
+from .tool_registry import AgentToolsConfig, build_agent_tool_bundle, parse_agent_tools_config
 
 
 LOG = logging.getLogger(__name__)
@@ -248,6 +249,15 @@ def _build_definitions_from_config(
         if not isinstance(params, dict):
             raise ValueError(f"Agent '{agent_id}' params must be a mapping.")
         params = dict(params)
+        guardrail_policy = params.pop("guardrail_policy", None)
+        if guardrail_policy is not None:
+            inline_keys = inline_guardrail_config_keys(params)
+            if inline_keys:
+                names = ", ".join(sorted(inline_keys))
+                raise ValueError(
+                    f"Agent '{agent_id}' mixes guardrail_policy with inline guardrail params: {names}."
+                )
+            params.update(resolve_guardrail_policy(guardrail_policy))
         tools_config = parse_agent_tools_config(entry.get("tools"), agent_id=agent_id)
         init_context = _parse_init_context(entry.get("init_context"), agent_id=agent_id)
         provider = _coerce_provider(params.pop("provider", None), default_provider)
@@ -398,7 +408,30 @@ class AgentRegistry:
                         f"Agent '{agent_id}' config declares tools, but initialize_agent() "
                         "does not accept a 'tools' parameter."
                     )
-                configured_tools = await build_agent_tools(definition.tools_config)
+                require_profiles = bool(params.get("guardrail_tool_execution_enabled", False))
+                tool_bundle = await build_agent_tool_bundle(
+                    definition.tools_config,
+                    require_guardrail_profiles=require_profiles,
+                )
+                configured_tools = tool_bundle.tools
+                if require_profiles:
+                    if "guardrail_tool_profiles" not in definition.param_names and not definition.accepts_kwargs:
+                        raise ValueError(
+                            f"Agent '{agent_id}' enables tool execution guardrails, but initialize_agent() "
+                            "does not accept a 'guardrail_tool_profiles' parameter."
+                        )
+                    existing_profiles = params.get("guardrail_tool_profiles")
+                    if existing_profiles is None:
+                        params["guardrail_tool_profiles"] = dict(tool_bundle.guardrail_profiles)
+                    elif isinstance(existing_profiles, dict):
+                        params["guardrail_tool_profiles"] = {
+                            **existing_profiles,
+                            **tool_bundle.guardrail_profiles,
+                        }
+                    else:
+                        raise ValueError(
+                            f"Agent '{agent_id}' params.guardrail_tool_profiles must be an object."
+                        )
                 existing_tools = params.get("tools")
                 if existing_tools is None:
                     params["tools"] = configured_tools

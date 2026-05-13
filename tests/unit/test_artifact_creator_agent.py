@@ -190,7 +190,7 @@ def test_guardrail_blocked_idless_message_is_removed_from_compiled_agent_state(m
 
     graph = artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
+        guardrail_scanners_enabled=True,
     )
     result = graph.invoke(
         {
@@ -246,7 +246,7 @@ def test_set_prompt_is_guarded_before_system_prompt_is_stored(monkeypatch):
 
     graph = artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
+        guardrail_scanners_enabled=True,
     )
     result = graph.invoke(
         {
@@ -294,7 +294,7 @@ def test_set_prompt_stores_sanitized_prompt_after_scanner_redaction(monkeypatch)
 
     graph = artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
+        guardrail_scanners_enabled=True,
     )
     result = graph.invoke(
         {
@@ -353,7 +353,7 @@ def test_set_prompt_composite_scan_excludes_trusted_greeting(monkeypatch):
 
     graph = artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
+        guardrail_scanners_enabled=True,
     )
     result = graph.invoke(
         {
@@ -405,7 +405,7 @@ def test_composite_fragmented_attack_blocks_before_run_model(monkeypatch):
 
     graph = artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
+        guardrail_scanners_enabled=True,
     )
     result = graph.invoke(
         {
@@ -454,8 +454,7 @@ def test_compiled_agent_privacy_cycle_anonymizes_model_input_and_deanonymizes_ou
 
     graph = artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
-        guardrail_scanners_enabled=False,
+        guardrail_privacy_enabled=True,
     )
     result = graph.invoke(
         {
@@ -803,7 +802,9 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
     artifact_agent.initialize_agent(
         provider=ModelType.GPT,
         checkpoint_saver="checkpoint",
-        guardrails_enabled=True,
+        guardrail_privacy_enabled=True,
+        guardrail_scanners_enabled=True,
+        guardrail_tool_execution_enabled=True,
         guardrails_locale="ru-RU",
         guardrail_scanner_failure_policy="fail_open",
         guardrail_banned_topics=["generic safety"],
@@ -916,15 +917,22 @@ def test_initialize_agent_includes_profiled_extra_tool_in_guarded_bundle(monkeyp
     extra_tool = SimpleNamespace(name="extra_lookup")
     artifact_agent.initialize_agent(
         provider=ModelType.GPT,
-        guardrails_enabled=True,
-        guardrail_scanners_enabled=False,
+        guardrail_tool_execution_enabled=True,
         tools=[extra_tool],
         guardrail_tool_profiles={
+            "commit_artifact_final_text": {
+                "name": "commit_artifact_final_text",
+                "allowed_roles": ("default",),
+                "side_effect": "write",
+                "category": "internal_state",
+                "result_policy": {"scan_result": False},
+            },
             "extra_lookup": {
                 "name": "extra_lookup",
                 "allowed_roles": ("default",),
                 "side_effect": "read",
                 "category": "internal_state",
+                "result_policy": {"scan_result": False},
             }
         },
     )

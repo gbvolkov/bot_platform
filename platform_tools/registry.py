@@ -6,9 +6,12 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from langchain_mcp_adapters.tools import load_mcp_tools
+
+from platform_guardrails.tool_policy import coerce_tool_security_profile
+from platform_guardrails.tool_registry import get_tool_name
 
 
 _BRACED_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
@@ -35,11 +38,19 @@ class InternalToolSpec:
 
 
 @dataclass(frozen=True)
+class InternalToolTemplate:
+    id: str
+    builder: Callable[..., Any]
+    guardrail_profile: Any = None
+
+
+@dataclass(frozen=True)
 class MCPServerSpec:
     name: str
     connection: dict[str, Any]
     tools: tuple[str, ...] | None = None
     tool_name_prefix: bool | None = None
+    guardrail_profiles: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -55,6 +66,7 @@ class MCPServerTemplate:
     connection: dict[str, Any]
     tools: tuple[str, ...] | None = None
     tool_name_prefix: bool | None = None
+    guardrail_profiles: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -67,18 +79,43 @@ class AgentToolsConfig:
         return bool(self.internal_tools or self.mcp.servers)
 
 
+@dataclass(frozen=True)
+class BuiltAgentTools:
+    tools: list[Any]
+    guardrail_profiles: dict[str, dict[str, Any]]
+
+
 class PlatformToolRegistry:
     """Central registry for named internal tools and MCP server templates."""
 
     def __init__(self) -> None:
-        self._internal_builders: dict[str, Callable[..., Any]] = {}
+        self._internal_tools: dict[str, InternalToolTemplate] = {}
         self._mcp_servers: dict[str, MCPServerTemplate] = {}
+        self._tool_guardrail_profiles: dict[str, dict[str, Any]] = {}
 
-    def register_internal_tool(self, name: str, builder: Callable[..., Any]) -> None:
+    def register_internal_tool(
+        self,
+        name: str,
+        builder: Callable[..., Any],
+        *,
+        guardrail_profile: Any = None,
+    ) -> None:
         tool_name = _require_str(name, "internal tool name")
-        if tool_name in self._internal_builders:
+        if tool_name in self._internal_tools:
             raise ToolRegistryError(f"Duplicate internal tool registration: {tool_name}")
-        self._internal_builders[tool_name] = builder
+        self._internal_tools[tool_name] = InternalToolTemplate(
+            id=tool_name,
+            builder=builder,
+            guardrail_profile=guardrail_profile,
+        )
+
+    def register_tool_guardrail_profile(self, profile_id: str, profile: dict[str, Any]) -> None:
+        resolved_id = _require_str(profile_id, "tool guardrail profile id")
+        if resolved_id in self._tool_guardrail_profiles:
+            raise ToolRegistryError(f"Duplicate tool guardrail profile: {resolved_id}")
+        if not isinstance(profile, dict):
+            raise ToolRegistryError(f"Tool guardrail profile '{resolved_id}' must be an object.")
+        self._tool_guardrail_profiles[resolved_id] = dict(profile)
 
     def register_mcp_server(
         self,
@@ -88,6 +125,7 @@ class PlatformToolRegistry:
         connection: dict[str, Any],
         tools: tuple[str, ...] | list[str] | None = None,
         tool_name_prefix: bool | None = None,
+        guardrail_profiles: dict[str, Any] | None = None,
         aliases: tuple[str, ...] | list[str] = (),
     ) -> None:
         resolved_id = _require_str(template_id, "mcp server id")
@@ -97,41 +135,70 @@ class PlatformToolRegistry:
             connection=dict(connection),
             tools=None if tools is None else tuple(_require_str(item, "mcp server tool") for item in tools),
             tool_name_prefix=tool_name_prefix,
+            guardrail_profiles=dict(guardrail_profiles or {}),
         )
         self._register_mcp_template(resolved_id, template)
         for alias in aliases:
             self._register_mcp_template(_require_str(alias, "mcp server alias"), template)
 
     def list_internal_tools(self) -> list[str]:
-        return sorted(self._internal_builders)
+        return sorted(self._internal_tools)
 
     def mcp_server_template(self, template_id: str) -> MCPServerTemplate | None:
         return self._mcp_servers.get(template_id)
 
     def build_internal_tools(self, specs: list[InternalToolSpec] | tuple[InternalToolSpec, ...]) -> list[Any]:
+        return self.build_internal_tool_bundle(specs).tools
+
+    def build_internal_tool_bundle(
+        self,
+        specs: list[InternalToolSpec] | tuple[InternalToolSpec, ...],
+        *,
+        require_guardrail_profiles: bool = False,
+    ) -> BuiltAgentTools:
         tools: list[Any] = []
+        profiles: dict[str, dict[str, Any]] = {}
         for spec in specs:
+            profile_ref = None
             if spec.import_path is not None:
                 builder = _load_imported_builder(spec.import_path)
             else:
                 if spec.name is None:
                     raise ToolRegistryError("Internal tool spec must define either 'name' or 'import'.")
-                builder = self._internal_builders.get(spec.name)
-                if builder is None:
+                template = self._internal_tools.get(spec.name)
+                if template is None:
                     available = ", ".join(self.list_internal_tools())
                     raise ToolRegistryError(
                         f"Unknown internal tool '{spec.name}'. Available tools: {available}"
                     )
+                builder = template.builder
+                profile_ref = template.guardrail_profile
 
             built = builder(**spec.params)
-            if isinstance(built, (list, tuple)):
-                tools.extend(built)
-            else:
-                tools.append(built)
-        return tools
+            built_tools = list(built) if isinstance(built, (list, tuple)) else [built]
+            tools.extend(built_tools)
+            for tool in built_tools:
+                profile = self._resolve_tool_guardrail_profile(
+                    profile_ref,
+                    tool_name=get_tool_name(tool),
+                    required=require_guardrail_profiles,
+                    source=f"internal tool {spec.name or spec.import_path!r}",
+                )
+                if profile is not None:
+                    _add_guardrail_profile(profiles, profile)
+        return BuiltAgentTools(tools=tools, guardrail_profiles=profiles)
 
     async def load_mcp_tools_from_config(self, mcp_config: MCPConfig) -> list[Any]:
+        return (await self.load_mcp_tool_bundle(mcp_config)).tools
+
+    async def load_mcp_tool_bundle(
+        self,
+        mcp_config: MCPConfig,
+        *,
+        require_guardrail_profiles: bool = False,
+    ) -> BuiltAgentTools:
         tools: list[Any] = []
+        profiles: dict[str, dict[str, Any]] = {}
         for server in mcp_config.servers:
             use_prefix = (
                 server.tool_name_prefix
@@ -145,15 +212,46 @@ class PlatformToolRegistry:
                 server_name=server.name,
                 tool_name_prefix=use_prefix,
             )
-            tools.extend(select_mcp_tools(server, server_tools))
-        return tools
+            selected_tools = select_mcp_tools(server, server_tools)
+            tools.extend(selected_tools)
+            for tool in selected_tools:
+                tool_name = get_tool_name(tool)
+                profile = self._resolve_tool_guardrail_profile(
+                    _mcp_profile_ref(server, tool_name),
+                    tool_name=tool_name,
+                    required=require_guardrail_profiles,
+                    source=f"MCP server {server.name!r} tool {tool_name!r}",
+                )
+                if profile is not None:
+                    _add_guardrail_profile(profiles, profile)
+        return BuiltAgentTools(tools=tools, guardrail_profiles=profiles)
 
     async def build_tools(self, config: AgentToolsConfig) -> list[Any]:
+        return (await self.build_tool_bundle(config)).tools
+
+    async def build_tool_bundle(
+        self,
+        config: AgentToolsConfig,
+        *,
+        require_guardrail_profiles: bool = False,
+    ) -> BuiltAgentTools:
         if not config.configured:
-            return []
-        internal_tools = self.build_internal_tools(config.internal_tools)
-        mcp_tools = await self.load_mcp_tools_from_config(config.mcp)
-        return [*internal_tools, *mcp_tools]
+            return BuiltAgentTools(tools=[], guardrail_profiles={})
+        internal = self.build_internal_tool_bundle(
+            config.internal_tools,
+            require_guardrail_profiles=require_guardrail_profiles,
+        )
+        mcp = await self.load_mcp_tool_bundle(
+            config.mcp,
+            require_guardrail_profiles=require_guardrail_profiles,
+        )
+        profiles = dict(internal.guardrail_profiles)
+        for profile in mcp.guardrail_profiles.values():
+            _add_guardrail_profile(profiles, profile)
+        return BuiltAgentTools(
+            tools=[*internal.tools, *mcp.tools],
+            guardrail_profiles=profiles,
+        )
 
     def parse_agent_tools_config(self, value: Any, *, agent_id: str) -> AgentToolsConfig:
         if value is None:
@@ -211,6 +309,15 @@ class PlatformToolRegistry:
         agent_id: str,
         index: int,
     ) -> tuple[MCPServerSpec, bool | None]:
+        forbidden_guardrail_fields = {"guardrail_profile", "guardrail_profiles", "tool_guardrail_profile"}
+        forbidden = forbidden_guardrail_fields.intersection(entry)
+        if forbidden:
+            names = ", ".join(sorted(forbidden))
+            raise ToolRegistryError(
+                f"Agent '{agent_id}' tools[{index}] cannot define guardrail fields: {names}. "
+                "Configure tool guardrail profiles in platform_tools/tools.json."
+            )
+
         raw_server_id = entry.get("server") or entry.get("name") or entry.get("id")
         server_id = _require_str(raw_server_id, f"tools[{index}].server")
         template = self.mcp_server_template(server_id)
@@ -235,6 +342,7 @@ class PlatformToolRegistry:
                     "tools",
                     "tool_name_prefix",
                     "mcp_tool_name_prefix",
+                    *forbidden_guardrail_fields,
                 }
             }
         )
@@ -285,9 +393,75 @@ class PlatformToolRegistry:
                 connection=connection,
                 tools=selected_tools,
                 tool_name_prefix=raw_prefix,
+                guardrail_profiles=dict(template.guardrail_profiles if template is not None else {}),
             ),
             global_prefix,
         )
+
+    def _resolve_tool_guardrail_profile(
+        self,
+        profile_ref: Any,
+        *,
+        tool_name: str | None,
+        required: bool,
+        source: str,
+    ) -> dict[str, Any] | None:
+        if not tool_name:
+            if required:
+                raise ToolRegistryError(f"{source} is missing a runtime tool name for guardrail profile binding.")
+            return None
+        if profile_ref is None:
+            if required:
+                raise ToolRegistryError(f"{source} is missing a guardrail profile.")
+            return None
+        if isinstance(profile_ref, str):
+            profile = self._tool_guardrail_profiles.get(profile_ref)
+            if profile is None:
+                if required:
+                    raise ToolRegistryError(f"{source} references unknown guardrail profile {profile_ref!r}.")
+                return None
+            return _validated_runtime_profile({**profile, "name": tool_name}, source=source)
+        if isinstance(profile_ref, Mapping):
+            return _validated_runtime_profile({**dict(profile_ref), "name": tool_name}, source=source)
+        if required:
+            raise ToolRegistryError(f"{source} guardrail profile reference must be a string or object.")
+        return None
+
+
+def _mcp_profile_ref(server: MCPServerSpec, tool_name: str | None) -> Any:
+    if not tool_name:
+        return None
+    if tool_name in server.guardrail_profiles:
+        return server.guardrail_profiles[tool_name]
+    prefixed_name = f"{server.name}_{tool_name}"
+    if prefixed_name in server.guardrail_profiles:
+        return server.guardrail_profiles[prefixed_name]
+    prefix = f"{server.name}_"
+    if tool_name.startswith(prefix):
+        unprefixed_name = tool_name[len(prefix) :]
+        return server.guardrail_profiles.get(unprefixed_name)
+    return None
+
+
+def _validated_runtime_profile(profile: dict[str, Any], *, source: str) -> dict[str, Any]:
+    try:
+        coerce_tool_security_profile(profile)
+    except Exception as exc:  # noqa: BLE001
+        raise ToolRegistryError(f"{source} has an invalid guardrail profile: {exc}") from exc
+    return profile
+
+
+def _add_guardrail_profile(
+    profiles: dict[str, dict[str, Any]],
+    profile: dict[str, Any],
+) -> None:
+    profile_name = _require_str(profile.get("name"), "tool guardrail profile name")
+    existing = profiles.get(profile_name)
+    if existing is not None and existing != profile:
+        raise ToolRegistryError(
+            f"Conflicting guardrail profiles resolved for runtime tool {profile_name!r}."
+        )
+    profiles[profile_name] = profile
 
 
 def load_tool_registry_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -301,12 +475,18 @@ def load_tool_registry_config(path: str | Path | None = None) -> dict[str, Any]:
 def build_tool_registry_from_config(config: dict[str, Any]) -> PlatformToolRegistry:
     registry = PlatformToolRegistry()
 
+    raw_tool_profiles = config.get("tool_guardrail_profiles") or {}
+    if not isinstance(raw_tool_profiles, dict):
+        raise ToolRegistryError("Tool registry config field 'tool_guardrail_profiles' must be an object.")
+    for profile_id, profile in raw_tool_profiles.items():
+        registry.register_tool_guardrail_profile(str(profile_id), profile)
+
     raw_internal_tools = config.get("internal_tools") or []
     if not isinstance(raw_internal_tools, list):
         raise ToolRegistryError("Tool registry config field 'internal_tools' must be a list.")
     for index, entry in enumerate(raw_internal_tools):
-        tool_id, builder = _parse_registry_internal_tool(entry, index=index)
-        registry.register_internal_tool(tool_id, builder)
+        tool_id, builder, guardrail_profile = _parse_registry_internal_tool(entry, index=index)
+        registry.register_internal_tool(tool_id, builder, guardrail_profile=guardrail_profile)
 
     raw_mcp_servers = config.get("mcp_servers")
     if raw_mcp_servers is None:
@@ -314,13 +494,22 @@ def build_tool_registry_from_config(config: dict[str, Any]) -> PlatformToolRegis
     if not isinstance(raw_mcp_servers, list):
         raise ToolRegistryError("Tool registry config field 'mcp_servers' must be a list.")
     for index, entry in enumerate(raw_mcp_servers):
-        template_id, name, connection, tools, tool_name_prefix, aliases = _parse_registry_mcp_server(entry, index=index)
+        (
+            template_id,
+            name,
+            connection,
+            tools,
+            tool_name_prefix,
+            guardrail_profiles,
+            aliases,
+        ) = _parse_registry_mcp_server(entry, index=index)
         registry.register_mcp_server(
             template_id,
             name=name,
             connection=connection,
             tools=tools,
             tool_name_prefix=tool_name_prefix,
+            guardrail_profiles=guardrail_profiles,
             aliases=aliases,
         )
 
@@ -345,6 +534,17 @@ async def load_mcp_tools_from_config(mcp_config: MCPConfig) -> list[Any]:
 
 async def build_agent_tools(config: AgentToolsConfig) -> list[Any]:
     return await default_tool_registry.build_tools(config)
+
+
+async def build_agent_tool_bundle(
+    config: AgentToolsConfig,
+    *,
+    require_guardrail_profiles: bool = False,
+) -> BuiltAgentTools:
+    return await default_tool_registry.build_tool_bundle(
+        config,
+        require_guardrail_profiles=require_guardrail_profiles,
+    )
 
 
 def parse_agent_tools_config(value: Any, *, agent_id: str) -> AgentToolsConfig:
@@ -396,6 +596,15 @@ def _parse_internal_tool_entry(
     agent_id: str,
     index: int,
 ) -> InternalToolSpec:
+    forbidden_guardrail_fields = {"guardrail_profile", "guardrail_profiles", "tool_guardrail_profile"}
+    forbidden = forbidden_guardrail_fields.intersection(entry)
+    if forbidden:
+        names = ", ".join(sorted(forbidden))
+        raise ToolRegistryError(
+            f"Agent '{agent_id}' tools[{index}] cannot define guardrail fields: {names}. "
+            "Configure tool guardrail profiles in platform_tools/tools.json."
+        )
+
     has_import = "import" in entry
     raw_name = entry.get("name") or entry.get("tool")
     has_name = raw_name is not None
@@ -430,7 +639,7 @@ def _parse_registry_internal_tool(
     entry: Any,
     *,
     index: int,
-) -> tuple[str, Callable[..., Any]]:
+) -> tuple[str, Callable[..., Any], Any]:
     if not isinstance(entry, dict):
         raise ToolRegistryError("Each internal_tools entry must be an object.")
 
@@ -447,19 +656,28 @@ def _parse_registry_internal_tool(
     if not isinstance(params, dict):
         raise ToolRegistryError(f"Tool registry config field 'internal_tools[{index}].params' must be an object.")
 
-    unexpected = set(entry) - {"id", "name", "import", "factory", "params", "description"}
+    guardrail_profile = entry.get("guardrail_profile")
+    unexpected = set(entry) - {"id", "name", "import", "factory", "params", "description", "guardrail_profile"}
     if unexpected:
         names = ", ".join(sorted(unexpected))
         raise ToolRegistryError(f"Unsupported internal_tools[{index}] fields: {names}")
     if import_ref is not None:
         if params:
             raise ToolRegistryError(f"internal_tools[{index}] cannot define params with 'import'. Use 'factory'.")
-        return tool_id, _make_import_tool_builder(tool_id, _require_str(import_ref, f"internal_tools[{index}].import"))
-    if factory_ref is not None:
-        return tool_id, _make_factory_tool_builder(
+        return (
             tool_id,
-            _require_str(factory_ref, f"internal_tools[{index}].factory"),
-            params,
+            _make_import_tool_builder(tool_id, _require_str(import_ref, f"internal_tools[{index}].import")),
+            guardrail_profile,
+        )
+    if factory_ref is not None:
+        return (
+            tool_id,
+            _make_factory_tool_builder(
+                tool_id,
+                _require_str(factory_ref, f"internal_tools[{index}].factory"),
+                params,
+            ),
+            guardrail_profile,
         )
     raise ToolRegistryError(f"internal_tools[{index}] is missing an importable tool definition.")
 
@@ -468,7 +686,7 @@ def _parse_registry_mcp_server(
     entry: Any,
     *,
     index: int,
-) -> tuple[str, str, dict[str, Any], tuple[str, ...] | None, bool | None, tuple[str, ...]]:
+) -> tuple[str, str, dict[str, Any], tuple[str, ...] | None, bool | None, dict[str, Any], tuple[str, ...]]:
     if not isinstance(entry, dict):
         raise ToolRegistryError("Each mcp_servers entry must be an object.")
 
@@ -491,6 +709,10 @@ def _parse_registry_mcp_server(
     if raw_prefix is not None and not isinstance(raw_prefix, bool):
         raise ToolRegistryError(f"Tool registry config field 'mcp_servers[{index}].tool_name_prefix' must be a boolean.")
 
+    raw_guardrail_profiles = entry.get("guardrail_profiles") or {}
+    if not isinstance(raw_guardrail_profiles, dict):
+        raise ToolRegistryError(f"Tool registry config field 'mcp_servers[{index}].guardrail_profiles' must be an object.")
+
     raw_connection = entry.get("connection")
     if raw_connection is not None:
         if not isinstance(raw_connection, dict):
@@ -500,7 +722,16 @@ def _parse_registry_mcp_server(
         connection = {
             key: value
             for key, value in entry.items()
-            if key not in {"id", "server", "name", "aliases", "tools", "tool_name_prefix", "description"}
+            if key not in {
+                "id",
+                "server",
+                "name",
+                "aliases",
+                "tools",
+                "tool_name_prefix",
+                "description",
+                "guardrail_profiles",
+            }
         }
 
     transport = _require_str(connection.get("transport"), f"mcp_servers[{index}].transport")
@@ -510,7 +741,7 @@ def _parse_registry_mcp_server(
             f"Unsupported MCP transport '{transport}' for server '{name}'. "
             f"Allowed transports: {allowed}"
         )
-    return template_id, name, connection, tools, raw_prefix, aliases
+    return template_id, name, connection, tools, raw_prefix, dict(raw_guardrail_profiles), aliases
 
 
 def _make_import_tool_builder(tool_id: str, import_path: str) -> Callable[..., Any]:
@@ -643,6 +874,7 @@ default_tool_registry = build_default_tool_registry()
 
 __all__ = [
     "AgentToolsConfig",
+    "BuiltAgentTools",
     "DEFAULT_TOOL_REGISTRY_CONFIG_PATH",
     "InternalToolSpec",
     "MCPConfig",
@@ -650,6 +882,7 @@ __all__ = [
     "MCPServerTemplate",
     "PlatformToolRegistry",
     "ToolRegistryError",
+    "build_agent_tool_bundle",
     "build_agent_tools",
     "build_internal_tools",
     "build_tool_registry_from_config",

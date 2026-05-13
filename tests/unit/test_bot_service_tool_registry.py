@@ -12,6 +12,7 @@ from bot_service.agent_registry import AgentDefinition, AgentRegistry
 from bot_service.schemas import ContentType
 from bot_service.tool_registry import parse_agent_tools_config
 from platform_tools.registry import (
+    BuiltAgentTools,
     DEFAULT_TOOL_REGISTRY_CONFIG_PATH,
     InternalToolSpec,
     PlatformToolRegistry,
@@ -33,6 +34,7 @@ def test_default_tool_registry_is_backed_by_editable_config_file():
     assert maps_template is not None
     assert maps_template.name == "maps"
     assert maps_template.connection["url"] == "https://mapstools.googleapis.com/mcp"
+    assert maps_template.guardrail_profiles["maps_search_places"] == "external_public_no_result_anonymization"
     assert registry.mcp_server_template("google_maps") is maps_template
 
 
@@ -55,9 +57,19 @@ def test_build_tool_registry_from_config_accepts_custom_editable_entries(monkeyp
                     "id": "demo_tool",
                     "factory": "demo_platform_tools:build_demo_tool",
                     "params": {"suffix": "default"},
+                    "guardrail_profile": "demo_public",
                 },
                 {"id": "demo_imported_tool", "import": "demo_platform_tools:imported_tool"},
             ],
+            "tool_guardrail_profiles": {
+                "demo_public": {
+                    "allowed_roles": ["default"],
+                    "side_effect": "read",
+                    "category": "external_access",
+                    "allow_external_access": True,
+                    "result_policy": {"scan_result": False},
+                }
+            },
             "mcp_servers": [
                 {
                     "id": "demo_mcp",
@@ -66,6 +78,7 @@ def test_build_tool_registry_from_config_accepts_custom_editable_entries(monkeyp
                     "transport": "http",
                     "url": "https://example.com/mcp",
                     "tool_name_prefix": False,
+                    "guardrail_profiles": {"search": "demo_public"},
                 }
             ],
         }
@@ -85,6 +98,13 @@ def test_build_tool_registry_from_config_accepts_custom_editable_entries(monkeyp
     ]
     assert captured["params"] == {"suffix": "override"}
     assert registry.mcp_server_template("demo_alias").connection["url"] == "https://example.com/mcp"
+    bundle = registry.build_internal_tool_bundle(
+        [InternalToolSpec(name="demo_tool", params={"suffix": "profiled"})],
+        require_guardrail_profiles=True,
+    )
+    assert [tool.name for tool in bundle.tools] == ["demo_runtime_tool_profiled"]
+    assert bundle.guardrail_profiles["demo_runtime_tool_profiled"]["allow_external_access"] is True
+    assert bundle.guardrail_profiles["demo_runtime_tool_profiled"]["name"] == "demo_runtime_tool_profiled"
 
 
 def test_build_tool_registry_from_config_rejects_duplicate_tool_ids():
@@ -139,12 +159,27 @@ def test_parse_agent_tools_config_rejects_non_array_tools():
 def test_build_agent_tools_combines_internal_and_mcp_tools(monkeypatch):
     captured = {}
     registry = PlatformToolRegistry()
-    registry.register_internal_tool("web_search_tool", lambda: SimpleNamespace(name="web_search"))
+    registry.register_tool_guardrail_profile(
+        "external_public",
+        {
+            "allowed_roles": ["default"],
+            "side_effect": "read",
+            "category": "external_access",
+            "allow_external_access": True,
+            "result_policy": {"scan_result": False},
+        },
+    )
+    registry.register_internal_tool(
+        "web_search_tool",
+        lambda: SimpleNamespace(name="web_search"),
+        guardrail_profile="external_public",
+    )
     registry.register_mcp_server(
         "googleapis_maps",
         name="maps",
         connection={"transport": "http", "url": "https://mapstools.googleapis.com/mcp"},
         tool_name_prefix=True,
+        guardrail_profiles={"maps_search_places": "external_public"},
     )
 
     async def fake_load_mcp_tools(_session, *, connection, server_name, tool_name_prefix):
@@ -174,20 +209,26 @@ def test_build_agent_tools_combines_internal_and_mcp_tools(monkeypatch):
     assert captured["server_name"] == "maps"
     assert captured["tool_name_prefix"] is True
 
+    bundle = asyncio.run(registry.build_tool_bundle(config, require_guardrail_profiles=True))
+
+    assert set(bundle.guardrail_profiles) == {"web_search", "maps_search_places"}
+    assert bundle.guardrail_profiles["web_search"]["name"] == "web_search"
+
 
 def test_agent_registry_injects_configured_tools_into_any_tool_aware_agent(monkeypatch):
     captured = {}
     derived_tools = [SimpleNamespace(name="web_search"), SimpleNamespace(name="maps_search_places")]
 
-    async def fake_build_agent_tools(tools_config):
+    async def fake_build_agent_tool_bundle(tools_config, *, require_guardrail_profiles=False):
         captured["tools_config"] = tools_config
-        return derived_tools
+        captured["require_guardrail_profiles"] = require_guardrail_profiles
+        return BuiltAgentTools(tools=derived_tools, guardrail_profiles={})
 
     def factory(**params):
         captured["factory_params"] = params
         return {"agent": "ok"}
 
-    monkeypatch.setattr(agent_registry_module, "build_agent_tools", fake_build_agent_tools)
+    monkeypatch.setattr(agent_registry_module, "build_agent_tool_bundle", fake_build_agent_tool_bundle)
     registry = AgentRegistry.__new__(AgentRegistry)
     registry._definitions = {
         "tool_aware": AgentDefinition(
@@ -220,13 +261,70 @@ def test_agent_registry_injects_configured_tools_into_any_tool_aware_agent(monke
     assert registry._instances["tool_aware"] == {"agent": "ok"}
     assert captured["factory_params"]["tools"] == derived_tools
     assert captured["factory_params"]["provider"] == ModelType.GPT
+    assert captured["require_guardrail_profiles"] is False
+
+
+def test_agent_registry_injects_resolved_tool_profiles_when_tool_guardrails_enabled(monkeypatch):
+    captured = {}
+    derived_tools = [SimpleNamespace(name="web_search")]
+    profiles = {
+        "web_search": {
+            "name": "web_search",
+            "allowed_roles": ["default"],
+            "side_effect": "read",
+            "result_policy": {"scan_result": False},
+        }
+    }
+
+    async def fake_build_agent_tool_bundle(tools_config, *, require_guardrail_profiles=False):
+        captured["tools_config"] = tools_config
+        captured["require_guardrail_profiles"] = require_guardrail_profiles
+        return BuiltAgentTools(tools=derived_tools, guardrail_profiles=profiles)
+
+    def factory(**params):
+        captured["factory_params"] = params
+        return {"agent": "ok"}
+
+    monkeypatch.setattr(agent_registry_module, "build_agent_tool_bundle", fake_build_agent_tool_bundle)
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._definitions = {
+        "tool_guarded": AgentDefinition(
+            id="tool_guarded",
+            name="Tool guarded",
+            description="Tool guarded agent",
+            factory=factory,
+            default_provider=ModelType.GPT,
+            supported_content_types=(ContentType.TEXT_FILES,),
+            init_params={"guardrail_tool_execution_enabled": True},
+            tools_config=parse_agent_tools_config(["web_search_tool"], agent_id="tool_guarded"),
+            param_names=frozenset({"provider", "tools", "guardrail_tool_execution_enabled", "guardrail_tool_profiles"}),
+            accepts_kwargs=False,
+        )
+    }
+    registry._instances = {}
+    registry._init_tasks = {}
+    registry._init_errors = {}
+    registry._checkpointer = None
+    registry._checkpointer_cm = None
+    registry._checkpointer_lock = asyncio.Lock()
+
+    async def run_initialization():
+        registry._start_initialization("tool_guarded")
+        await registry._init_tasks["tool_guarded"]
+        await asyncio.sleep(0)
+
+    asyncio.run(run_initialization())
+
+    assert captured["require_guardrail_profiles"] is True
+    assert captured["factory_params"]["tools"] == derived_tools
+    assert captured["factory_params"]["guardrail_tool_profiles"] == profiles
 
 
 def test_agent_registry_fails_if_tools_configured_for_agent_without_tools_param(monkeypatch):
-    async def fake_build_agent_tools(_tools_config):
+    async def fake_build_agent_tool_bundle(_tools_config, *, require_guardrail_profiles=False):
         raise AssertionError("tools should not be built when signature cannot accept them")
 
-    monkeypatch.setattr(agent_registry_module, "build_agent_tools", fake_build_agent_tools)
+    monkeypatch.setattr(agent_registry_module, "build_agent_tool_bundle", fake_build_agent_tool_bundle)
     registry = AgentRegistry.__new__(AgentRegistry)
     registry._definitions = {
         "plain": AgentDefinition(

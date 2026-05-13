@@ -8,13 +8,14 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from agents.artifact_creator_agent.agent import initialize_agent
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from platform_tools.registry import AgentToolsConfig, build_agent_tools, parse_agent_tools_config
+from platform_guardrails.config import inline_guardrail_config_keys, resolve_guardrail_policy
+from platform_tools.registry import AgentToolsConfig, BuiltAgentTools, build_agent_tool_bundle, parse_agent_tools_config
 
 
 EXIT_COMMANDS = {"exit", "/exit", "quit", "/quit"}
@@ -41,11 +42,17 @@ ARTIFACT_CLI_CHECKPOINT_PATH = (
 @dataclass(frozen=True)
 class ArtifactAgentRegistrySettings:
     tools_config: AgentToolsConfig
-    guardrail_tool_profiles: dict[str, Any]
-    guardrail_unprofiled_tools: Literal["block", "allow_read_only"]
+    guardrails_locale: str = "ru-RU"
+    guardrail_privacy_enabled: bool = False
+    guardrail_scanners_enabled: bool = False
+    guardrail_tool_execution_enabled: bool = False
+    guardrail_scanner_failure_policy: str = "fail_closed"
+    guardrail_banned_topics: list[str] | None = None
     guardrail_prompt_injection_model: str | dict[str, Any] | None = None
     guardrail_prompt_injection_model_revision: str | None = None
     guardrail_prompt_injection_threshold: float | None = None
+    guardrail_composite_input_scanners: tuple[str, ...] | None = None
+    guardrail_composite_recent_message_limit: int = 20
     guardrail_palimpsest_run_entities: list[str] | None = None
     guardrail_palimpsest_entity_replacements: Any | None = None
     guardrail_palimpsest_options: dict[str, Any] | None = None
@@ -129,14 +136,14 @@ def _parse_args() -> argparse.Namespace:
         help="Read the fixed artifact system prompt from a file.",
     )
     parser.add_argument(
-        "--guardrails-enabled",
+        "--privacy-enabled",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable or disable the platform guardrail middleware.",
+        default=None,
+        help="Enable or disable Palimpsest privacy for user/model text. Defaults to registry config.",
     )
     parser.add_argument(
         "--guardrails-locale",
-        default="ru-RU",
+        default=None,
         help="Locale passed to the privacy guardrail rail.",
     )
     parser.add_argument(
@@ -151,11 +158,17 @@ def _parse_args() -> argparse.Namespace:
         "--scanners-enabled",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable or disable LLM Guard scanner enforcement. Defaults to guardrails setting.",
+        help="Enable or disable LLM Guard scanner enforcement. Defaults to registry config.",
+    )
+    parser.add_argument(
+        "--tool-execution-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable tool execution guardrails. Defaults to registry config.",
     )
     parser.add_argument(
         "--scanner-failure-policy",
-        default="fail_closed",
+        default=None,
         help="Scanner failure mode: fail_closed or fail_open.",
     )
     parser.add_argument(
@@ -272,35 +285,64 @@ def _load_agent_registry_settings(
     params = agent_entry.get("params") or {}
     if not isinstance(params, dict):
         raise ValueError(f"Agent '{agent_id}' params must be an object.")
+    params = dict(params)
+    policy_id = params.pop("guardrail_policy", None)
+    inline_keys = inline_guardrail_config_keys(params)
+    if policy_id is None:
+        if inline_keys:
+            names = ", ".join(sorted(inline_keys))
+            raise ValueError(
+                f"Agent '{agent_id}' uses inline guardrail params without guardrail_policy: {names}."
+            )
+        guardrail_kwargs: dict[str, Any] = {}
+    else:
+        if inline_keys:
+            names = ", ".join(sorted(inline_keys))
+            raise ValueError(
+                f"Agent '{agent_id}' mixes guardrail_policy with inline guardrail params: {names}."
+            )
+        guardrail_kwargs = resolve_guardrail_policy(policy_id)
 
-    profiles = params.get("guardrail_tool_profiles") or {}
-    if not isinstance(profiles, dict):
-        raise ValueError(f"Agent '{agent_id}' guardrail_tool_profiles must be an object.")
-
-    unprofiled_tools = params.get("guardrail_unprofiled_tools", "block")
-    if unprofiled_tools not in {"block", "allow_read_only"}:
-        raise ValueError(
-            f"Agent '{agent_id}' guardrail_unprofiled_tools must be block or allow_read_only."
-        )
-    prompt_injection_model = params.get("guardrail_prompt_injection_model")
+    guardrails_locale = guardrail_kwargs.get("guardrails_locale", "ru-RU")
+    if not isinstance(guardrails_locale, str):
+        raise ValueError(f"Agent '{agent_id}' guardrails_locale must be a string.")
+    privacy_enabled = guardrail_kwargs.get("guardrail_privacy_enabled", False)
+    if not isinstance(privacy_enabled, bool):
+        raise ValueError(f"Agent '{agent_id}' guardrail_privacy_enabled must be a boolean.")
+    scanners_enabled = guardrail_kwargs.get("guardrail_scanners_enabled", False)
+    if not isinstance(scanners_enabled, bool):
+        raise ValueError(f"Agent '{agent_id}' guardrail_scanners_enabled must be a boolean.")
+    tool_execution_enabled = guardrail_kwargs.get("guardrail_tool_execution_enabled", False)
+    if not isinstance(tool_execution_enabled, bool):
+        raise ValueError(f"Agent '{agent_id}' guardrail_tool_execution_enabled must be a boolean.")
+    scanner_failure_policy = guardrail_kwargs.get("guardrail_scanner_failure_policy", "fail_closed")
+    scanner_failure_policy = _parse_scanner_failure_policy(str(scanner_failure_policy))
+    banned_topics = guardrail_kwargs.get("guardrail_banned_topics")
+    if banned_topics is not None and not isinstance(banned_topics, list):
+        raise ValueError(f"Agent '{agent_id}' guardrail_banned_topics must be a list.")
+    prompt_injection_model = guardrail_kwargs.get("guardrail_prompt_injection_model")
     if prompt_injection_model is not None and not isinstance(prompt_injection_model, (str, dict)):
         raise ValueError(
             f"Agent '{agent_id}' guardrail_prompt_injection_model must be a string or object."
         )
-    prompt_injection_model_revision = params.get("guardrail_prompt_injection_model_revision")
+    prompt_injection_model_revision = guardrail_kwargs.get("guardrail_prompt_injection_model_revision")
     if prompt_injection_model_revision is not None and not isinstance(prompt_injection_model_revision, str):
         raise ValueError(
             f"Agent '{agent_id}' guardrail_prompt_injection_model_revision must be a string."
         )
-    prompt_injection_threshold = params.get("guardrail_prompt_injection_threshold")
+    prompt_injection_threshold = guardrail_kwargs.get("guardrail_prompt_injection_threshold")
     if prompt_injection_threshold is not None:
         prompt_injection_threshold = float(prompt_injection_threshold)
-    palimpsest_run_entities = params.get("guardrail_palimpsest_run_entities")
+    composite_input_scanners = guardrail_kwargs.get("guardrail_composite_input_scanners")
+    if composite_input_scanners is not None and not isinstance(composite_input_scanners, (list, tuple)):
+        raise ValueError(f"Agent '{agent_id}' guardrail_composite_input_scanners must be a list.")
+    composite_recent_message_limit = int(guardrail_kwargs.get("guardrail_composite_recent_message_limit", 20))
+    palimpsest_run_entities = guardrail_kwargs.get("guardrail_palimpsest_run_entities")
     if palimpsest_run_entities is not None and not isinstance(palimpsest_run_entities, list):
         raise ValueError(
             f"Agent '{agent_id}' guardrail_palimpsest_run_entities must be a list."
         )
-    palimpsest_entity_replacements = params.get("guardrail_palimpsest_entity_replacements")
+    palimpsest_entity_replacements = guardrail_kwargs.get("guardrail_palimpsest_entity_replacements")
     if (
         palimpsest_entity_replacements is not None
         and not isinstance(palimpsest_entity_replacements, (dict, list))
@@ -308,10 +350,10 @@ def _load_agent_registry_settings(
         raise ValueError(
             f"Agent '{agent_id}' guardrail_palimpsest_entity_replacements must be an object or list."
         )
-    palimpsest_options = params.get("guardrail_palimpsest_options")
+    palimpsest_options = guardrail_kwargs.get("guardrail_palimpsest_options")
     if palimpsest_options is not None and not isinstance(palimpsest_options, dict):
         raise ValueError(f"Agent '{agent_id}' guardrail_palimpsest_options must be an object.")
-    palimpsest_session_options = params.get("guardrail_palimpsest_session_options")
+    palimpsest_session_options = guardrail_kwargs.get("guardrail_palimpsest_session_options")
     if palimpsest_session_options is not None and not isinstance(palimpsest_session_options, dict):
         raise ValueError(
             f"Agent '{agent_id}' guardrail_palimpsest_session_options must be an object."
@@ -319,11 +361,21 @@ def _load_agent_registry_settings(
 
     return ArtifactAgentRegistrySettings(
         tools_config=parse_agent_tools_config(agent_entry.get("tools"), agent_id=agent_id),
-        guardrail_tool_profiles=dict(profiles),
-        guardrail_unprofiled_tools=unprofiled_tools,
+        guardrails_locale=guardrails_locale,
+        guardrail_privacy_enabled=privacy_enabled,
+        guardrail_scanners_enabled=scanners_enabled,
+        guardrail_tool_execution_enabled=tool_execution_enabled,
+        guardrail_scanner_failure_policy=scanner_failure_policy,
+        guardrail_banned_topics=list(banned_topics) if banned_topics is not None else None,
         guardrail_prompt_injection_model=prompt_injection_model,
         guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
         guardrail_prompt_injection_threshold=prompt_injection_threshold,
+        guardrail_composite_input_scanners=(
+            tuple(str(item) for item in composite_input_scanners)
+            if composite_input_scanners is not None
+            else None
+        ),
+        guardrail_composite_recent_message_limit=composite_recent_message_limit,
         guardrail_palimpsest_run_entities=(
             list(palimpsest_run_entities) if palimpsest_run_entities is not None else None
         ),
@@ -337,8 +389,15 @@ def _load_agent_registry_settings(
     )
 
 
-async def _build_registry_tools(settings: ArtifactAgentRegistrySettings) -> list[Any]:
-    return await build_agent_tools(settings.tools_config)
+async def _build_registry_tools(
+    settings: ArtifactAgentRegistrySettings,
+    *,
+    require_guardrail_profiles: bool = False,
+) -> BuiltAgentTools:
+    return await build_agent_tool_bundle(
+        settings.tools_config,
+        require_guardrail_profiles=require_guardrail_profiles,
+    )
 
 
 def _build_human_message(user_text: str) -> HumanMessage:
@@ -389,16 +448,18 @@ def _thread_export_payload(
     *,
     thread_id: str,
     provider: str,
-    guardrails_enabled: bool,
-    scanners_enabled: bool | None,
+    privacy_enabled: bool,
+    scanners_enabled: bool,
+    tool_execution_enabled: bool,
     turns: list[dict[str, str]],
 ) -> dict[str, Any]:
     return {
         "thread_id": thread_id,
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider,
-        "guardrails_enabled": guardrails_enabled,
+        "privacy_enabled": privacy_enabled,
         "scanners_enabled": scanners_enabled,
+        "tool_execution_enabled": tool_execution_enabled,
         "turns": turns,
     }
 
@@ -410,8 +471,9 @@ def _render_thread_markdown(payload: dict[str, Any]) -> str:
         f"- Thread id: `{payload['thread_id']}`",
         f"- Saved at (UTC): `{payload['saved_at']}`",
         f"- Provider: `{payload['provider']}`",
-        f"- Guardrails enabled: `{payload['guardrails_enabled']}`",
+        f"- Privacy enabled: `{payload['privacy_enabled']}`",
         f"- Scanners enabled: `{payload['scanners_enabled']}`",
+        f"- Tool execution guardrails enabled: `{payload['tool_execution_enabled']}`",
         "",
     ]
     turns = payload.get("turns") or []
@@ -446,15 +508,17 @@ def _save_thread_export(
     path: Path,
     thread_id: str,
     provider: str,
-    guardrails_enabled: bool,
-    scanners_enabled: bool | None,
+    privacy_enabled: bool,
+    scanners_enabled: bool,
+    tool_execution_enabled: bool,
     turns: list[dict[str, str]],
 ) -> Path:
     payload = _thread_export_payload(
         thread_id=thread_id,
         provider=provider,
-        guardrails_enabled=guardrails_enabled,
+        privacy_enabled=privacy_enabled,
         scanners_enabled=scanners_enabled,
+        tool_execution_enabled=tool_execution_enabled,
         turns=turns,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -507,7 +571,6 @@ def main() -> int:
 
     try:
         provider = _parse_provider(args.provider)
-        scanner_failure_policy = _parse_scanner_failure_policy(args.scanner_failure_policy)
         system_prompt, system_file_path = _load_system_prompt(args)
         registry_settings = _load_agent_registry_settings(args.agent_config)
 
@@ -516,7 +579,6 @@ def main() -> int:
             checkpoint_saver = runner.run(checkpoint_cm.__aenter__())
             try:
                 runner.run(checkpoint_saver.setup())
-                registry_tools = runner.run(_build_registry_tools(registry_settings))
                 prompt_injection_model = (
                     args.guardrail_prompt_injection_model
                     if args.guardrail_prompt_injection_model is not None
@@ -532,26 +594,66 @@ def main() -> int:
                     if args.guardrail_prompt_injection_threshold is not None
                     else registry_settings.guardrail_prompt_injection_threshold
                 )
+                privacy_enabled = (
+                    args.privacy_enabled
+                    if args.privacy_enabled is not None
+                    else registry_settings.guardrail_privacy_enabled
+                )
+                scanners_enabled = (
+                    args.scanners_enabled
+                    if args.scanners_enabled is not None
+                    else registry_settings.guardrail_scanners_enabled
+                )
+                tool_execution_enabled = (
+                    args.tool_execution_enabled
+                    if args.tool_execution_enabled is not None
+                    else registry_settings.guardrail_tool_execution_enabled
+                )
+                scanner_failure_policy = (
+                    _parse_scanner_failure_policy(args.scanner_failure_policy)
+                    if args.scanner_failure_policy is not None
+                    else registry_settings.guardrail_scanner_failure_policy
+                )
+                guardrails_locale = (
+                    args.guardrails_locale
+                    if args.guardrails_locale is not None
+                    else registry_settings.guardrails_locale
+                )
+                banned_topics = (
+                    args.banned_topic
+                    if args.banned_topic is not None
+                    else registry_settings.guardrail_banned_topics
+                )
+                tool_bundle = runner.run(
+                    _build_registry_tools(
+                        registry_settings,
+                        require_guardrail_profiles=tool_execution_enabled,
+                    )
+                )
+                registry_tools = tool_bundle.tools
                 agent = initialize_agent(
                     provider=provider,
                     locale=args.locale,
                     checkpoint_saver=checkpoint_saver,
                     tools=registry_tools,
                     system_prompt=system_prompt,
-                    guardrails_enabled=args.guardrails_enabled,
-                    guardrails_locale=args.guardrails_locale,
-                    guardrail_scanners_enabled=args.scanners_enabled,
+                    guardrails_locale=guardrails_locale,
+                    guardrail_privacy_enabled=privacy_enabled,
+                    guardrail_scanners_enabled=scanners_enabled,
+                    guardrail_tool_execution_enabled=tool_execution_enabled,
                     guardrail_scanner_failure_policy=scanner_failure_policy,
-                    guardrail_banned_topics=args.banned_topic,
+                    guardrail_banned_topics=banned_topics,
                     guardrail_prompt_injection_model=prompt_injection_model,
                     guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
                     guardrail_prompt_injection_threshold=prompt_injection_threshold,
+                    guardrail_composite_input_scanners=registry_settings.guardrail_composite_input_scanners,
+                    guardrail_composite_recent_message_limit=registry_settings.guardrail_composite_recent_message_limit,
                     guardrail_palimpsest_run_entities=registry_settings.guardrail_palimpsest_run_entities,
                     guardrail_palimpsest_entity_replacements=registry_settings.guardrail_palimpsest_entity_replacements,
                     guardrail_palimpsest_options=registry_settings.guardrail_palimpsest_options,
                     guardrail_palimpsest_session_options=registry_settings.guardrail_palimpsest_session_options,
-                    guardrail_tool_profiles=registry_settings.guardrail_tool_profiles,
-                    guardrail_unprofiled_tools=registry_settings.guardrail_unprofiled_tools,
+                    guardrail_tool_profiles=tool_bundle.guardrail_profiles,
+                    guardrail_unprofiled_tools="block",
                 )
                 thread_id, run_config = _new_config(
                     args.thread_id,
@@ -577,8 +679,9 @@ def main() -> int:
                             path=_normalize_export_path(args.save_thread, thread_id=thread_id),
                             thread_id=thread_id,
                             provider=provider.value,
-                            guardrails_enabled=args.guardrails_enabled,
-                            scanners_enabled=args.scanners_enabled,
+                            privacy_enabled=privacy_enabled,
+                            scanners_enabled=scanners_enabled,
+                            tool_execution_enabled=tool_execution_enabled,
                             turns=current_turns,
                         )
                         print(f"Thread saved to: {saved_path}")
@@ -591,8 +694,9 @@ def main() -> int:
                 print(f"Checkpoint store: {ARTIFACT_CLI_CHECKPOINT_PATH}")
                 tool_names = ", ".join(getattr(tool, "name", type(tool).__name__) for tool in registry_tools)
                 print(f"Registry tools: {tool_names or 'none'}")
-                print(f"Guardrails enabled: {args.guardrails_enabled}")
-                print(f"Scanners enabled: {args.scanners_enabled}")
+                print(f"Privacy enabled: {privacy_enabled}")
+                print(f"Scanners enabled: {scanners_enabled}")
+                print(f"Tool execution guardrails enabled: {tool_execution_enabled}")
                 print(f"Prompt injection model: {prompt_injection_model or 'LLM Guard default'}")
                 print(f"External tool access allowed: {args.allow_external_tool_access}")
 
@@ -630,8 +734,9 @@ def main() -> int:
                             path=_normalize_export_path(save_thread_path, thread_id=thread_id),
                             thread_id=thread_id,
                             provider=provider.value,
-                            guardrails_enabled=args.guardrails_enabled,
-                            scanners_enabled=args.scanners_enabled,
+                            privacy_enabled=privacy_enabled,
+                            scanners_enabled=scanners_enabled,
+                            tool_execution_enabled=tool_execution_enabled,
                             turns=current_turns,
                         )
                         print(f"Thread saved to: {saved_path}\n")

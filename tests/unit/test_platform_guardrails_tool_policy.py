@@ -3,13 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from langgraph.types import Command
 
 from platform_guardrails.injection import SECURITY_BLOCK_MESSAGE_RU, SECURITY_REVIEW_MESSAGE_RU
-from platform_guardrails.middleware import ToolExecutionSafetyMiddleware
+from platform_guardrails.middleware import PrivacyModelRequestMiddleware, ToolExecutionSafetyMiddleware
 from platform_guardrails.privacy import PalimpsestSessionManager, PrivacyRail
 from platform_guardrails.scanners import (
     LLMGuardScannerProfile,
@@ -89,8 +90,13 @@ class FakePrivacySession:
 
 
 class FakePrivacyProcessor:
+    def __init__(self) -> None:
+        self.sessions: list[FakePrivacySession] = []
+
     def create_session(self, session_id: str | None = None) -> FakePrivacySession:
-        return FakePrivacySession(session_id or "missing")
+        session = FakePrivacySession(session_id or "missing")
+        self.sessions.append(session)
+        return session
 
 
 def _profile(
@@ -176,6 +182,36 @@ def test_registry_can_create_conservative_read_only_profile_when_enabled():
     assert bundle.policy_rail.profile_for("extra").allow_file_export is False
     assert bundle.policy_rail.profile_for("extra").privacy.argument_transform == "none"
     assert bundle.policy_rail.profile_for("extra").privacy.result_transform == "none"
+
+
+def test_tool_privacy_anonymize_result_boolean_maps_to_result_transform():
+    registry = GuardedToolRegistry.from_tools(
+        [NamedTool("lookup")],
+        {
+            "lookup": {
+                "name": "lookup",
+                "allowed_roles": ["default"],
+                "anonymize_result": True,
+            }
+        },
+    )
+
+    assert registry.entries["lookup"].profile.privacy.result_transform == "anonymize"
+
+
+def test_nested_tool_privacy_anonymize_result_boolean_maps_to_result_transform():
+    registry = GuardedToolRegistry.from_tools(
+        [NamedTool("lookup")],
+        {
+            "lookup": {
+                "name": "lookup",
+                "allowed_roles": ["default"],
+                "privacy": {"anonymize_result": True},
+            }
+        },
+    )
+
+    assert registry.entries["lookup"].profile.privacy.result_transform == "anonymize"
 
 
 def test_artifact_creator_default_tool_profile_has_no_privacy_transforms():
@@ -290,7 +326,7 @@ def test_tool_middleware_does_not_apply_argument_privacy_transform(transform: st
     assert captured["args"] == {"query": expected}
 
 
-def test_tool_middleware_does_not_apply_result_privacy_transform():
+def test_tool_middleware_applies_result_anonymization_when_enabled():
     profile = _profile(
         "lookup",
         privacy=ToolPrivacyProfile(result_transform="anonymize"),
@@ -302,7 +338,68 @@ def test_tool_middleware_does_not_apply_result_privacy_transform():
         lambda _request: ToolMessage(content="Result for Ivan", tool_call_id="call-1"),
     )
 
+    assert result.content == "anon[tenant|user|thread](Result for Ivan)"
+    assert result.additional_kwargs["guardrail_tool_result_anonymized"] is True
+
+
+def test_model_input_and_tool_result_anonymization_share_one_session():
+    processor = FakePrivacyProcessor()
+    privacy_rail = PrivacyRail(session_manager=PalimpsestSessionManager(processor))
+    model_middleware = PrivacyModelRequestMiddleware(
+        privacy_rail,
+        agent_name="test_agent.run",
+        guard_tool_calls=False,
+    )
+    tool_middleware = _middleware(
+        _profile(
+            "lookup",
+            privacy=ToolPrivacyProfile(result_transform="anonymize"),
+        ),
+        privacy_rail=privacy_rail,
+    )
+    runtime = _runtime()
+    model_request = ModelRequest(
+        model=object(),
+        system_prompt=None,
+        messages=[HumanMessage(content="Client Ivan")],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={"messages": []},
+        runtime=runtime,
+    )
+
+    captured: dict[str, object] = {}
+
+    def model_handler(updated_request):
+        captured["model_message"] = updated_request.messages[0].content
+        return ModelResponse(result=[AIMessage(content="Draft")])
+
+    model_middleware.wrap_model_call(model_request, model_handler)
+    tool_result = tool_middleware.wrap_tool_call(
+        _request("lookup"),
+        lambda _request: ToolMessage(content="Tool result for Ivan", tool_call_id="call-1"),
+    )
+
+    assert captured["model_message"] == "anon[tenant|user|thread](Client Ivan)"
+    assert tool_result.content == "anon[tenant|user|thread](Tool result for Ivan)"
+    assert [session.session_id for session in processor.sessions] == ["tenant|user|thread"]
+
+
+def test_tool_middleware_leaves_result_raw_when_anonymization_disabled():
+    profile = _profile(
+        "lookup",
+        privacy=ToolPrivacyProfile(result_transform="none"),
+    )
+    middleware = _middleware(profile, privacy_rail=_privacy_rail())
+
+    result = middleware.wrap_tool_call(
+        _request("lookup"),
+        lambda _request: ToolMessage(content="Result for Ivan", tool_call_id="call-1"),
+    )
+
     assert result.content == "Result for Ivan"
+    assert result.additional_kwargs["guardrail_tool_result_anonymized"] is False
 
 
 def test_internal_tool_result_is_marked_trusted_for_composite_scanning():
@@ -321,6 +418,7 @@ def test_internal_tool_result_is_marked_trusted_for_composite_scanning():
 
     assert result.additional_kwargs["guardrail_tool_result_trusted"] is True
     assert result.additional_kwargs["guardrail_tool_name"] == "commit"
+    assert result.additional_kwargs["guardrail_tool_result_anonymized"] is False
 
 
 def test_external_tool_result_is_marked_untrusted_for_composite_scanning():
@@ -341,7 +439,7 @@ def test_external_tool_result_is_marked_untrusted_for_composite_scanning():
     assert result.additional_kwargs["guardrail_tool_name"] == "web_search"
 
 
-def test_command_message_updates_and_artifact_state_remain_raw():
+def test_command_message_updates_are_anonymized_and_artifact_state_remains_raw():
     profile = _profile(
         "commit",
         privacy=ToolPrivacyProfile(
@@ -362,7 +460,7 @@ def test_command_message_updates_and_artifact_state_remain_raw():
         ),
     )
 
-    assert result.update["messages"][0].content == "Saved for Ivan"
+    assert result.update["messages"][0].content == "anon[tenant|user|thread](Saved for Ivan)"
     assert result.update["artifacts"][0]["artifact_final_text"] == "Saved for Ivan"
 
 

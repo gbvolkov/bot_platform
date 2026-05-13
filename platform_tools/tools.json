@@ -1,4 +1,40 @@
 {
+  "tool_guardrail_profiles": {
+    "external_public_no_result_anonymization": {
+      "allowed_roles": [
+        "default",
+        "service_desk",
+        "sales_manager"
+      ],
+      "side_effect": "read",
+      "category": "external_access",
+      "sensitivity": "public",
+      "allow_external_access": true,
+      "anonymize_result": false,
+      "result_policy": {
+        "scan_result": true,
+        "max_text_chars": 12000,
+        "max_items": 10
+      }
+    },
+    "external_confidential_anonymize_result": {
+      "allowed_roles": [
+        "default",
+        "service_desk",
+        "sales_manager"
+      ],
+      "side_effect": "read",
+      "category": "external_access",
+      "sensitivity": "confidential",
+      "allow_external_access": true,
+      "anonymize_result": true,
+      "result_policy": {
+        "scan_result": true,
+        "max_text_chars": 12000,
+        "max_items": 10
+      }
+    }
+  },
   "internal_tools": [
     {
       "id": "fetch_user_info",
@@ -23,7 +59,32 @@
     {
       "id": "web_search_tool",
       "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "guardrail_profile": "external_public_no_result_anonymization",
       "params": {
+        "api_key": "${YA_API_KEY}",
+        "folder_id": "${YA_FOLDER_ID}",
+        "max_results": 5,
+        "summarize": true
+      }
+    },
+    {
+      "id": "web_search_public",
+      "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "guardrail_profile": "external_public_no_result_anonymization",
+      "params": {
+        "name": "web_search_public",
+        "api_key": "${YA_API_KEY}",
+        "folder_id": "${YA_FOLDER_ID}",
+        "max_results": 5,
+        "summarize": true
+      }
+    },
+    {
+      "id": "web_search_private",
+      "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "guardrail_profile": "external_confidential_anonymize_result",
+      "params": {
+        "name": "web_search_private",
         "api_key": "${YA_API_KEY}",
         "folder_id": "${YA_FOLDER_ID}",
         "max_results": 5,
@@ -45,7 +106,10 @@
       "headers": {
         "X-Goog-Api-Key": "${GOOGLE_MAPS_GROUNDING_LITE_API_KEY}"
       },
-      "tool_name_prefix": true
+      "tool_name_prefix": true,
+      "guardrail_profiles": {
+        "maps_search_places": "external_public_no_result_anonymization"
+      }
     },
     {
       "id": "gmail",
