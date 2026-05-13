@@ -25,18 +25,8 @@ DEFAULT_PALIMPSEST_ENTITIES = [
     "RU_BANK_ACC",
     "TICKET_NUMBER",
 ]
-DEFAULT_PALIMPSEST_ENTITY_TABLE = {
-    "RU_PERSON": {"placeholder": "PERSON"},
-    "CREDIT_CARD": {"placeholder": "CREDIT_CARD"},
-    "PHONE_NUMBER": {"placeholder": "PHONE"},
-    "IP_ADDRESS": {"placeholder": "IP_ADDRESS"},
-    "URL": {"placeholder": "URL"},
-    "RU_PASSPORT": {"placeholder": "PASSPORT"},
-    "SNILS": {"placeholder": "SNILS"},
-    "INN": {"placeholder": "INN"},
-    "RU_BANK_ACC": {"placeholder": "BANK_ACCOUNT"},
-    "TICKET_NUMBER": {"placeholder": "TICKET"},
-}
+PALIMPSEST_FAKE_REPLACEMENT = "fake"
+PALIMPSEST_TYPED_PLACEHOLDER_REPLACEMENT = "typed_placeholder"
 
 _DEFAULT_SESSION_ID = "__manual__"
 _TEXT_KEYS = ("text", "content", "input", "title", "caption", "markdown", "explanation")
@@ -100,75 +90,61 @@ def _normalise_session_id(value: Any) -> str:
     return text or _DEFAULT_SESSION_ID
 
 
-def _entity_table_enabled(value: Any) -> bool:
-    if value is False:
-        return False
-    if isinstance(value, Mapping):
-        return bool(value.get("enabled", True))
-    return True
-
-
-def entity_types_from_table(entity_table: Any) -> list[str]:
-    """Extract Palimpsest entity names from a platform entity table."""
-    if entity_table is None:
+def entity_types_from_replacements(entity_replacements: Any) -> list[str]:
+    """Extract Palimpsest entity names from Palimpsest 0.1.36 replacements config."""
+    if entity_replacements is None:
         return []
-    if isinstance(entity_table, Mapping):
+    if isinstance(entity_replacements, Mapping):
         return [
             str(entity_type)
-            for entity_type, config in entity_table.items()
-            if str(entity_type).strip() and _entity_table_enabled(config)
+            for entity_type in entity_replacements
+            if str(entity_type).strip()
         ]
-    if isinstance(entity_table, str):
-        return [entity_table] if entity_table.strip() else []
     result: list[str] = []
-    for item in entity_table:
+    for item in entity_replacements:
         if isinstance(item, str):
             entity_type = item
-            enabled = True
         elif isinstance(item, Mapping):
             entity_type = (
                 item.get("entity_type")
+                or item.get("entity")
                 or item.get("type")
                 or item.get("name")
-                or item.get("id")
             )
-            enabled = _entity_table_enabled(item)
         else:
-            continue
+            try:
+                entity_type, _strategy = item
+            except (TypeError, ValueError):
+                continue
         text = str(entity_type or "").strip()
-        if text and enabled:
+        if text:
             result.append(text)
     return result
 
 
 def _normalise_run_entities(
     run_entities: Iterable[str] | None,
-    entity_table: Any = None,
+    entity_replacements: Any = None,
 ) -> list[str]:
     if run_entities is not None:
         return [str(entity) for entity in run_entities]
-    table_entities = entity_types_from_table(entity_table)
-    return table_entities or list(DEFAULT_PALIMPSEST_ENTITIES)
+    replacement_entities = entity_types_from_replacements(entity_replacements)
+    return replacement_entities or list(DEFAULT_PALIMPSEST_ENTITIES)
 
 
 def _palimpsest_constructor_kwargs(
     *,
     locale: str,
     run_entities: Iterable[str] | None,
-    entity_table: Any,
-    typed_placeholders: bool | None,
+    entity_replacements: Any,
     verbose: bool,
     palimpsest_options: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "verbose": verbose,
-        "run_entities": _normalise_run_entities(run_entities, entity_table),
+        "run_entities": _normalise_run_entities(run_entities, entity_replacements),
         "locale": locale,
     }
-    if entity_table is not None:
-        kwargs["entity_table"] = entity_table
-    if typed_placeholders is not None:
-        kwargs["typed_placeholders"] = typed_placeholders
     if palimpsest_options:
         kwargs.update(dict(palimpsest_options))
     return kwargs
@@ -176,15 +152,12 @@ def _palimpsest_constructor_kwargs(
 
 def _palimpsest_session_kwargs(
     *,
-    entity_table: Any,
-    typed_placeholders: bool | None,
+    entity_replacements: Any,
     palimpsest_session_options: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
-    if entity_table is not None:
-        kwargs["entity_table"] = entity_table
-    if typed_placeholders is not None:
-        kwargs["typed_placeholders"] = typed_placeholders
+    if entity_replacements is not None:
+        kwargs["entity_replacements"] = entity_replacements
     if palimpsest_session_options:
         kwargs.update(dict(palimpsest_session_options))
     return kwargs
@@ -327,8 +300,7 @@ class PrivacyRail:
         *,
         locale: str = "ru-RU",
         run_entities: Iterable[str] | None = None,
-        entity_table: Any = None,
-        typed_placeholders: bool | None = None,
+        entity_replacements: Any = None,
         palimpsest_options: Mapping[str, Any] | None = None,
         palimpsest_session_options: Mapping[str, Any] | None = None,
         verbose: bool = False,
@@ -340,8 +312,7 @@ class PrivacyRail:
         constructor_kwargs = _palimpsest_constructor_kwargs(
             locale=locale,
             run_entities=run_entities,
-            entity_table=entity_table,
-            typed_placeholders=typed_placeholders,
+            entity_replacements=entity_replacements,
             verbose=verbose,
             palimpsest_options=palimpsest_options,
         )
@@ -352,8 +323,7 @@ class PrivacyRail:
         )
         processor = Palimpsest(**constructor_kwargs)
         session_kwargs = _palimpsest_session_kwargs(
-            entity_table=entity_table,
-            typed_placeholders=typed_placeholders,
+            entity_replacements=entity_replacements,
             palimpsest_session_options=palimpsest_session_options,
         )
         return cls(
@@ -461,14 +431,15 @@ def transform_messages(messages: Iterable[BaseMessage], transform: Callable[[str
 
 __all__ = [
     "DEFAULT_PALIMPSEST_ENTITIES",
-    "DEFAULT_PALIMPSEST_ENTITY_TABLE",
+    "PALIMPSEST_FAKE_REPLACEMENT",
+    "PALIMPSEST_TYPED_PLACEHOLDER_REPLACEMENT",
     "PalimpsestSessionManager",
     "PrivacyRail",
     "_call_text_transform",
     "anonymize_with_session",
     "clone_message_with_transform",
     "content_is_reset",
-    "entity_types_from_table",
+    "entity_types_from_replacements",
     "map_strings",
     "state_has_reset_message",
     "thread_id_from_config",

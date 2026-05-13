@@ -530,8 +530,7 @@ def initialize_agent(
     guardrail_composite_input_scanners: tuple[str, ...] | None = None,
     guardrail_composite_recent_message_limit: int = 20,
     guardrail_palimpsest_run_entities: List[str] | None = None,
-    guardrail_palimpsest_entity_table: Any | None = None,
-    guardrail_palimpsest_typed_placeholders: bool | None = None,
+    guardrail_palimpsest_entity_replacements: Any | None = None,
     guardrail_palimpsest_options: Mapping[str, Any] | None = None,
     guardrail_palimpsest_session_options: Mapping[str, Any] | None = None,
     guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None = None,
@@ -568,10 +567,8 @@ def initialize_agent(
         palimpsest_kwargs: dict[str, Any] = {"locale": guardrails_locale}
         if guardrail_palimpsest_run_entities is not None:
             palimpsest_kwargs["run_entities"] = guardrail_palimpsest_run_entities
-        if guardrail_palimpsest_entity_table is not None:
-            palimpsest_kwargs["entity_table"] = guardrail_palimpsest_entity_table
-        if guardrail_palimpsest_typed_placeholders is not None:
-            palimpsest_kwargs["typed_placeholders"] = guardrail_palimpsest_typed_placeholders
+        if guardrail_palimpsest_entity_replacements is not None:
+            palimpsest_kwargs["entity_replacements"] = guardrail_palimpsest_entity_replacements
         if guardrail_palimpsest_options is not None:
             palimpsest_kwargs["palimpsest_options"] = guardrail_palimpsest_options
         if guardrail_palimpsest_session_options is not None:

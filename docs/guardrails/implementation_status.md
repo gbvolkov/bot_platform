@@ -241,16 +241,16 @@ Examples:
 - `guardrail_composite_input_scanners`
 - `guardrail_composite_recent_message_limit`
 - `guardrail_palimpsest_run_entities`
-- `guardrail_palimpsest_entity_table`
-- `guardrail_palimpsest_typed_placeholders`
+- `guardrail_palimpsest_entity_replacements`
 - `guardrail_palimpsest_options`
 - `guardrail_palimpsest_session_options`
 
 Palimpsest privacy configuration is now part of the per-agent registry contract.
-Agents can provide their own entity table and request typed placeholders from
-Palimpsest versions that support session-scoped placeholder replacement. These
-configured options are required: if the installed Palimpsest API cannot accept
-them, initialization fails instead of falling back to fake-name anonymization.
+Agents provide `guardrail_palimpsest_entity_replacements` as the single
+session-scoped replacement matrix accepted by Palimpsest 0.1.36: each entity maps
+to `fake` or `typed_placeholder`. These configured options are required: if the
+installed Palimpsest API cannot accept them, initialization fails instead of
+falling back to another anonymization mode.
 
 `set_prompt` is guarded with the common node wrapper when guardrails are
 enabled, so user-provided system prompt text is scanned before it can be stored

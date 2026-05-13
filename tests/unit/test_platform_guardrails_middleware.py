@@ -356,7 +356,7 @@ def test_palimpsest_preflight_reports_missing_ru_spacy_model(monkeypatch):
     assert "uv sync" in message
 
 
-def test_palimpsest_entity_table_drives_run_entities_and_session_kwargs(monkeypatch):
+def test_palimpsest_entity_replacements_drive_run_entities_and_session_kwargs(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakePalimpsest:
@@ -366,39 +366,28 @@ def test_palimpsest_entity_table_drives_run_entities_and_session_kwargs(monkeypa
             verbose=False,
             run_entities=None,
             locale="ru-RU",
-            entity_table=None,
-            typed_placeholders=None,
-            placeholder_mode=None,
         ):
             captured["constructor"] = {
                 "verbose": verbose,
                 "run_entities": run_entities,
                 "locale": locale,
-                "entity_table": entity_table,
-                "typed_placeholders": typed_placeholders,
-                "placeholder_mode": placeholder_mode,
             }
 
         def create_session(
             self,
             *,
             session_id=None,
-            entity_table=None,
-            typed_placeholders=None,
-            placeholder_style=None,
+            entity_replacements=None,
         ):
             captured["session"] = {
                 "session_id": session_id,
-                "entity_table": entity_table,
-                "typed_placeholders": typed_placeholders,
-                "placeholder_style": placeholder_style,
+                "entity_replacements": entity_replacements,
             }
             return FakeSession(session_id or "missing")
 
-    entity_table = {
-        "RU_PERSON": {"placeholder": "PERSON"},
-        "URL": {"placeholder": "URL", "enabled": False},
-        "PHONE_NUMBER": "PHONE",
+    entity_replacements = {
+        "RU_PERSON": "typed_placeholder",
+        "PHONE_NUMBER": "fake",
     }
     monkeypatch.setitem(
         sys.modules,
@@ -408,10 +397,7 @@ def test_palimpsest_entity_table_drives_run_entities_and_session_kwargs(monkeypa
 
     rail = PrivacyRail.from_palimpsest(
         locale="en",
-        entity_table=entity_table,
-        typed_placeholders=True,
-        palimpsest_options={"placeholder_mode": "typed"},
-        palimpsest_session_options={"placeholder_style": "typed"},
+        entity_replacements=entity_replacements,
     )
     rail.sessions.get_session("thread-1")
 
@@ -419,15 +405,10 @@ def test_palimpsest_entity_table_drives_run_entities_and_session_kwargs(monkeypa
         "verbose": False,
         "run_entities": ["RU_PERSON", "PHONE_NUMBER"],
         "locale": "en",
-        "entity_table": entity_table,
-        "typed_placeholders": True,
-        "placeholder_mode": "typed",
     }
     assert captured["session"] == {
         "session_id": "thread-1",
-        "entity_table": entity_table,
-        "typed_placeholders": True,
-        "placeholder_style": "typed",
+        "entity_replacements": entity_replacements,
     }
 
 
@@ -453,17 +434,21 @@ def test_palimpsest_new_options_require_new_palimpsest_api(monkeypatch):
     )
 
     try:
-        PrivacyRail.from_palimpsest(
+        rail = PrivacyRail.from_palimpsest(
             locale="en",
-            entity_table={"RU_PERSON": {"placeholder": "PERSON"}},
-            typed_placeholders=True,
+            entity_replacements={"RU_PERSON": "typed_placeholder"},
         )
+        rail.sessions.get_session("thread-1")
     except RuntimeError as exc:
         message = str(exc)
     else:
         raise AssertionError("Expected legacy Palimpsest API to be rejected.")
 
-    assert captured == {}
-    assert "Palimpsest" in message
-    assert "entity_table" in message
+    assert captured["constructor"] == {
+        "verbose": False,
+        "run_entities": ["RU_PERSON"],
+        "locale": "en",
+    }
+    assert "Palimpsest.create_session" in message
+    assert "entity_replacements" in message
     assert "does not fall back" in message

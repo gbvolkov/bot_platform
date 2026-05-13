@@ -165,10 +165,9 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_profiles(tmp_pat
                             "guardrail_prompt_injection_model": prompt_model_config,
                             "guardrail_prompt_injection_threshold": 0.5,
                             "guardrail_palimpsest_run_entities": ["RU_PERSON"],
-                            "guardrail_palimpsest_entity_table": {
-                                "RU_PERSON": {"placeholder": "PERSON"}
+                            "guardrail_palimpsest_entity_replacements": {
+                                "RU_PERSON": "typed_placeholder"
                             },
-                            "guardrail_palimpsest_typed_placeholders": True,
                             "guardrail_palimpsest_options": {"placeholder_mode": "typed"},
                             "guardrail_palimpsest_session_options": {"placeholder_style": "typed"},
                         },
@@ -190,10 +189,9 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_profiles(tmp_pat
     assert settings.guardrail_prompt_injection_model_revision is None
     assert settings.guardrail_prompt_injection_threshold == 0.5
     assert settings.guardrail_palimpsest_run_entities == ["RU_PERSON"]
-    assert settings.guardrail_palimpsest_entity_table == {
-        "RU_PERSON": {"placeholder": "PERSON"}
+    assert settings.guardrail_palimpsest_entity_replacements == {
+        "RU_PERSON": "typed_placeholder"
     }
-    assert settings.guardrail_palimpsest_typed_placeholders is True
     assert settings.guardrail_palimpsest_options == {"placeholder_mode": "typed"}
     assert settings.guardrail_palimpsest_session_options == {"placeholder_style": "typed"}
 
