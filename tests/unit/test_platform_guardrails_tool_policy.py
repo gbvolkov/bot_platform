@@ -18,6 +18,7 @@ from platform_guardrails.scanners import (
     ScannerSpec,
 )
 from platform_guardrails.tool_policy import (
+    ARTIFACT_CREATOR_TOOL_PROFILES,
     ToolPolicyRail,
     ToolPrivacyProfile,
     ToolResultPolicy,
@@ -173,6 +174,15 @@ def test_registry_can_create_conservative_read_only_profile_when_enabled():
     assert bundle.policy_rail.profile_for("extra").side_effect == "read"
     assert bundle.policy_rail.profile_for("extra").allow_external_access is False
     assert bundle.policy_rail.profile_for("extra").allow_file_export is False
+    assert bundle.policy_rail.profile_for("extra").privacy.argument_transform == "none"
+    assert bundle.policy_rail.profile_for("extra").privacy.result_transform == "none"
+
+
+def test_artifact_creator_default_tool_profile_has_no_privacy_transforms():
+    profile = ARTIFACT_CREATOR_TOOL_PROFILES["commit_artifact_final_text"]
+
+    assert profile.privacy.argument_transform == "none"
+    assert profile.privacy.result_transform == "none"
 
 
 def test_role_denied_tool_blocks_execution_and_removes_ai_tool_call():
@@ -259,11 +269,11 @@ def test_external_file_and_sensitive_policies_honor_guardrail_context(
 @pytest.mark.parametrize(
     ("transform", "expected"),
     [
-        ("anonymize", "anon[tenant|user|thread](Ivan)"),
-        ("deanonymize", "deanon[tenant|user|thread](Ivan)"),
+        ("anonymize", "Ivan"),
+        ("deanonymize", "Ivan"),
     ],
 )
-def test_argument_privacy_transform_is_profile_driven(transform: str, expected: str):
+def test_tool_middleware_does_not_apply_argument_privacy_transform(transform: str, expected: str):
     profile = _profile(
         "lookup",
         privacy=ToolPrivacyProfile(argument_transform=transform),
@@ -280,7 +290,7 @@ def test_argument_privacy_transform_is_profile_driven(transform: str, expected: 
     assert captured["args"] == {"query": expected}
 
 
-def test_result_anonymize_transform_is_profile_driven():
+def test_tool_middleware_does_not_apply_result_privacy_transform():
     profile = _profile(
         "lookup",
         privacy=ToolPrivacyProfile(result_transform="anonymize"),
@@ -292,7 +302,7 @@ def test_result_anonymize_transform_is_profile_driven():
         lambda _request: ToolMessage(content="Result for Ivan", tool_call_id="call-1"),
     )
 
-    assert result.content == "anon[tenant|user|thread](Result for Ivan)"
+    assert result.content == "Result for Ivan"
 
 
 def test_internal_tool_result_is_marked_trusted_for_composite_scanning():
@@ -331,7 +341,7 @@ def test_external_tool_result_is_marked_untrusted_for_composite_scanning():
     assert result.additional_kwargs["guardrail_tool_name"] == "web_search"
 
 
-def test_command_message_updates_transform_but_artifact_state_remains_raw():
+def test_command_message_updates_and_artifact_state_remain_raw():
     profile = _profile(
         "commit",
         privacy=ToolPrivacyProfile(
@@ -352,7 +362,7 @@ def test_command_message_updates_transform_but_artifact_state_remains_raw():
         ),
     )
 
-    assert result.update["messages"][0].content == "anon[tenant|user|thread](Saved for Ivan)"
+    assert result.update["messages"][0].content == "Saved for Ivan"
     assert result.update["artifacts"][0]["artifact_final_text"] == "Saved for Ivan"
 
 
@@ -445,5 +455,5 @@ def test_tool_execution_audit_log_omits_raw_payloads(tmp_path):
     text = log_path.read_text(encoding="utf-8")
     assert "raw argument pii" not in text
     assert "raw result pii" not in text
-    assert "tool_execution" in text
+    assert "tool_policy" in text
     assert "guardrail_decision" in text

@@ -93,6 +93,88 @@ def test_model_request_anonymizes_messages_system_and_deanonymizes_response():
     assert [session.session_id for session in processor.sessions] == [scope]
 
 
+def test_model_request_anonymizes_tool_results_for_llm_context():
+    middleware, _processor = _middleware(guard_tool_calls=False)
+    runtime = _runtime(
+        {
+            "tenant_id": "tenant",
+            "user_id": "user",
+            "thread_id": "thread",
+        }
+    )
+    tool_message = ToolMessage(
+        content="raw tool result",
+        tool_call_id="call-1",
+    )
+    request = ModelRequest(
+        model=object(),
+        system_prompt=None,
+        messages=[
+            HumanMessage(content="hello"),
+            tool_message,
+        ],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={"messages": []},
+        runtime=runtime,
+    )
+    captured = {}
+
+    def handler(updated_request):
+        captured["messages"] = updated_request.messages
+        return ModelResponse(result=[AIMessage(content="fake answer")])
+
+    middleware.wrap_model_call(request, handler)
+
+    scope = "tenant|user|thread"
+    assert captured["messages"][0].content == f"anon[{scope}](hello)"
+    assert captured["messages"][1].content == f"anon[{scope}](raw tool result)"
+
+
+def test_model_response_deanonymizes_tool_call_arguments():
+    middleware, _processor = _middleware()
+    runtime = _runtime(
+        {
+            "tenant_id": "tenant",
+            "user_id": "user",
+            "thread_id": "thread",
+        }
+    )
+    request = ModelRequest(
+        model=object(),
+        system_prompt=None,
+        messages=[HumanMessage(content="hello")],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={"messages": []},
+        runtime=runtime,
+    )
+
+    def handler(_updated_request):
+        return ModelResponse(
+            result=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "lookup",
+                            "args": {"query": "anon[tenant|user|thread](Ivan)"},
+                            "id": "call-1",
+                        }
+                    ],
+                )
+            ]
+        )
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.result[0].tool_calls[0]["args"] == {
+        "query": "deanon[tenant|user|thread](anon[tenant|user|thread](Ivan))"
+    }
+
+
 def test_model_response_deanonymization_can_be_disabled_by_context_policy():
     middleware, _processor = _middleware()
     runtime = _runtime(
@@ -122,7 +204,7 @@ def test_model_response_deanonymization_can_be_disabled_by_context_policy():
     assert result.result[0].content == "fake answer"
 
 
-def test_async_tool_wrapper_deanonymizes_args_and_anonymizes_tool_message_result():
+def test_async_tool_wrapper_deanonymizes_args_and_returns_raw_tool_message_result():
     middleware, _processor = _middleware()
     runtime = _runtime(
         {
@@ -147,10 +229,10 @@ def test_async_tool_wrapper_deanonymizes_args_and_anonymizes_tool_message_result
 
     scope = "tenant|user|thread"
     assert captured["args"] == {"query": f"deanon[{scope}](fake user)"}
-    assert result.content == f"anon[{scope}](real tool result)"
+    assert result.content == "real tool result"
 
 
-def test_tool_wrapper_anonymizes_only_command_message_updates():
+def test_tool_wrapper_deanonymizes_args_and_returns_raw_command_message_updates():
     middleware, _processor = _middleware()
     runtime = _runtime(
         {
@@ -177,7 +259,7 @@ def test_tool_wrapper_anonymizes_only_command_message_updates():
     result = middleware.wrap_tool_call(request, handler)
 
     scope = "tenant|user|thread"
-    assert result.update["messages"][0].content == f"anon[{scope}](Success for Ivan)"
+    assert result.update["messages"][0].content == "Success for Ivan"
     assert result.update["artifacts"][0]["artifact_final_text"] == "Success for Ivan"
 
 

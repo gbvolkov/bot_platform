@@ -1032,7 +1032,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
             scanned_args,
             context,
             boundary="tool_arguments",
-            transform=profile.privacy.argument_transform,
+            transform="none",
         )
         return request.override(tool_call=tool_call), None
 
@@ -1057,14 +1057,8 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         if decision is not None:
             return message, decision
         minimized = minimize_tool_result(scanned_content, profile.result_policy)
-        transformed = self._apply_privacy_transform(
-            minimized,
-            context,
-            boundary="tool_result",
-            transform=profile.privacy.result_transform,
-        )
         updated = copy(message)
-        updated.content = transformed
+        updated.content = minimized
         return self._mark_tool_result_trust(updated, profile), None
 
     def _process_command_messages(
@@ -1127,7 +1121,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
                             minimize_tool_result(value, profile.result_policy),
                             context,
                             boundary="tool_result",
-                            transform=profile.privacy.result_transform,
+                            transform="none",
                         )
                 return _command_with_update(result, updated_update)
             return result
@@ -1141,12 +1135,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         if decision is not None:
             return self._blocked_tool_result(request, decision)
         minimized = minimize_tool_result(scanned, profile.result_policy)
-        return self._apply_privacy_transform(
-            minimized,
-            context,
-            boundary="tool_result",
-            transform=profile.privacy.result_transform,
-        )
+        return minimized
 
     def _authorize(
         self,
@@ -1276,7 +1265,24 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
             message,
             lambda text: self._privacy.deanonymize_text(text, context, boundary="model_response"),
         )
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            updated.tool_calls = [
+                self._deanonymize_tool_call(tool_call, context)
+                for tool_call in tool_calls
+            ]
         self._log(context, boundary="model_response", reason="Model response text de-anonymized.", categories=["privacy", "pii"])
+        return updated
+
+    def _deanonymize_tool_call(self, tool_call: Any, context: GuardrailContext) -> Any:
+        if not isinstance(tool_call, dict):
+            return tool_call
+        updated = dict(tool_call)
+        if "args" in updated:
+            updated["args"] = map_strings(
+                updated["args"],
+                lambda text: self._privacy.deanonymize_text(text, context, boundary="model_response.tool_arguments"),
+            )
         return updated
 
     def _deanonymize_model_result(self, result: Any, context: GuardrailContext) -> Any:
@@ -1452,8 +1458,7 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
             lambda text: self._privacy.deanonymize_text(text, context, boundary="tool_arguments"),
         )
         self._log(context, boundary="tool_arguments", reason="Tool arguments de-anonymized before execution.", categories=["privacy", "pii"])
-        result = handler(request.override(tool_call=tool_call))
-        return self._anonymize_tool_result(result, context)
+        return handler(request.override(tool_call=tool_call))
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler):
         if not self._guard_tool_calls:
@@ -1466,8 +1471,7 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
             lambda text: self._privacy.deanonymize_text(text, context, boundary="tool_arguments"),
         )
         self._log(context, boundary="tool_arguments", reason="Tool arguments de-anonymized before execution.", categories=["privacy", "pii"])
-        result = await handler(request.override(tool_call=tool_call))
-        return self._anonymize_tool_result(result, context)
+        return await handler(request.override(tool_call=tool_call))
 
 
 def _blocked_node_command(

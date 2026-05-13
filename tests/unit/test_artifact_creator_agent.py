@@ -964,9 +964,9 @@ def test_guarded_commit_tool_profile_preserves_raw_artifact_state(tmp_path):
 
     result = bundle.middleware.wrap_tool_call(request, handler)
 
-    assert result.update["artifacts"][0]["artifact_final_text"] == "deanon[tenant|user|thread](fake Ivan)"
+    assert result.update["artifacts"][0]["artifact_final_text"] == "fake Ivan"
     assert result.update["phase"] == "confirm"
-    assert result.update["messages"][0].content == "anon[tenant|user|thread]"
+    assert result.update["messages"][0].content == "Success"
 
 
 def test_run_agent_middleware_order_keeps_scanner_before_privacy(monkeypatch):

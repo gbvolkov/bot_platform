@@ -123,7 +123,6 @@ def read_only_unprofiled_tool_profile(name: str) -> ToolSecurityProfile:
         requires_approval=False,
         allow_external_access=False,
         allow_file_export=False,
-        privacy=ToolPrivacyProfile(argument_transform="none", result_transform="anonymize"),
         result_policy=ToolResultPolicy(scan_result=True, max_text_chars=4_000, max_items=20),
     )
 
@@ -255,12 +254,6 @@ ARTIFACT_CREATOR_TOOL_PROFILES: Mapping[str, ToolSecurityProfile] = {
         category="internal_state",
         sensitivity="internal",
         requires_approval=False,
-        privacy=ToolPrivacyProfile(
-            argument_transform="deanonymize",
-            result_transform="anonymize",
-            transform_command_messages_only=True,
-            preserve_command_update_keys=("artifacts", "phase"),
-        ),
         result_policy=ToolResultPolicy(scan_result=True, max_text_chars=4_000, max_items=20),
     )
 }
