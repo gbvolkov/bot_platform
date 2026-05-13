@@ -400,6 +400,7 @@ async def post_message(
             agent=agent,
             payload=payload.payload,
             conversation_id=conversation.id,
+            agent_id=conversation.agent_id,
             user_id=conversation.user_id,
             user_role=conversation.user_role,
             pending_interrupt=pending_interrupt,

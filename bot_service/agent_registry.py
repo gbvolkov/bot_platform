@@ -503,6 +503,14 @@ class AgentRegistry:
             return ["messages", "values"], False
         return list(definition.stream_modes), definition.stream_subgraphs
 
+    def allow_external_tool_access(self, agent_id: str | None) -> bool:
+        if not agent_id:
+            return False
+        definition = self._definitions.get(agent_id)
+        if definition is None:
+            return False
+        return bool(definition.init_params.get("allow_external_tool_access", False))
+
     def preload_all(self) -> None:
         for agent_id in self._definitions:
             if agent_id in self._instances:
@@ -516,4 +524,3 @@ class AgentRegistry:
 
 
 agent_registry = AgentRegistry()
-

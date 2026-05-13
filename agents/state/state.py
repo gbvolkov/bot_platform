@@ -1,5 +1,5 @@
 from typing import Annotated, Optional, List
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from langgraph.graph.message import AnyMessage, add_messages, Messages
 from langgraph.managed import IsLastStep, RemainingSteps
@@ -33,3 +33,5 @@ class ConfigSchema(TypedDict):
     database_prompt_context: Optional[str]
     return_files: Optional[bool]
     return_images: Optional[bool]
+    allow_external_tool_access: NotRequired[bool]
+    allow_external_search: NotRequired[bool]

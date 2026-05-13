@@ -162,6 +162,7 @@ def build_agent_config(
     user_id: str,
     user_role: Optional[str],
     raw_attachments: Optional[List[Dict[str, Any]]] = None,
+    allow_external_tool_access: bool = False,
 ) -> RunnableConfig:
     role = user_role or settings.default_user_role
     configurable: ConfigSchema = {
@@ -171,6 +172,8 @@ def build_agent_config(
     }
     if raw_attachments:
         configurable["attachments"] = raw_attachments
+    if allow_external_tool_access:
+        configurable["allow_external_tool_access"] = True
     return {"configurable": configurable}
 
 
@@ -178,6 +181,7 @@ async def invoke_agent(
     agent: Any,
     payload: MessagePayload,
     conversation_id: str,
+    agent_id: Optional[str],
     user_id: str,
     user_role: Optional[str],
     pending_interrupt: Optional[Dict[str, Any]] = None,
@@ -196,6 +200,7 @@ async def invoke_agent(
         user_id,
         user_role,
         raw_attachments=raw_attachments or None,
+        allow_external_tool_access=agent_registry.allow_external_tool_access(agent_id),
     )
 
     if pending_interrupt:
@@ -384,6 +389,7 @@ async def invoke_agent_stream(
         user_id,
         user_role,
         raw_attachments=raw_attachments or None,
+        allow_external_tool_access=agent_registry.allow_external_tool_access(agent_id),
     )
 
     queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
