@@ -46,6 +46,11 @@ class ArtifactAgentRegistrySettings:
     guardrail_prompt_injection_model: str | dict[str, Any] | None = None
     guardrail_prompt_injection_model_revision: str | None = None
     guardrail_prompt_injection_threshold: float | None = None
+    guardrail_palimpsest_run_entities: list[str] | None = None
+    guardrail_palimpsest_entity_table: Any | None = None
+    guardrail_palimpsest_typed_placeholders: bool | None = None
+    guardrail_palimpsest_options: dict[str, Any] | None = None
+    guardrail_palimpsest_session_options: dict[str, Any] | None = None
 
 
 def _persistent_checkpoint_saver():
@@ -291,6 +296,29 @@ def _load_agent_registry_settings(
     prompt_injection_threshold = params.get("guardrail_prompt_injection_threshold")
     if prompt_injection_threshold is not None:
         prompt_injection_threshold = float(prompt_injection_threshold)
+    palimpsest_run_entities = params.get("guardrail_palimpsest_run_entities")
+    if palimpsest_run_entities is not None and not isinstance(palimpsest_run_entities, list):
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_palimpsest_run_entities must be a list."
+        )
+    palimpsest_entity_table = params.get("guardrail_palimpsest_entity_table")
+    if palimpsest_entity_table is not None and not isinstance(palimpsest_entity_table, (dict, list)):
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_palimpsest_entity_table must be an object or list."
+        )
+    palimpsest_typed_placeholders = params.get("guardrail_palimpsest_typed_placeholders")
+    if palimpsest_typed_placeholders is not None and not isinstance(palimpsest_typed_placeholders, bool):
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_palimpsest_typed_placeholders must be a boolean."
+        )
+    palimpsest_options = params.get("guardrail_palimpsest_options")
+    if palimpsest_options is not None and not isinstance(palimpsest_options, dict):
+        raise ValueError(f"Agent '{agent_id}' guardrail_palimpsest_options must be an object.")
+    palimpsest_session_options = params.get("guardrail_palimpsest_session_options")
+    if palimpsest_session_options is not None and not isinstance(palimpsest_session_options, dict):
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_palimpsest_session_options must be an object."
+        )
 
     return ArtifactAgentRegistrySettings(
         tools_config=parse_agent_tools_config(agent_entry.get("tools"), agent_id=agent_id),
@@ -299,6 +327,17 @@ def _load_agent_registry_settings(
         guardrail_prompt_injection_model=prompt_injection_model,
         guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
         guardrail_prompt_injection_threshold=prompt_injection_threshold,
+        guardrail_palimpsest_run_entities=(
+            list(palimpsest_run_entities) if palimpsest_run_entities is not None else None
+        ),
+        guardrail_palimpsest_entity_table=palimpsest_entity_table,
+        guardrail_palimpsest_typed_placeholders=palimpsest_typed_placeholders,
+        guardrail_palimpsest_options=(
+            dict(palimpsest_options) if palimpsest_options is not None else None
+        ),
+        guardrail_palimpsest_session_options=(
+            dict(palimpsest_session_options) if palimpsest_session_options is not None else None
+        ),
     )
 
 
@@ -511,6 +550,11 @@ def main() -> int:
                     guardrail_prompt_injection_model=prompt_injection_model,
                     guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
                     guardrail_prompt_injection_threshold=prompt_injection_threshold,
+                    guardrail_palimpsest_run_entities=registry_settings.guardrail_palimpsest_run_entities,
+                    guardrail_palimpsest_entity_table=registry_settings.guardrail_palimpsest_entity_table,
+                    guardrail_palimpsest_typed_placeholders=registry_settings.guardrail_palimpsest_typed_placeholders,
+                    guardrail_palimpsest_options=registry_settings.guardrail_palimpsest_options,
+                    guardrail_palimpsest_session_options=registry_settings.guardrail_palimpsest_session_options,
                     guardrail_tool_profiles=registry_settings.guardrail_tool_profiles,
                     guardrail_unprofiled_tools=registry_settings.guardrail_unprofiled_tools,
                 )

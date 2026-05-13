@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 from langchain.agents.middleware import ModelRequest, ModelResponse
@@ -353,3 +354,116 @@ def test_palimpsest_preflight_reports_missing_ru_spacy_model(monkeypatch):
 
     assert "ru_core_news_sm" in message
     assert "uv sync" in message
+
+
+def test_palimpsest_entity_table_drives_run_entities_and_session_kwargs(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakePalimpsest:
+        def __init__(
+            self,
+            *,
+            verbose=False,
+            run_entities=None,
+            locale="ru-RU",
+            entity_table=None,
+            typed_placeholders=None,
+            placeholder_mode=None,
+        ):
+            captured["constructor"] = {
+                "verbose": verbose,
+                "run_entities": run_entities,
+                "locale": locale,
+                "entity_table": entity_table,
+                "typed_placeholders": typed_placeholders,
+                "placeholder_mode": placeholder_mode,
+            }
+
+        def create_session(
+            self,
+            *,
+            session_id=None,
+            entity_table=None,
+            typed_placeholders=None,
+            placeholder_style=None,
+        ):
+            captured["session"] = {
+                "session_id": session_id,
+                "entity_table": entity_table,
+                "typed_placeholders": typed_placeholders,
+                "placeholder_style": placeholder_style,
+            }
+            return FakeSession(session_id or "missing")
+
+    entity_table = {
+        "RU_PERSON": {"placeholder": "PERSON"},
+        "URL": {"placeholder": "URL", "enabled": False},
+        "PHONE_NUMBER": "PHONE",
+    }
+    monkeypatch.setitem(
+        sys.modules,
+        "palimpsest",
+        SimpleNamespace(Palimpsest=FakePalimpsest),
+    )
+
+    rail = PrivacyRail.from_palimpsest(
+        locale="en",
+        entity_table=entity_table,
+        typed_placeholders=True,
+        palimpsest_options={"placeholder_mode": "typed"},
+        palimpsest_session_options={"placeholder_style": "typed"},
+    )
+    rail.sessions.get_session("thread-1")
+
+    assert captured["constructor"] == {
+        "verbose": False,
+        "run_entities": ["RU_PERSON", "PHONE_NUMBER"],
+        "locale": "en",
+        "entity_table": entity_table,
+        "typed_placeholders": True,
+        "placeholder_mode": "typed",
+    }
+    assert captured["session"] == {
+        "session_id": "thread-1",
+        "entity_table": entity_table,
+        "typed_placeholders": True,
+        "placeholder_style": "typed",
+    }
+
+
+def test_palimpsest_new_options_require_new_palimpsest_api(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeLegacyPalimpsest:
+        def __init__(self, *, verbose=False, run_entities=None, locale="ru-RU"):
+            captured["constructor"] = {
+                "verbose": verbose,
+                "run_entities": run_entities,
+                "locale": locale,
+            }
+
+        def create_session(self, session_id=None):
+            captured["session_id"] = session_id
+            return FakeSession(session_id or "missing")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "palimpsest",
+        SimpleNamespace(Palimpsest=FakeLegacyPalimpsest),
+    )
+
+    try:
+        PrivacyRail.from_palimpsest(
+            locale="en",
+            entity_table={"RU_PERSON": {"placeholder": "PERSON"}},
+            typed_placeholders=True,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected legacy Palimpsest API to be rejected.")
+
+    assert captured == {}
+    assert "Palimpsest" in message
+    assert "entity_table" in message
+    assert "does not fall back" in message

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
+import inspect
 from importlib.util import find_spec
 from threading import RLock
 from typing import Any, Callable, Dict, Iterable, List, Mapping
@@ -24,6 +25,18 @@ DEFAULT_PALIMPSEST_ENTITIES = [
     "RU_BANK_ACC",
     "TICKET_NUMBER",
 ]
+DEFAULT_PALIMPSEST_ENTITY_TABLE = {
+    "RU_PERSON": {"placeholder": "PERSON"},
+    "CREDIT_CARD": {"placeholder": "CREDIT_CARD"},
+    "PHONE_NUMBER": {"placeholder": "PHONE"},
+    "IP_ADDRESS": {"placeholder": "IP_ADDRESS"},
+    "URL": {"placeholder": "URL"},
+    "RU_PASSPORT": {"placeholder": "PASSPORT"},
+    "SNILS": {"placeholder": "SNILS"},
+    "INN": {"placeholder": "INN"},
+    "RU_BANK_ACC": {"placeholder": "BANK_ACCOUNT"},
+    "TICKET_NUMBER": {"placeholder": "TICKET"},
+}
 
 _DEFAULT_SESSION_ID = "__manual__"
 _TEXT_KEYS = ("text", "content", "input", "title", "caption", "markdown", "explanation")
@@ -45,9 +58,136 @@ def _call_text_transform(target: Any, method_name: str, text: str) -> str:
     raise AttributeError(f"{target!r} has no {method_name!r} text transform")
 
 
+def _supports_var_kwargs(callable_obj: Callable[..., Any]) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _unsupported_kwargs(callable_obj: Callable[..., Any], kwargs: Mapping[str, Any]) -> list[str]:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return []
+    if _supports_var_kwargs(callable_obj):
+        return []
+    supported = set(signature.parameters)
+    return [key for key in kwargs if key not in supported]
+
+
+def _require_supported_kwargs(
+    callable_obj: Callable[..., Any],
+    kwargs: Mapping[str, Any],
+    *,
+    api_name: str,
+) -> None:
+    unsupported = _unsupported_kwargs(callable_obj, kwargs)
+    if unsupported:
+        raise RuntimeError(
+            f"{api_name} does not support required Palimpsest option(s): "
+            f"{', '.join(sorted(unsupported))}. Upgrade Palimpsest; platform privacy "
+            "configuration does not fall back to fake-name anonymization."
+        )
+
+
 def _normalise_session_id(value: Any) -> str:
     text = str(value or "").strip()
     return text or _DEFAULT_SESSION_ID
+
+
+def _entity_table_enabled(value: Any) -> bool:
+    if value is False:
+        return False
+    if isinstance(value, Mapping):
+        return bool(value.get("enabled", True))
+    return True
+
+
+def entity_types_from_table(entity_table: Any) -> list[str]:
+    """Extract Palimpsest entity names from a platform entity table."""
+    if entity_table is None:
+        return []
+    if isinstance(entity_table, Mapping):
+        return [
+            str(entity_type)
+            for entity_type, config in entity_table.items()
+            if str(entity_type).strip() and _entity_table_enabled(config)
+        ]
+    if isinstance(entity_table, str):
+        return [entity_table] if entity_table.strip() else []
+    result: list[str] = []
+    for item in entity_table:
+        if isinstance(item, str):
+            entity_type = item
+            enabled = True
+        elif isinstance(item, Mapping):
+            entity_type = (
+                item.get("entity_type")
+                or item.get("type")
+                or item.get("name")
+                or item.get("id")
+            )
+            enabled = _entity_table_enabled(item)
+        else:
+            continue
+        text = str(entity_type or "").strip()
+        if text and enabled:
+            result.append(text)
+    return result
+
+
+def _normalise_run_entities(
+    run_entities: Iterable[str] | None,
+    entity_table: Any = None,
+) -> list[str]:
+    if run_entities is not None:
+        return [str(entity) for entity in run_entities]
+    table_entities = entity_types_from_table(entity_table)
+    return table_entities or list(DEFAULT_PALIMPSEST_ENTITIES)
+
+
+def _palimpsest_constructor_kwargs(
+    *,
+    locale: str,
+    run_entities: Iterable[str] | None,
+    entity_table: Any,
+    typed_placeholders: bool | None,
+    verbose: bool,
+    palimpsest_options: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "verbose": verbose,
+        "run_entities": _normalise_run_entities(run_entities, entity_table),
+        "locale": locale,
+    }
+    if entity_table is not None:
+        kwargs["entity_table"] = entity_table
+    if typed_placeholders is not None:
+        kwargs["typed_placeholders"] = typed_placeholders
+    if palimpsest_options:
+        kwargs.update(dict(palimpsest_options))
+    return kwargs
+
+
+def _palimpsest_session_kwargs(
+    *,
+    entity_table: Any,
+    typed_placeholders: bool | None,
+    palimpsest_session_options: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if entity_table is not None:
+        kwargs["entity_table"] = entity_table
+    if typed_placeholders is not None:
+        kwargs["typed_placeholders"] = typed_placeholders
+    if palimpsest_session_options:
+        kwargs.update(dict(palimpsest_session_options))
+    return kwargs
 
 
 def _ensure_palimpsest_dependencies(locale: str) -> None:
@@ -114,9 +254,16 @@ def state_has_reset_message(state: Dict[str, Any]) -> bool:
 class PalimpsestSessionManager:
     """Owns one PalimpsestSession per explicit session id."""
 
-    def __init__(self, processor: Any, *, default_session_id: str = _DEFAULT_SESSION_ID) -> None:
+    def __init__(
+        self,
+        processor: Any,
+        *,
+        default_session_id: str = _DEFAULT_SESSION_ID,
+        create_session_kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
         self._processor = processor
         self._default_session_id = _normalise_session_id(default_session_id)
+        self._create_session_kwargs = dict(create_session_kwargs or {})
         self._sessions: Dict[str, Any] = {}
         self._lock = RLock()
 
@@ -125,7 +272,13 @@ class PalimpsestSessionManager:
         with self._lock:
             session = self._sessions.get(key)
             if session is None or bool(getattr(session, "closed", False)):
-                session = self._processor.create_session(session_id=key)
+                session_kwargs = {"session_id": key, **self._create_session_kwargs}
+                _require_supported_kwargs(
+                    self._processor.create_session,
+                    session_kwargs,
+                    api_name="Palimpsest.create_session",
+                )
+                session = self._processor.create_session(**session_kwargs)
                 self._sessions[key] = session
             return session
 
@@ -173,18 +326,40 @@ class PrivacyRail:
         cls,
         *,
         locale: str = "ru-RU",
-        run_entities: list[str] | None = None,
+        run_entities: Iterable[str] | None = None,
+        entity_table: Any = None,
+        typed_placeholders: bool | None = None,
+        palimpsest_options: Mapping[str, Any] | None = None,
+        palimpsest_session_options: Mapping[str, Any] | None = None,
         verbose: bool = False,
     ) -> "PrivacyRail":
         _ensure_palimpsest_dependencies(locale)
 
         from palimpsest import Palimpsest
 
+        constructor_kwargs = _palimpsest_constructor_kwargs(
+            locale=locale,
+            run_entities=run_entities,
+            entity_table=entity_table,
+            typed_placeholders=typed_placeholders,
+            verbose=verbose,
+            palimpsest_options=palimpsest_options,
+        )
+        _require_supported_kwargs(
+            Palimpsest,
+            constructor_kwargs,
+            api_name="Palimpsest",
+        )
+        processor = Palimpsest(**constructor_kwargs)
+        session_kwargs = _palimpsest_session_kwargs(
+            entity_table=entity_table,
+            typed_placeholders=typed_placeholders,
+            palimpsest_session_options=palimpsest_session_options,
+        )
         return cls(
-            Palimpsest(
-                verbose=verbose,
-                run_entities=run_entities or DEFAULT_PALIMPSEST_ENTITIES,
-                locale=locale,
+            session_manager=PalimpsestSessionManager(
+                processor,
+                create_session_kwargs=session_kwargs,
             )
         )
 
@@ -286,12 +461,14 @@ def transform_messages(messages: Iterable[BaseMessage], transform: Callable[[str
 
 __all__ = [
     "DEFAULT_PALIMPSEST_ENTITIES",
+    "DEFAULT_PALIMPSEST_ENTITY_TABLE",
     "PalimpsestSessionManager",
     "PrivacyRail",
     "_call_text_transform",
     "anonymize_with_session",
     "clone_message_with_transform",
     "content_is_reset",
+    "entity_types_from_table",
     "map_strings",
     "state_has_reset_message",
     "thread_id_from_config",

@@ -706,6 +706,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         "pipeline_kwargs": {"max_length": 256, "truncation": True},
         "tokenizer_kwargs": {"extra_special_tokens": {}},
     }
+    entity_table = {"RU_PERSON": {"placeholder": "PERSON"}}
 
     monkeypatch.setattr(artifact_agent.config, "LANGFUSE_URL", "https://langfuse.example")
     monkeypatch.setattr(artifact_agent, "RedactingJSONFileTracer", lambda path: "redacting_handler")
@@ -809,9 +810,21 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         guardrail_prompt_injection_model=prompt_model_config,
         guardrail_prompt_injection_model_revision="model-revision",
         guardrail_prompt_injection_threshold=0.5,
+        guardrail_palimpsest_run_entities=["RU_PERSON"],
+        guardrail_palimpsest_entity_table=entity_table,
+        guardrail_palimpsest_typed_placeholders=True,
+        guardrail_palimpsest_options={"placeholder_mode": "typed"},
+        guardrail_palimpsest_session_options={"placeholder_style": "typed"},
     )
 
-    assert captured["privacy_rail_kwargs"] == {"locale": "ru-RU"}
+    assert captured["privacy_rail_kwargs"] == {
+        "locale": "ru-RU",
+        "run_entities": ["RU_PERSON"],
+        "entity_table": entity_table,
+        "typed_placeholders": True,
+        "palimpsest_options": {"placeholder_mode": "typed"},
+        "palimpsest_session_options": {"placeholder_style": "typed"},
+    }
     assert captured["scanner_profile_kwargs"] == {
         "banned_topics": ["generic safety"],
         "failure_policy": "fail_open",

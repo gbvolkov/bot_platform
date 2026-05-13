@@ -11,7 +11,12 @@ from .middleware import (
     ToolExecutionSafetyMiddleware,
     guarded_node,
 )
-from .privacy import PrivacyRail, PalimpsestSessionManager
+from .privacy import (
+    DEFAULT_PALIMPSEST_ENTITY_TABLE,
+    PrivacyRail,
+    PalimpsestSessionManager,
+    entity_types_from_table,
+)
 from .scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerSpec
 from .tool_policy import (
     ARTIFACT_CREATOR_TOOL_PROFILES,
@@ -36,6 +41,7 @@ __all__ = [
     "ScannerSpec",
     "SecurityScannerMiddleware",
     "ARTIFACT_CREATOR_TOOL_PROFILES",
+    "DEFAULT_PALIMPSEST_ENTITY_TABLE",
     "GuardedToolBundle",
     "GuardedToolEntry",
     "GuardedToolRegistry",
@@ -47,6 +53,7 @@ __all__ = [
     "ToolResultPolicy",
     "ToolSecurityProfile",
     "build_guardrail_context",
+    "entity_types_from_table",
     "guarded_node",
     "make_decision",
     "privacy_scope_key",
