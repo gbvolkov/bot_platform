@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Literal, Mapping, TypedDict
+from typing import Any, Literal, Mapping, NotRequired, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_config
@@ -22,7 +22,8 @@ class GuardrailContext(TypedDict):
     request_id: str
     risk_level: RiskLevel
     allow_deanonymization: bool
-    allow_external_search: bool
+    allow_external_tool_access: bool
+    allow_external_search: NotRequired[bool]
     allow_file_export: bool
     allow_sensitive_data: bool
 
@@ -117,6 +118,11 @@ def build_guardrail_context(
         default=_MISSING_THREAD,
     )
 
+    allow_external_tool_access = _bool_value(
+        configurable.get("allow_external_tool_access", configurable.get("allow_external_search")),
+        False,
+    )
+
     return {
         "tenant_id": tenant_id,
         "user_id": user_id,
@@ -139,7 +145,8 @@ def build_guardrail_context(
             configurable.get("allow_deanonymization"),
             default_allow_deanonymization,
         ),
-        "allow_external_search": _bool_value(configurable.get("allow_external_search"), False),
+        "allow_external_tool_access": allow_external_tool_access,
+        "allow_external_search": allow_external_tool_access,
         "allow_file_export": _bool_value(configurable.get("allow_file_export"), False),
         "allow_sensitive_data": _bool_value(configurable.get("allow_sensitive_data"), False),
     }

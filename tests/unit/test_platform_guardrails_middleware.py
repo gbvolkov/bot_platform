@@ -39,13 +39,14 @@ class FakeProcessor:
         return session
 
 
-def _middleware(log_path=None):
+def _middleware(log_path=None, *, guard_tool_calls: bool = True):
     processor = FakeProcessor()
     rail = PrivacyRail(session_manager=PalimpsestSessionManager(processor))
     middleware = PrivacyModelRequestMiddleware(
         rail,
         agent_name="artifact_creator_agent.run",
         event_log_path=str(log_path) if log_path else None,
+        guard_tool_calls=guard_tool_calls,
     )
     return middleware, processor
 
@@ -178,6 +179,33 @@ def test_tool_wrapper_anonymizes_only_command_message_updates():
     scope = "tenant|user|thread"
     assert result.update["messages"][0].content == f"anon[{scope}](Success for Ivan)"
     assert result.update["artifacts"][0]["artifact_final_text"] == "Success for Ivan"
+
+
+def test_tool_wrapper_can_defer_tool_guarding_to_execution_middleware():
+    middleware, _processor = _middleware(guard_tool_calls=False)
+    runtime = _runtime(
+        {
+            "tenant_id": "tenant",
+            "user_id": "user",
+            "thread_id": "thread",
+        }
+    )
+    request = ToolCallRequest(
+        tool_call={"name": "lookup", "args": {"query": "fake user"}, "id": "call-1", "type": "tool_call"},
+        tool=None,
+        state={},
+        runtime=runtime,
+    )
+    captured = {}
+
+    def handler(updated_request):
+        captured["args"] = updated_request.tool_call["args"]
+        return ToolMessage(content="real tool result", tool_call_id="call-1")
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert captured["args"] == {"query": "fake user"}
+    assert result.content == "real tool result"
 
 
 def test_middleware_resets_context_session_on_reset_message():

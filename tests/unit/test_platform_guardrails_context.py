@@ -15,7 +15,7 @@ def test_build_guardrail_context_uses_configurable_fields():
                 "thread_id": "thread-1",
                 "model": "base",
                 "allow_deanonymization": False,
-                "allow_external_search": True,
+                "allow_external_tool_access": True,
             }
         },
         agent_name="artifact_creator_agent",
@@ -34,8 +34,19 @@ def test_build_guardrail_context_uses_configurable_fields():
     assert context["tool_name"] == "lookup"
     assert context["request_id"] == "req-1"
     assert context["allow_deanonymization"] is False
+    assert context["allow_external_tool_access"] is True
     assert context["allow_external_search"] is True
     assert privacy_scope_key(context) == "tenant-1|user-1|thread-1"
+
+
+def test_build_guardrail_context_accepts_deprecated_external_search_alias():
+    context = build_guardrail_context(
+        config={"configurable": {"allow_external_search": True}},
+        agent_name="artifact_creator_agent",
+    )
+
+    assert context["allow_external_tool_access"] is True
+    assert context["allow_external_search"] is True
 
 
 def test_build_guardrail_context_falls_back_to_runtime_and_stable_scope_parts():

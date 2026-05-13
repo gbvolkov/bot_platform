@@ -6,13 +6,14 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from .context import GuardrailContext
-from .decisions import GuardrailDecision, allow, block
+from .decisions import GuardrailDecision, allow, block, redact
 from .injection import scanner_category, scanner_decision
 
 
 ScannerFailurePolicy = Literal["fail_closed", "fail_open"]
 
 FORBIDDEN_LLM_GUARD_SCANNERS = {"Anonymize", "Deanonymize"}
+PROMPT_INJECTION_SENTENCE_PLACEHOLDER = "[guarded sentence removed]"
 GENERIC_BANNED_TOPICS = [
     "self-harm instructions",
     "weapons construction",
@@ -75,9 +76,24 @@ class LLMGuardScannerProfile:
         banned_topics: Sequence[str] | None = None,
         failure_policy: ScannerFailurePolicy = "fail_closed",
         token_limit: int = 8192,
+        prompt_injection_threshold: float | None = None,
+        prompt_injection_model: str | Mapping[str, Any] | None = None,
+        prompt_injection_model_revision: str | None = None,
     ) -> "LLMGuardScannerProfile":
         topics = list(GENERIC_BANNED_TOPICS if banned_topics is None else banned_topics)
-        prompt_injection = ScannerSpec("PromptInjection", {"threshold": 0.92, "match_type": "sentence"})
+        prompt_injection_config: dict[str, Any] = {
+            "match_type": "sentence",
+        }
+        if prompt_injection_threshold is not None:
+            prompt_injection_config["threshold"] = prompt_injection_threshold
+        if prompt_injection_model is not None:
+            prompt_injection_config["model"] = prompt_injection_model_config(
+                prompt_injection_model,
+                revision=prompt_injection_model_revision,
+            )
+        elif prompt_injection_model_revision is not None:
+            raise ValueError("prompt_injection_model_revision requires prompt_injection_model.")
+        prompt_injection = ScannerSpec("PromptInjection", prompt_injection_config)
         input_scanners = [
             ScannerSpec("TokenLimit", {"limit": token_limit}),
             ScannerSpec("Secrets", {"redact_mode": "all"}),
@@ -188,6 +204,88 @@ class LLMGuardScannerRail:
             scan_one=lambda scanner, value: scanner.scan(value),
         )
 
+    def redact_prompt_injection_sentences(
+        self,
+        text: str,
+        context: GuardrailContext,
+        *,
+        boundary: str = "tool_result",
+        placeholder: str = PROMPT_INJECTION_SENTENCE_PLACEHOLDER,
+    ) -> ScannerScanResult:
+        current = text
+        decisions: list[GuardrailDecision] = []
+        redacted_count = 0
+        highest_score = 0.0
+
+        prompt_injection_specs = [
+            spec for spec in self._profile.input_scanners if spec.name == "PromptInjection"
+        ]
+        for spec in prompt_injection_specs:
+            try:
+                scanner = self._instance_for_spec(spec, "input")
+                sentences = _prompt_injection_sentence_inputs(scanner, current)
+            except Exception as exc:  # noqa: BLE001 - scanner errors are policy-controlled
+                decisions.append(
+                    _scanner_error_decision(
+                        spec,
+                        exc,
+                        stage="input",
+                        boundary=boundary,
+                        failure_policy=self._profile.failure_policy,
+                        context=context,
+                    )
+                )
+                if decisions[-1]["allowed"] is False or self._profile.fail_fast:
+                    break
+                continue
+
+            for sentence in sentences:
+                if not isinstance(sentence, str) or not sentence.strip():
+                    continue
+                try:
+                    _sanitized, is_valid, risk_score = scanner.scan(sentence)
+                except Exception as exc:  # noqa: BLE001 - scanner errors are policy-controlled
+                    decisions.append(
+                        _scanner_error_decision(
+                            spec,
+                            exc,
+                            stage="input",
+                            boundary=boundary,
+                            failure_policy=self._profile.failure_policy,
+                            context=context,
+                        )
+                    )
+                    if decisions[-1]["allowed"] is False or self._profile.fail_fast:
+                        break
+                    continue
+                if is_valid:
+                    continue
+                updated, replaced = _replace_first_occurrence(current, sentence, placeholder)
+                if not replaced:
+                    continue
+                current = updated
+                redacted_count += 1
+                highest_score = max(highest_score, risk_score if risk_score >= 0 else 0.0)
+
+        if redacted_count:
+            decisions.append(
+                redact(
+                    "PromptInjection scanner redacted tool result sentence(s).",
+                    risk_score=max(0.8, min(1.0, highest_score)),
+                    categories=[scanner_category("PromptInjection")],
+                    metadata={
+                        "rail": "llm_guard",
+                        "scanner": "PromptInjection",
+                        "stage": "input",
+                        "boundary": boundary,
+                        "sanitized_changed": current != text,
+                        "redacted_sentences": redacted_count,
+                        **_context_metadata(context),
+                    },
+                )
+            )
+        return ScannerScanResult(text=current, decisions=decisions)
+
     def _instance_for_spec(self, spec: ScannerSpec, stage: Literal["input", "output"]) -> Any:
         if spec.scanner is not None:
             return spec.scanner
@@ -278,6 +376,91 @@ def _coerce_spec(value: ScannerSpec | Mapping[str, Any]) -> ScannerSpec:
     if isinstance(value, str):
         return ScannerSpec(value)
     raise TypeError(f"Unsupported scanner spec: {value!r}")
+
+
+def prompt_injection_model_config(
+    model: str | Mapping[str, Any],
+    *,
+    revision: str | None = None,
+) -> dict[str, Any]:
+    if isinstance(model, str):
+        config: dict[str, Any] = {"path": model}
+    elif isinstance(model, Mapping):
+        config = dict(model)
+    else:
+        raise TypeError(f"Unsupported prompt injection model config: {model!r}")
+
+    if revision is not None:
+        config["revision"] = revision
+    if str(config.get("revision") or "").strip().lower() == "latest":
+        config.pop("revision", None)
+    return _normalize_llm_guard_model_config(config)
+
+
+def _normalize_llm_guard_model_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    updated = dict(config)
+
+    kwargs = dict(updated.get("kwargs") or {})
+    for label_key in ("id2label", "label2id"):
+        if label_key in updated:
+            kwargs[label_key] = updated.pop(label_key)
+
+    id2label = kwargs.get("id2label")
+    if isinstance(id2label, Mapping):
+        kwargs["id2label"] = {
+            _coerce_int_key(key): value
+            for key, value in id2label.items()
+        }
+
+    for section in ("kwargs", "pipeline_kwargs", "tokenizer_kwargs"):
+        section_value = kwargs if section == "kwargs" else updated.get(section)
+        if section_value is None:
+            updated.pop(section, None)
+        elif isinstance(section_value, Mapping):
+            updated[section] = dict(section_value)
+        else:
+            raise TypeError(f"Prompt injection model {section} must be a mapping.")
+
+    return updated
+
+
+def _coerce_int_key(key: Any) -> Any:
+    if isinstance(key, str):
+        try:
+            return int(key)
+        except ValueError:
+            return key
+    return key
+
+
+def _prompt_injection_sentence_inputs(scanner: Any, text: str) -> list[str]:
+    match_type = getattr(scanner, "_match_type", None)
+    get_inputs = getattr(match_type, "get_inputs", None)
+    if not callable(get_inputs):
+        return []
+    inputs = get_inputs(text)
+    return list(inputs or [])
+
+
+def _replace_first_occurrence(text: str, target: str, replacement: str) -> tuple[str, bool]:
+    index = text.find(target)
+    if index < 0:
+        return text, False
+    return text[:index] + replacement + text[index + len(target) :], True
+
+
+def _coerce_prompt_injection_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    updated = dict(config)
+    model_config = updated.get("model")
+    if model_config is None:
+        return updated
+
+    from llm_guard.model import Model
+
+    if isinstance(model_config, Model):
+        return updated
+    updated["model"] = Model(**prompt_injection_model_config(model_config))
+    return updated
 
 
 def _scan_text(
@@ -452,7 +635,7 @@ def _build_input_scanner(spec: ScannerSpec) -> Any:
     if spec.name == "PromptInjection":
         from llm_guard.input_scanners import PromptInjection
 
-        return PromptInjection(**dict(spec.config))
+        return PromptInjection(**_coerce_prompt_injection_config(spec.config))
     if spec.name == "Secrets":
         from llm_guard.input_scanners import Secrets
 
@@ -497,9 +680,11 @@ __all__ = [
     "GENERIC_BANNED_TOPICS",
     "LLMGuardScannerProfile",
     "LLMGuardScannerRail",
+    "PROMPT_INJECTION_SENTENCE_PLACEHOLDER",
     "ScannerFailurePolicy",
     "ScannerScanResult",
     "ScannerSpec",
+    "prompt_injection_model_config",
     "scan_composite_input_text",
     "scan_input_text",
     "scan_output_text",

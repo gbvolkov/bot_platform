@@ -382,7 +382,7 @@ class GuardrailContext(TypedDict):
     request_id: str
     risk_level: Literal["low", "medium", "high", "critical"]
     allow_deanonymization: bool
-    allow_external_search: bool
+    allow_external_tool_access: bool
     allow_file_export: bool
     allow_sensitive_data: bool
 ```
@@ -881,7 +881,7 @@ roles:
       - lookup_term
       - lookup_abbreviation
     allow_deanonymization: true
-    allow_external_search: true
+    allow_external_tool_access: true
     allow_file_export: false
     allow_sensitive_ticket_data: true
 
@@ -891,7 +891,7 @@ roles:
       - lookup_term
       - lookup_abbreviation
     allow_deanonymization: false
-    allow_external_search: true
+    allow_external_tool_access: true
     allow_file_export: false
     allow_sensitive_ticket_data: false
 
@@ -901,7 +901,7 @@ roles:
       - lookup_term
       - lookup_abbreviation
     allow_deanonymization: false
-    allow_external_search: false
+    allow_external_tool_access: false
     allow_file_export: false
     allow_sensitive_ticket_data: false
 ```

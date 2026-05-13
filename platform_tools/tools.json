@@ -1,0 +1,73 @@
+{
+  "internal_tools": [
+    {
+      "id": "fetch_user_info",
+      "import": "agents.user_info:fetch_user_info"
+    },
+    {
+      "id": "lookup_term",
+      "factory": "agents.retrievers.retriever:get_term_and_defition_tools"
+    },
+    {
+      "id": "search_kb",
+      "factory": "agents.retrievers.retriever:get_search_tool"
+    },
+    {
+      "id": "search_tickets",
+      "factory": "agents.retrievers.retriever:get_tickets_search_tool"
+    },
+    {
+      "id": "store_artifact_tool",
+      "import": "agents.tools.store:store_artifact_tool"
+    },
+    {
+      "id": "web_search_tool",
+      "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "params": {
+        "api_key": "${YA_API_KEY}",
+        "folder_id": "${YA_FOLDER_ID}",
+        "max_results": 5,
+        "summarize": true
+      }
+    },
+    {
+      "id": "think_tool",
+      "factory": "agents.tools.think:ThinkTool"
+    }
+  ],
+  "mcp_servers": [
+    {
+      "id": "googleapis_maps",
+      "name": "maps",
+      "aliases": ["maps", "google_maps"],
+      "transport": "http",
+      "url": "https://mapstools.googleapis.com/mcp",
+      "headers": {
+        "X-Goog-Api-Key": "${GOOGLE_MAPS_GROUNDING_LITE_API_KEY}"
+      },
+      "tool_name_prefix": true
+    },
+    {
+      "id": "gmail",
+      "name": "gmail",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["@shinzolabs/gmail-mcp"],
+      "env": {
+        "CLIENT_ID": "${GMAIL_MCP_CLIENT_ID}",
+        "CLIENT_SECRET": "${GMAIL_MCP_CLIENT_SECRET}",
+        "REFRESH_TOKEN": "${GMAIL_MCP_REFRESH_TOKEN}",
+        "TELEMETRY_ENABLED": "false",
+        "PORT": "3001"
+      },
+      "tool_name_prefix": true
+    },
+    {
+      "id": "nhtsa",
+      "name": "nhtsa",
+      "transport": "http",
+      "url": "https://nhtsa.caseyjhand.com/mcp",
+      "tool_name_prefix": false
+    }
+  ]
+}

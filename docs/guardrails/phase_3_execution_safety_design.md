@@ -96,7 +96,70 @@ Examples:
 - a privacy-preserving external API tool may require anonymized arguments
   before execution and no de-anonymization afterward.
 
-## 3. Goals
+## 3. Execution Split
+
+Phase 3 should be delivered as three sequential implementation subphases. Each
+subphase must be independently reviewable and testable.
+
+### 3.1 Phase 3A - Tool Execution Safety
+
+Scope:
+
+- `platform_guardrails/tool_policy.py`;
+- `ToolExecutionSafetyMiddleware`;
+- profile-driven tool authorization;
+- profile-driven tool argument/result privacy transforms;
+- tool argument scanning;
+- tool result scanning and minimization;
+- `artifact_creator_agent` sample wiring.
+
+Exit criteria:
+
+- `artifact_creator_agent` no longer relies on the argument-only
+  `ToolContentScannerMiddleware` for guarded tool execution;
+- every guarded tool call has a profile or is blocked;
+- `commit_artifact_final_text` stores real artifact text while returning safe
+  model-visible tool messages;
+- tool policy and artifact integration tests pass.
+
+### 3.2 Phase 3B - Retrieval Safety
+
+Scope:
+
+- `platform_guardrails/retrieval.py`;
+- `rag_lib`/LangChain document result normalization;
+- GAZ runtime payload normalization;
+- source trust labeling;
+- per-chunk scanner enforcement;
+- safe context rendering.
+
+Exit criteria:
+
+- retrieval guard APIs work with `rag_lib` document-style results;
+- retrieval itself is not Palimpsest-anonymized;
+- blocked chunks are excluded from model context;
+- retrieval audit logs contain scanner metadata but no raw chunk text.
+
+### 3.3 Phase 3C - SQL Safety
+
+Scope:
+
+- `platform_guardrails/sql_policy.py`;
+- deterministic SQL parsing and validation;
+- read-only enforcement;
+- table/column/sensitive-field policy;
+- row and field minimization;
+- guarded integration into `agents/sql_query_gen.py` and BI/reporting flows
+  behind explicit configuration.
+
+Exit criteria:
+
+- unsafe SQL is rejected before execution;
+- generated and repaired SQL are both validated;
+- sensitive rows/fields can be minimized before answer generation and export;
+- SQL policy tests and existing BI tests pass.
+
+## 4. Goals
 
 1. Add common Phase 3 modules:
 
@@ -147,7 +210,7 @@ platform_guardrails/sql_policy.py
   tool messages returned to the model are privacy-protected;
 - keep Phase 1 and Phase 2 scanner/privacy behavior unchanged for model calls.
 
-## 4. Non-Goals
+## 5. Non-Goals
 
 Phase 3 should not:
 
@@ -161,9 +224,9 @@ Phase 3 should not:
 
 Those are separate rollout or later-phase tasks.
 
-## 5. Target Runtime Flow
+## 6. Target Runtime Flow
 
-### 5.1 Model call flow, unchanged from Phase 2
+### 6.1 Model call flow, unchanged from Phase 2
 
 ```text
 messages/state/system prompt
@@ -175,7 +238,7 @@ messages/state/system prompt
   -> graph state/user response
 ```
 
-### 5.2 Tool execution flow, new in Phase 3
+### 6.2 Tool execution flow, new in Phase 3
 
 ```text
 model-generated tool call
@@ -193,7 +256,7 @@ model-generated tool call
   -> return safe ToolMessage/Command/update to graph
 ```
 
-### 5.3 Retrieval flow, new common guard
+### 6.3 Retrieval flow, new common guard
 
 ```text
 query
@@ -208,7 +271,7 @@ query
   -> later Palimpsest model/tool-boundary transform
 ```
 
-### 5.4 SQL flow, new common guard
+### 6.4 SQL flow, new common guard
 
 ```text
 user question
@@ -223,9 +286,9 @@ user question
   -> optional file/image export governed by context policy
 ```
 
-## 6. New Module: `platform_guardrails/tool_policy.py`
+## 7. New Module: `platform_guardrails/tool_policy.py`
 
-### 6.1 Core data types
+### 7.1 Core data types
 
 ```python
 from dataclasses import dataclass, field
@@ -279,7 +342,7 @@ class ToolSecurityProfile:
     result_policy: ToolResultPolicy = field(default_factory=ToolResultPolicy)
 ```
 
-### 6.2 Policy rail
+### 7.2 Policy rail
 
 The policy rail should convert every policy decision into the common
 `GuardrailDecision` contract.
@@ -288,7 +351,7 @@ Required checks:
 
 - unprofiled tools are blocked by default for guarded agents;
 - `context.user_role` must be in `profile.allowed_roles`;
-- `profile.allow_external_network` requires `context.allow_external_search`;
+- `profile.allow_external_access` requires `context.allow_external_tool_access`;
 - `profile.allow_file_export` requires `context.allow_file_export`;
 - `profile.data_sensitivity in {"confidential", "regulated"}` requires
   `context.allow_sensitive_data`, unless the profile explicitly allows the role;
@@ -319,7 +382,7 @@ class ToolPolicyRail:
         ...
 ```
 
-### 6.3 Tool execution middleware
+### 7.3 Tool execution middleware
 
 Add a new middleware:
 
@@ -363,7 +426,7 @@ PrivacyModelRequestMiddleware(guard_tool_calls=True)
 ToolContentScannerMiddleware(...)
 ```
 
-### 6.4 Tool argument scanning
+### 7.4 Tool argument scanning
 
 Tool arguments are model-generated output, so they should be scanned with the
 scanner rail's output profile, matching current Phase 2 behavior.
@@ -381,7 +444,7 @@ If a scanner returns:
 - `review` or `block`: do not execute the tool and remove the model tool-call
   message from state when possible.
 
-### 6.5 Tool result scanning
+### 7.5 Tool result scanning
 
 Tool results are untrusted context entering the graph/model, even when the tool
 is internal. They should be scanned before being returned to model context.
@@ -403,7 +466,7 @@ scanner_rail.scan_input_text(result_text, context, boundary="tool_result")
 and add a dedicated `scan_tool_result_text(...)` profile later if input/output
 scanner differences become important.
 
-### 6.6 Tool result minimization
+### 7.6 Tool result minimization
 
 The middleware must support result minimization before model context:
 
@@ -417,7 +480,7 @@ The middleware must support result minimization before model context:
 This is important for tools that return structured payloads, SQL rows, or raw
 retrieved excerpts.
 
-### 6.7 Artifact creator sample profile
+### 7.7 Artifact creator sample profile
 
 Initial built-in profile:
 
@@ -455,7 +518,7 @@ Expected behavior:
   tool runs by argument scanning;
 - unsafe tool-result text is blocked or sanitized before it re-enters the graph.
 
-### 6.8 Optional extra tools in `artifact_creator_agent`
+### 7.8 Optional extra tools in `artifact_creator_agent`
 
 `initialize_agent(..., tools=[...])` currently accepts arbitrary extra tools.
 For guarded execution, extra tools need profiles.
@@ -470,9 +533,9 @@ guardrail_unprofiled_tools: Literal["block", "allow_read_only"] = "block"
 When `guardrails_enabled=True`, unprofiled extra tools should be blocked by
 default. This is safer and makes tool exposure explicit.
 
-## 7. New Module: `platform_guardrails/retrieval.py`
+## 8. New Module: `platform_guardrails/retrieval.py`
 
-### 7.1 Core data types
+### 8.1 Core data types
 
 ```python
 from dataclasses import dataclass, field
@@ -503,7 +566,7 @@ class GuardedChunk:
     decisions: tuple[GuardrailDecision, ...] = ()
 ```
 
-### 7.2 Source trust policy
+### 8.2 Source trust policy
 
 Default mapping:
 
@@ -516,7 +579,7 @@ Default mapping:
 | `tool` | `internal` | Depends on tool profile. |
 | `unknown` | `untrusted` | Safe default. |
 
-### 7.3 rag_lib normalization
+### 8.3 rag_lib normalization
 
 The guard must accept either LangChain `Document` objects returned from
 `rag_lib` retrievers or structured payloads such as those returned by
@@ -550,7 +613,7 @@ For `search_sales_materials`, candidate previews can be guarded as short chunks,
 but deep content scanning should happen on `read_material` excerpts, where the
 actual text that will reach the model is available.
 
-### 7.4 Retrieval guard rail
+### 8.4 Retrieval guard rail
 
 ```python
 class RetrievalGuardrail:
@@ -585,7 +648,7 @@ Rules:
 - never call `PrivacyRail.anonymize_text(...)` here;
 - log scanner decisions without raw chunk text.
 
-### 7.5 Retrieval context assembly
+### 8.5 Retrieval context assembly
 
 Provide a helper that renders only allowed chunks:
 
@@ -605,16 +668,16 @@ This labels retrieved content as data, not instructions. It does not replace
 prompt-level instruction hierarchy, but it helps downstream prompts keep source
 boundaries clear.
 
-## 8. New Module: `platform_guardrails/sql_policy.py`
+## 9. New Module: `platform_guardrails/sql_policy.py`
 
-### 8.1 Dependency
+### 9.1 Dependency
 
 Use `sqlglot` for deterministic parsing and AST inspection.
 
 If `sqlglot` is not available, guarded SQL execution should fail closed when
 SQL guardrails are enabled.
 
-### 8.2 Core data types
+### 9.2 Core data types
 
 ```python
 from dataclasses import dataclass, field
@@ -648,7 +711,7 @@ class SQLValidationResult:
     normalized_query: str | None = None
 ```
 
-### 8.3 Validation rules
+### 9.3 Validation rules
 
 The validator must reject:
 
@@ -668,7 +731,7 @@ The validator must reject:
 The first implementation may fail closed on missing limits rather than rewrite
 SQL. A second step can add safe limit injection using `sqlglot` AST rewriting.
 
-### 8.4 Integration with `agents/sql_query_gen.py`
+### 9.4 Integration with `agents/sql_query_gen.py`
 
 Current flow:
 
@@ -699,7 +762,7 @@ for attempt in range(3):
 
 The repaired query must be validated again before execution.
 
-### 8.5 Row and field minimization
+### 9.5 Row and field minimization
 
 Add a row minimizer:
 
@@ -727,7 +790,7 @@ Rules:
 security control by itself. SQL policy should enforce security-sensitive caps
 before answer generation and export.
 
-## 9. Middleware Ordering For `artifact_creator_agent`
+## 10. Middleware Ordering For `artifact_creator_agent`
 
 Current guarded drafting middleware:
 
@@ -763,7 +826,7 @@ ToolExecutionSafetyMiddleware only if confirmation tools are added
 The current confirmation agent has no external tools beyond structured output,
 so Phase 3 does not need a tool guard there unless future tools are added.
 
-## 10. Backward Compatibility Plan
+## 11. Backward Compatibility Plan
 
 1. Keep `ToolContentScannerMiddleware` exported for existing tests and any
    agent still using it.
@@ -774,7 +837,7 @@ so Phase 3 does not need a tool guard there unless future tools are added.
 5. Do not change `sd_ass_agent` legacy retrieval in Phase 3. Design new
    retrieval guard APIs around `rag_lib`.
 
-## 11. Configuration Additions
+## 12. Configuration Additions
 
 `artifact_creator_agent.initialize_agent(...)` should add:
 
@@ -807,9 +870,9 @@ or future policy files:
 Policy-as-code YAML remains Phase 5. Phase 3 can use Python dataclasses and
 JSON-compatible config parsing.
 
-## 12. Test Plan
+## 13. Test Plan
 
-### 12.1 Tool policy tests
+### 13.1 Tool policy tests
 
 Add `tests/unit/test_platform_guardrails_tool_policy.py`.
 
@@ -819,14 +882,14 @@ Required cases:
 - role-denied tool returns block and handler is not called;
 - unprofiled tool blocks by default;
 - `requires_approval=True` returns review and handler is not called;
-- external tool requires `allow_external_search=True`;
+- external tool requires `allow_external_tool_access=True`;
 - file export tool requires `allow_file_export=True`;
 - confidential/regulated tool requires sensitive-data permission or allowed
   role;
 - blocked tool-call AI message is removed from graph state when possible;
 - audit log does not contain raw arguments.
 
-### 12.2 Tool privacy tests
+### 13.2 Tool privacy tests
 
 Required cases:
 
@@ -839,7 +902,7 @@ Required cases:
 - privacy transforms are not duplicated when
   `PrivacyModelRequestMiddleware(guard_tool_calls=False)` is used.
 
-### 12.3 Tool result scanner tests
+### 13.3 Tool result scanner tests
 
 Required cases:
 
@@ -849,7 +912,7 @@ Required cases:
 - source-provided URL memory still allows preserving sourced URLs;
 - large result payload is minimized.
 
-### 12.4 Retrieval tests
+### 13.4 Retrieval tests
 
 Add `tests/unit/test_platform_guardrails_retrieval.py`.
 
@@ -864,7 +927,7 @@ Required cases:
 - retrieval guard never calls `PrivacyRail`;
 - guardrail audit logs contain scanner metadata but not raw chunk text.
 
-### 12.5 SQL policy tests
+### 13.5 SQL policy tests
 
 Add `tests/unit/test_platform_guardrails_sql_policy.py`.
 
@@ -882,7 +945,7 @@ Required cases:
 - repaired SQL is revalidated before execution;
 - row minimizer drops sensitive fields and caps rows.
 
-### 12.6 Artifact creator integration tests
+### 13.6 Artifact creator integration tests
 
 Extend `tests/unit/test_artifact_creator_agent.py`.
 
@@ -896,7 +959,9 @@ Required cases:
 - unauthorized extra tool is blocked when no profile is supplied;
 - profiled extra read-only tool can execute for allowed role.
 
-## 13. Implementation Steps
+## 14. Implementation Steps
+
+### 14.1 Phase 3A - Tools
 
 1. Implement `tool_policy.py` dataclasses, registry, evaluation logic, and
    result minimization helpers.
@@ -905,13 +970,55 @@ Required cases:
 3. Add `guard_tool_calls` option to `PrivacyModelRequestMiddleware`.
 4. Wire `artifact_creator_agent` to the new middleware and built-in
    `commit_artifact_final_text` profile.
-5. Add focused tool policy and artifact integration tests.
-6. Implement `retrieval.py` normalizers and `RetrievalGuardrail`.
-7. Add retrieval unit tests using fake `Document`/GAZ payloads.
-8. Implement `sql_policy.py` with `sqlglot` validation and row minimization.
-9. Integrate SQL validation into `agents/sql_query_gen.py` behind an explicit
-   guarded parameter, then update BI agent config only after tests pass.
-10. Run focused regression tests:
+5. Add focused tool policy, tool privacy, tool result scanner, and artifact
+   integration tests.
+6. Run the Phase 3A focused test set:
+
+```powershell
+uv run pytest -q `
+  tests\unit\test_platform_guardrails_middleware.py `
+  tests\unit\test_platform_guardrails_scanners.py `
+  tests\unit\test_platform_guardrails_tool_policy.py `
+  tests\unit\test_artifact_creator_agent.py
+```
+
+### 14.2 Phase 3B - Retrieval
+
+1. Implement `retrieval.py` normalizers and `RetrievalGuardrail`.
+2. Add `rag_lib`/LangChain document normalization tests.
+3. Add GAZ runtime payload normalization tests.
+4. Add scanner/trust-labeling tests using fake `Document` and GAZ payloads.
+5. Keep retrieval-level Palimpsest anonymization out of this subphase.
+6. Run the Phase 3B focused test set:
+
+```powershell
+uv run pytest -q `
+  tests\unit\test_platform_guardrails_scanners.py `
+  tests\unit\test_platform_guardrails_retrieval.py `
+  tests\unit\test_gaz_runtime.py
+```
+
+### 14.3 Phase 3C - SQL
+
+1. Implement `sql_policy.py` with `sqlglot` validation and row minimization.
+2. Add SQL policy tests.
+3. Integrate SQL validation into `agents/sql_query_gen.py` behind an explicit
+   guarded parameter.
+4. Validate generated and repaired SQL before every execution attempt.
+5. Update BI agent guarded configuration only after the common SQL policy tests
+   pass.
+6. Run the Phase 3C focused test set:
+
+```powershell
+uv run pytest -q `
+  tests\unit\test_platform_guardrails_sql_policy.py `
+  tests\unit\test_sql_query_gen.py
+```
+
+### 14.4 Full Phase 3 Regression
+
+After all three subphases pass independently, run the combined guardrail and
+affected-agent regression set:
 
 ```powershell
 uv run pytest -q `
@@ -924,9 +1031,11 @@ uv run pytest -q `
   tests\unit\test_sql_query_gen.py
 ```
 
-## 14. Acceptance Criteria
+## 15. Acceptance Criteria
 
-Phase 3 is complete for the sample integration when:
+### 15.1 Phase 3A - Tools
+
+Tools are complete when:
 
 - `artifact_creator_agent` uses a common tool execution guard;
 - every guarded tool call has a resolved profile or is blocked;
@@ -935,14 +1044,34 @@ Phase 3 is complete for the sample integration when:
 - tool arguments and results support profile-driven Palimpsest transforms;
 - tool outputs are scanned before re-entering model context;
 - artifact storage still preserves the real final artifact text;
+- tool guard logs avoid raw tool payloads and Palimpsest mappings.
+
+### 15.2 Phase 3B - Retrieval
+
+Retrieval is complete when:
+
 - retrieval guard APIs work with `rag_lib` document-style results and do not
   anonymize retrieval itself;
-- SQL guard APIs reject unsafe SQL deterministically;
-- SQL result minimization can remove sensitive fields and cap rows;
-- all new guardrail logs avoid raw prompts, raw retrieved chunks, raw tool
-  payloads, raw SQL rows, and Palimpsest mappings.
+- GAZ runtime payloads can be normalized into guarded chunks;
+- retrieved chunks are trust-labeled by source type;
+- blocked chunks are excluded from rendered model context;
+- retrieval logs avoid raw retrieved chunks and Palimpsest mappings.
 
-## 15. Open Decisions
+### 15.3 Phase 3C - SQL
+
+SQL is complete when:
+
+- SQL guard APIs reject unsafe SQL deterministically;
+- generated and repaired SQL are validated before execution;
+- SQL result minimization can remove sensitive fields and cap rows;
+- SQL logs avoid raw result rows and Palimpsest mappings.
+
+### 15.4 Full Phase 3
+
+Phase 3 is complete when all three subphase exit criteria are met and the full
+Phase 3 regression set passes.
+
+## 16. Open Decisions
 
 1. Approval UX: until there is a human approval workflow, should
    `requires_approval=True` map to `review` or hard `block`? Recommended Phase 3
@@ -959,4 +1088,3 @@ Phase 3 is complete for the sample integration when:
 5. Unprofiled tools: should guarded agents ever allow read-only unprofiled
    tools? Recommended default: block. Allow read-only only in local development
    or explicit test profiles.
-

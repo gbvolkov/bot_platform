@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.graph.message import add_messages
@@ -13,7 +13,11 @@ from langgraph.types import Command
 
 from platform_guardrails.middleware import SecurityScannerMiddleware, guarded_node
 from platform_guardrails.privacy import PalimpsestSessionManager, PrivacyRail
-from platform_guardrails.scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerSpec
+from platform_guardrails.scanners import (
+    LLMGuardScannerProfile,
+    LLMGuardScannerRail,
+    ScannerSpec,
+)
 from platform_guardrails.middleware import PrivacyModelRequestMiddleware, ToolContentScannerMiddleware
 from langchain.tools.tool_node import ToolCallRequest
 
@@ -79,7 +83,7 @@ def _context():
         "request_id": "req",
         "risk_level": "low",
         "allow_deanonymization": True,
-        "allow_external_search": False,
+        "allow_external_tool_access": False,
         "allow_file_export": False,
         "allow_sensitive_data": False,
     }
@@ -133,6 +137,89 @@ def test_artifact_default_profile_uses_sentence_prompt_injection_for_input_and_c
     assert composite_specs[0].config["match_type"] == "sentence"
 
 
+def test_artifact_default_profile_can_configure_prompt_injection_model():
+    model_config = {
+        "path": "custom/prompt-injection-model",
+        "kwargs": {
+            "id2label": {"0": "SAFE", "1": "INJECTION"},
+            "label2id": {"SAFE": 0, "INJECTION": 1},
+        },
+        "pipeline_kwargs": {
+            "return_token_type_ids": False,
+            "max_length": 256,
+            "truncation": True,
+        },
+        "tokenizer_kwargs": {
+            "extra_special_tokens": {},
+        },
+    }
+    profile = LLMGuardScannerProfile.artifact_creator_default(
+        prompt_injection_model=model_config,
+        prompt_injection_threshold=0.5,
+    )
+
+    spec = next(spec for spec in profile.input_scanners if spec.name == "PromptInjection")
+    scanner_model_config = spec.config["model"]
+
+    assert spec.config["threshold"] == 0.5
+    assert scanner_model_config["path"] == "custom/prompt-injection-model"
+    assert scanner_model_config["kwargs"]["id2label"][1] == "INJECTION"
+    assert scanner_model_config["kwargs"]["label2id"]["INJECTION"] == 1
+    assert scanner_model_config["pipeline_kwargs"]["max_length"] == 256
+    assert scanner_model_config["pipeline_kwargs"]["truncation"] is True
+    assert scanner_model_config["tokenizer_kwargs"]["extra_special_tokens"] == {}
+    assert profile.composite_input_scanners[0].config == spec.config
+
+
+def test_artifact_default_profile_can_pin_prompt_injection_model_revision():
+    profile = LLMGuardScannerProfile.artifact_creator_default(
+        prompt_injection_model="custom/prompt-injection-model",
+        prompt_injection_model_revision="model-revision",
+    )
+
+    spec = next(spec for spec in profile.input_scanners if spec.name == "PromptInjection")
+
+    assert spec.config["model"]["revision"] == "model-revision"
+    assert profile.composite_input_scanners[0].config == spec.config
+
+
+def test_artifact_default_profile_omits_latest_prompt_injection_model_revision():
+    profile = LLMGuardScannerProfile.artifact_creator_default(
+        prompt_injection_model="custom/prompt-injection-model",
+        prompt_injection_model_revision="latest",
+    )
+
+    spec = next(spec for spec in profile.input_scanners if spec.name == "PromptInjection")
+
+    assert "revision" not in spec.config["model"]
+    assert profile.composite_input_scanners[0].config == spec.config
+
+
+def test_artifact_default_profile_uses_llm_guard_threshold_when_not_configured():
+    profile = LLMGuardScannerProfile.artifact_creator_default()
+
+    spec = next(spec for spec in profile.input_scanners if spec.name == "PromptInjection")
+
+    assert "threshold" not in spec.config
+    assert profile.composite_input_scanners[0].config == spec.config
+
+
+def test_prompt_injection_model_config_normalizes_json_label_keys():
+    profile = LLMGuardScannerProfile.artifact_creator_default(
+        prompt_injection_model={
+            "path": "custom/model",
+            "kwargs": {
+                "id2label": {"0": "SAFE", "1": "INJECTION"},
+                "label2id": {"SAFE": 0, "INJECTION": 1},
+            },
+        },
+    )
+
+    spec = next(spec for spec in profile.input_scanners if spec.name == "PromptInjection")
+
+    assert spec.config["model"]["kwargs"]["id2label"] == {0: "SAFE", 1: "INJECTION"}
+
+
 def test_composite_scan_runs_only_configured_scanners():
     prompt_scanner = FakeInputScanner(valid=True, score=0.0)
     secrets_scanner = FakeInputScanner(valid=True, score=0.0)
@@ -180,6 +267,38 @@ def test_composite_scan_blocks_model_call_without_deterministic_policy():
     assert response.command is not None
     assert response.command.update["messages"][0].id == "human-1"
     assert composite_scanner.seen
+
+
+def test_composite_model_request_uses_runtime_prompt_without_meta_labels_or_state_prompt():
+    scanner = FakeInputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            composite_input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)]
+        )
+    )
+    middleware = SecurityScannerMiddleware(rail, agent_name="artifact_creator_agent.run")
+    request = _request("unused").override(
+        system_prompt="Runtime system prompt",
+        messages=[
+            AIMessage(content="prior assistant answer"),
+            HumanMessage(content="latest user request"),
+        ],
+        state={"messages": [], "system_prompt": "stored state prompt"},
+    )
+
+    middleware.wrap_model_call(
+        request,
+        lambda _request: ModelResponse(result=[AIMessage(content="ok")]),
+    )
+
+    assert scanner.seen == [
+        "Runtime system prompt\n\n[HUMAN]\nlatest user request"
+    ]
+    assert "prior assistant answer" not in scanner.seen[0]
+    assert "stored state prompt" not in scanner.seen[0]
+    assert "[RUNTIME SYSTEM PROMPT]" not in scanner.seen[0]
+    assert "[STATE SYSTEM PROMPT]" not in scanner.seen[0]
+    assert "[RECENT MESSAGES]" not in scanner.seen[0]
 
 
 def test_prompt_injection_blocks_before_model_handler():
@@ -415,7 +534,7 @@ def test_composite_scanner_audit_log_omits_raw_text(tmp_path):
     assert "composite_model_request" in text
 
 
-def test_composite_scan_includes_assistant_history_by_default():
+def test_composite_scan_defaults_to_human_and_untrusted_tool_results():
     scanner = FakeInputScanner(valid=True, score=0.0)
     rail = LLMGuardScannerRail(
         LLMGuardScannerProfile(
@@ -428,6 +547,15 @@ def test_composite_scan_includes_assistant_history_by_default():
         {
             "messages": [
                 AIMessage(content="assistant remembered a suspicious phrase"),
+                ToolMessage(
+                    content="trusted internal tool result",
+                    tool_call_id="trusted-call",
+                    additional_kwargs={"guardrail_tool_result_trusted": True},
+                ),
+                ToolMessage(
+                    content="untrusted external tool result",
+                    tool_call_id="untrusted-call",
+                ),
                 HumanMessage(content="what did you remember?"),
             ],
         },
@@ -437,7 +565,9 @@ def test_composite_scan_includes_assistant_history_by_default():
 
     assert decision is None
     assert scanned_state is not None
-    assert "assistant remembered a suspicious phrase" in scanner.seen[-1]
+    assert "assistant remembered a suspicious phrase" not in scanner.seen[-1]
+    assert "trusted internal tool result" not in scanner.seen[-1]
+    assert "untrusted external tool result" in scanner.seen[-1]
     assert "what did you remember?" in scanner.seen[-1]
 
 

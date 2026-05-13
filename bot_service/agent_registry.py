@@ -19,6 +19,7 @@ from agents.utils import ModelType
 from .config import settings
 from .initialize_agents import parse_yaml
 from .schemas import AgentInfo, ContentType
+from .tool_registry import AgentToolsConfig, build_agent_tools, parse_agent_tools_config
 
 
 LOG = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class AgentDefinition:
     is_active: bool = True
     init_params: Dict[str, Any] = field(default_factory=dict)
     init_context: Dict[str, Any] = field(default_factory=dict)
+    tools_config: AgentToolsConfig = field(default_factory=AgentToolsConfig)
     checkpoint_saver: Any = None
     param_names: frozenset[str] = field(default_factory=frozenset)
     accepts_kwargs: bool = False
@@ -246,6 +248,7 @@ def _build_definitions_from_config(
         if not isinstance(params, dict):
             raise ValueError(f"Agent '{agent_id}' params must be a mapping.")
         params = dict(params)
+        tools_config = parse_agent_tools_config(entry.get("tools"), agent_id=agent_id)
         init_context = _parse_init_context(entry.get("init_context"), agent_id=agent_id)
         provider = _coerce_provider(params.pop("provider", None), default_provider)
         checkpoint_saver = params.pop("checkpoint_saver", None)
@@ -264,6 +267,7 @@ def _build_definitions_from_config(
             is_active=is_active,
             init_params=params,
             init_context=init_context,
+            tools_config=tools_config,
             checkpoint_saver=checkpoint_saver,
             param_names=param_names,
             accepts_kwargs=accepts_kwargs,
@@ -386,6 +390,23 @@ class AgentRegistry:
                     LOG.warning(
                         "Agent '%s' init_context configured but initialize_agent() does not accept init_context; skipping.",
                         agent_id,
+                    )
+
+            if definition.tools_config.configured:
+                if "tools" not in definition.param_names and not definition.accepts_kwargs:
+                    raise ValueError(
+                        f"Agent '{agent_id}' config declares tools, but initialize_agent() "
+                        "does not accept a 'tools' parameter."
+                    )
+                configured_tools = await build_agent_tools(definition.tools_config)
+                existing_tools = params.get("tools")
+                if existing_tools is None:
+                    params["tools"] = configured_tools
+                elif isinstance(existing_tools, (list, tuple)):
+                    params["tools"] = [*existing_tools, *configured_tools]
+                else:
+                    raise ValueError(
+                        f"Agent '{agent_id}' params.tools must be a list when config tools are also declared."
                     )
 
             if not definition.accepts_kwargs:

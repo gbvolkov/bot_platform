@@ -29,6 +29,12 @@ from .privacy import (
     transform_content,
 )
 from .scanners import LLMGuardScannerRail, ScannerScanResult
+from .tool_policy import (
+    ToolPolicyRail,
+    ToolPrivacyTransform,
+    ToolSecurityProfile,
+    minimize_tool_result,
+)
 
 
 class PalimpsestSessionMiddleware(AgentMiddleware):
@@ -140,6 +146,8 @@ class PalimpsestSessionMiddleware(AgentMiddleware):
 
 
 _SCAN_TEXT_KEYS = ("text", "content", "input", "title", "caption", "markdown", "explanation")
+_TOOL_RESULT_TRUSTED_KEY = "guardrail_tool_result_trusted"
+_TOOL_RESULT_TOOL_NAME_KEY = "guardrail_tool_name"
 
 
 def _message_is_untrusted_input(message: BaseMessage) -> bool:
@@ -148,6 +156,36 @@ def _message_is_untrusted_input(message: BaseMessage) -> bool:
 
 def _message_is_model_output(message: BaseMessage) -> bool:
     return isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+
+
+def _message_is_tool_result(message: BaseMessage) -> bool:
+    return isinstance(message, ToolMessage) or getattr(message, "type", None) == "tool"
+
+
+def _tool_result_is_untrusted(message: BaseMessage) -> bool:
+    additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+    if _TOOL_RESULT_TRUSTED_KEY in additional_kwargs:
+        return not bool(additional_kwargs[_TOOL_RESULT_TRUSTED_KEY])
+    return True
+
+
+def _tool_profile_result_is_untrusted(profile: ToolSecurityProfile) -> bool:
+    return (
+        profile.allow_external_access
+        or profile.side_effect == "external"
+        or profile.category in {"retrieval", "external_access"}
+    )
+
+
+def _decision_is_prompt_injection_block(decision: GuardrailDecision | None) -> bool:
+    if decision is None:
+        return False
+    metadata = decision.get("metadata", {})
+    return (
+        decision.get("action") == "block"
+        and metadata.get("scanner") == "PromptInjection"
+        and "prompt_injection" in decision.get("categories", [])
+    )
 
 
 def _decision_message(decision: GuardrailDecision) -> str:
@@ -195,6 +233,25 @@ def _latest_human_message_index(messages: Iterable[BaseMessage]) -> int | None:
         if isinstance(message, HumanMessage) or getattr(message, "type", None) == "human":
             return index
     return None
+
+
+def _include_in_composite_input(
+    message: BaseMessage,
+    *,
+    allowed_roles: Iterable[str] | None,
+) -> bool:
+    role = _message_role(message).lower()
+    if allowed_roles is None:
+        if role == "human":
+            return True
+        if role == "tool":
+            return _tool_result_is_untrusted(message)
+        return False
+    if role not in allowed_roles:
+        return False
+    if role == "tool":
+        return _tool_result_is_untrusted(message)
+    return True
 
 
 def _command_with_update(command: Command, update: dict[str, Any]) -> Command:
@@ -415,11 +472,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
         message_roles: Iterable[str] | None = None,
     ) -> str:
         parts: list[str] = []
-        state_system_prompt = state.get("system_prompt")
-        if isinstance(state_system_prompt, str) and state_system_prompt:
-            parts.append("[STATE SYSTEM PROMPT]\n" + state_system_prompt)
         if system_prompt:
-            parts.append("[RUNTIME SYSTEM PROMPT]\n" + system_prompt)
+            parts.append(system_prompt)
 
         source_messages = list(messages)
         limit = self._composite_recent_message_limit if recent_message_limit is None else max(0, int(recent_message_limit))
@@ -433,13 +487,13 @@ class SecurityScannerMiddleware(AgentMiddleware):
         message_parts: list[str] = []
         for message in source_messages:
             role = _message_role(message).lower()
-            if allowed_roles is not None and role not in allowed_roles:
+            if not _include_in_composite_input(message, allowed_roles=allowed_roles):
                 continue
             text = _message_text(message)
             if text:
                 message_parts.append(f"[{role.upper()}]\n{text}")
         if message_parts:
-            parts.append("[RECENT MESSAGES]\n" + "\n\n".join(message_parts))
+            parts.append("\n\n".join(message_parts))
         return "\n\n".join(parts)
 
     def _composite_block_cleanup(
@@ -731,6 +785,411 @@ class ToolContentScannerMiddleware(AgentMiddleware):
         return await handler(request.override(tool_call=tool_call))
 
 
+class ToolExecutionSafetyMiddleware(AgentMiddleware):
+    """Policy, scanner, and privacy guardrail for concrete tool execution."""
+
+    def __init__(
+        self,
+        policy_rail: ToolPolicyRail,
+        *,
+        scanner_rail: LLMGuardScannerRail | None = None,
+        privacy_rail: PrivacyRail | None = None,
+        agent_name: str = "unknown",
+        event_logger: GuardrailEventLogger | None = None,
+        event_log_path: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._policy = policy_rail
+        self._scanners = scanner_rail
+        self._privacy = privacy_rail
+        self._agent_name = agent_name
+        self._events = event_logger or GuardrailEventLogger(event_log_path)
+
+    def _context(self, request: ToolCallRequest) -> GuardrailContext:
+        tool_name = str(request.tool_call.get("name") or "")
+        return build_guardrail_context(
+            runtime=request.runtime,
+            state=request.state,
+            agent_name=self._agent_name,
+            tool_name=tool_name,
+        )
+
+    def _log_decision(self, decision: GuardrailDecision) -> None:
+        self._events.log_decision(decision)
+
+    def _log_scan_result(self, result: ScannerScanResult) -> None:
+        for decision in result.decisions:
+            self._log_decision(decision)
+
+    def _log_privacy_transform(
+        self,
+        context: GuardrailContext,
+        *,
+        boundary: str,
+        transform: ToolPrivacyTransform,
+    ) -> None:
+        if transform == "none":
+            return
+        action = "de-anonymized" if transform == "deanonymize" else "anonymized"
+        self._log_decision(
+            redact(
+                f"Tool {boundary} text {action}.",
+                categories=["privacy", "pii"],
+                metadata={
+                    "boundary": boundary,
+                    "rail": "tool_execution",
+                    "agent_name": context["agent_name"],
+                    "thread_id": context["thread_id"],
+                    "user_role": context["user_role"],
+                    "request_id": context["request_id"],
+                    "tool_name": context.get("tool_name"),
+                    "transform": transform,
+                },
+            )
+        )
+
+    def _scan_tool_arguments(
+        self,
+        value: Any,
+        context: GuardrailContext,
+        *,
+        prompt: str = "",
+    ) -> tuple[Any, GuardrailDecision | None]:
+        if self._scanners is None:
+            return value, None
+        if isinstance(value, str):
+            result = self._scanners.scan_output_text(prompt, value, context, boundary="tool_arguments")
+            self._log_scan_result(result)
+            return result.text, result.blocked_decision
+        if isinstance(value, dict):
+            updated = {}
+            for key, item in value.items():
+                scanned, decision = self._scan_tool_arguments(item, context, prompt=prompt)
+                if decision is not None:
+                    return value, decision
+                updated[key] = scanned
+            return updated, None
+        if isinstance(value, list):
+            updated = []
+            for item in value:
+                scanned, decision = self._scan_tool_arguments(item, context, prompt=prompt)
+                if decision is not None:
+                    return value, decision
+                updated.append(scanned)
+            return updated, None
+        return value, None
+
+    def _scan_tool_result(
+        self,
+        value: Any,
+        context: GuardrailContext,
+        profile: ToolSecurityProfile,
+        *,
+        prompt: str = "",
+    ) -> tuple[Any, GuardrailDecision | None]:
+        if self._scanners is None or not profile.result_policy.scan_result:
+            return value, None
+        if isinstance(value, str):
+            result = self._scanners.scan_input_text(value, context, boundary="tool_result")
+            decision = result.blocked_decision
+            if _decision_is_prompt_injection_block(decision):
+                redacted = self._scanners.redact_prompt_injection_sentences(
+                    value,
+                    context,
+                    boundary="tool_result",
+                )
+                self._log_scan_result(redacted)
+                if redacted.blocked_decision is not None:
+                    return value, redacted.blocked_decision
+                if redacted.text != value:
+                    verified = self._scanners.scan_input_text(
+                        redacted.text,
+                        context,
+                        boundary="tool_result",
+                    )
+                    self._log_scan_result(verified)
+                    return verified.text, verified.blocked_decision
+            self._log_scan_result(result)
+            return result.text, decision
+        if isinstance(value, dict):
+            updated = {}
+            for key, item in value.items():
+                scanned, decision = self._scan_tool_result(item, context, profile, prompt=prompt)
+                if decision is not None:
+                    return value, decision
+                updated[key] = scanned
+            return updated, None
+        if isinstance(value, list):
+            updated = []
+            for item in value:
+                scanned, decision = self._scan_tool_result(item, context, profile, prompt=prompt)
+                if decision is not None:
+                    return value, decision
+                updated.append(scanned)
+            return updated, None
+        return value, None
+
+    def _apply_privacy_transform(
+        self,
+        value: Any,
+        context: GuardrailContext,
+        *,
+        boundary: str,
+        transform: ToolPrivacyTransform,
+    ) -> Any:
+        if self._privacy is None or transform == "none":
+            return value
+        if transform == "anonymize":
+            updated = map_strings(
+                value,
+                lambda text: self._privacy.anonymize_text(text, context, boundary=boundary),
+            )
+        else:
+            updated = map_strings(
+                value,
+                lambda text: self._privacy.deanonymize_text(text, context, boundary=boundary),
+            )
+        self._log_privacy_transform(context, boundary=boundary, transform=transform)
+        return updated
+
+    def _mark_tool_result_trust(
+        self,
+        message: BaseMessage,
+        profile: ToolSecurityProfile,
+    ) -> BaseMessage:
+        if not _message_is_tool_result(message):
+            return message
+        updated = copy(message)
+        additional_kwargs = dict(getattr(updated, "additional_kwargs", None) or {})
+        additional_kwargs[_TOOL_RESULT_TRUSTED_KEY] = not _tool_profile_result_is_untrusted(profile)
+        additional_kwargs[_TOOL_RESULT_TOOL_NAME_KEY] = profile.name
+        updated.additional_kwargs = additional_kwargs
+        return updated
+
+    def _tool_prompt(self, request: ToolCallRequest) -> str:
+        if not isinstance(request.state, dict):
+            return ""
+        return _join_message_text(request.state.get("messages") or [])
+
+    def _tool_call_message_ids(self, request: ToolCallRequest) -> list[str]:
+        tool_call_id = request.tool_call.get("id")
+        if not tool_call_id or not isinstance(request.state, dict):
+            return []
+        message_ids: list[str] = []
+        for message in request.state.get("messages") or []:
+            if not _message_is_model_output(message):
+                continue
+            for tool_call in getattr(message, "tool_calls", None) or []:
+                if isinstance(tool_call, dict) and tool_call.get("id") == tool_call_id:
+                    message_id = getattr(message, "id", None)
+                    if isinstance(message_id, str) and message_id:
+                        message_ids.append(message_id)
+                    break
+        return message_ids
+
+    def _blocked_tool_result(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage | Command:
+        tool_call_id = request.tool_call.get("id")
+        tool_message_id = f"guardrail-blocked-tool-{tool_call_id}" if isinstance(tool_call_id, str) and tool_call_id else None
+        tool_message = ToolMessage(
+            content=_decision_message(decision),
+            tool_call_id=tool_call_id,
+            id=tool_message_id,
+        )
+        removal_updates = [RemoveMessage(id=message_id) for message_id in self._tool_call_message_ids(request)]
+        if not removal_updates:
+            return tool_message
+        tool_updates: list[BaseMessage] = [tool_message]
+        if tool_message_id is not None:
+            tool_updates.append(RemoveMessage(id=tool_message_id))
+        return Command(
+            update={
+                "messages": [
+                    *removal_updates,
+                    *tool_updates,
+                    AIMessage(
+                        content=_decision_message(decision),
+                        id=f"guardrail-block-{uuid4().hex}",
+                    ),
+                ]
+            }
+        )
+
+    def _prepare_tool_call(
+        self,
+        request: ToolCallRequest,
+        context: GuardrailContext,
+        profile: ToolSecurityProfile,
+    ) -> tuple[ToolCallRequest | None, GuardrailDecision | None]:
+        tool_call = dict(request.tool_call)
+        scanned_args, decision = self._scan_tool_arguments(
+            tool_call.get("args", {}),
+            context,
+            prompt=self._tool_prompt(request),
+        )
+        if decision is not None:
+            return None, decision
+        tool_call["args"] = self._apply_privacy_transform(
+            scanned_args,
+            context,
+            boundary="tool_arguments",
+            transform=profile.privacy.argument_transform,
+        )
+        return request.override(tool_call=tool_call), None
+
+    def _process_message_result(
+        self,
+        message: Any,
+        context: GuardrailContext,
+        profile: ToolSecurityProfile,
+        *,
+        prompt: str,
+    ) -> tuple[Any, GuardrailDecision | None]:
+        if isinstance(message, RemoveMessage):
+            return message, None
+        if not isinstance(message, BaseMessage):
+            return message, None
+        scanned_content, decision = self._scan_tool_result(
+            getattr(message, "content", None),
+            context,
+            profile,
+            prompt=prompt,
+        )
+        if decision is not None:
+            return message, decision
+        minimized = minimize_tool_result(scanned_content, profile.result_policy)
+        transformed = self._apply_privacy_transform(
+            minimized,
+            context,
+            boundary="tool_result",
+            transform=profile.privacy.result_transform,
+        )
+        updated = copy(message)
+        updated.content = transformed
+        return self._mark_tool_result_trust(updated, profile), None
+
+    def _process_command_messages(
+        self,
+        messages: Any,
+        context: GuardrailContext,
+        profile: ToolSecurityProfile,
+        *,
+        prompt: str,
+    ) -> tuple[Any, GuardrailDecision | None]:
+        if isinstance(messages, list):
+            updated = []
+            for message in messages:
+                processed, decision = self._process_command_messages(
+                    message,
+                    context,
+                    profile,
+                    prompt=prompt,
+                )
+                if decision is not None:
+                    return messages, decision
+                updated.append(processed)
+            return updated, None
+        return self._process_message_result(messages, context, profile, prompt=prompt)
+
+    def _process_model_visible_result(
+        self,
+        result: Any,
+        request: ToolCallRequest,
+        context: GuardrailContext,
+        profile: ToolSecurityProfile,
+    ) -> Any:
+        prompt = self._tool_prompt(request)
+        if isinstance(result, ToolMessage):
+            updated, decision = self._process_message_result(result, context, profile, prompt=prompt)
+            if decision is not None:
+                return self._blocked_tool_result(request, decision)
+            return updated
+        if isinstance(result, Command):
+            update = getattr(result, "update", None)
+            if isinstance(update, dict):
+                updated_update = dict(update)
+                if "messages" in updated_update:
+                    messages, decision = self._process_command_messages(
+                        updated_update["messages"],
+                        context,
+                        profile,
+                        prompt=prompt,
+                    )
+                    if decision is not None:
+                        return self._blocked_tool_result(request, decision)
+                    updated_update["messages"] = messages
+
+                if not profile.privacy.transform_command_messages_only:
+                    preserved = set(profile.privacy.preserve_command_update_keys)
+                    for key, value in list(updated_update.items()):
+                        if key == "messages" or key in preserved:
+                            continue
+                        updated_update[key] = self._apply_privacy_transform(
+                            minimize_tool_result(value, profile.result_policy),
+                            context,
+                            boundary="tool_result",
+                            transform=profile.privacy.result_transform,
+                        )
+                return _command_with_update(result, updated_update)
+            return result
+        if isinstance(result, BaseMessage):
+            updated, decision = self._process_message_result(result, context, profile, prompt=prompt)
+            if decision is not None:
+                return self._blocked_tool_result(request, decision)
+            return updated
+
+        scanned, decision = self._scan_tool_result(result, context, profile, prompt=prompt)
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        minimized = minimize_tool_result(scanned, profile.result_policy)
+        return self._apply_privacy_transform(
+            minimized,
+            context,
+            boundary="tool_result",
+            transform=profile.privacy.result_transform,
+        )
+
+    def _authorize(
+        self,
+        request: ToolCallRequest,
+        context: GuardrailContext,
+    ) -> tuple[ToolSecurityProfile | None, GuardrailDecision | None]:
+        tool_name = str(request.tool_call.get("name") or "")
+        profile = self._policy.profile_for(tool_name)
+        decision = self._policy.evaluate_call(tool_name, request.tool_call.get("args") or {}, context)
+        self._log_decision(decision)
+        if decision["action"] in {"block", "review"}:
+            return profile, decision
+        if profile is None:
+            return None, redact(
+                "Tool is missing an execution profile.",
+                categories=["tool_policy"],
+                metadata={"tool_name": tool_name, "rail": "tool_execution"},
+            )
+        return profile, None
+
+    def wrap_tool_call(self, request: ToolCallRequest, handler):
+        context = self._context(request)
+        profile, decision = self._authorize(request, context)
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        updated_request, decision = self._prepare_tool_call(request, context, profile)
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        result = handler(updated_request)
+        return self._process_model_visible_result(result, request, context, profile)
+
+    async def awrap_tool_call(self, request: ToolCallRequest, handler):
+        context = self._context(request)
+        profile, decision = self._authorize(request, context)
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        updated_request, decision = self._prepare_tool_call(request, context, profile)
+        if decision is not None:
+            return self._blocked_tool_result(request, decision)
+        result = await handler(updated_request)
+        return self._process_model_visible_result(result, request, context, profile)
+
+
 class PrivacyModelRequestMiddleware(AgentMiddleware):
     """Context-aware privacy middleware for guarded agents."""
 
@@ -740,6 +1199,7 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         *,
         agent_name: str = "unknown",
         anonymize_tool_results: bool = True,
+        guard_tool_calls: bool = True,
         event_logger: GuardrailEventLogger | None = None,
         event_log_path: str | None = None,
     ) -> None:
@@ -747,6 +1207,7 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         self._privacy = privacy_rail
         self._agent_name = agent_name
         self._anonymize_tool_results = anonymize_tool_results
+        self._guard_tool_calls = guard_tool_calls
         self._events = event_logger or GuardrailEventLogger(event_log_path)
 
     def _context(self, runtime: Any, state: Dict[str, Any] | None = None, *, tool_name: str | None = None) -> GuardrailContext:
@@ -981,6 +1442,8 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         return result
 
     def wrap_tool_call(self, request: ToolCallRequest, handler):
+        if not self._guard_tool_calls:
+            return handler(request)
         tool_name = str(request.tool_call.get("name") or "")
         context = self._context(request.runtime, request.state, tool_name=tool_name)
         tool_call = dict(request.tool_call)
@@ -993,6 +1456,8 @@ class PrivacyModelRequestMiddleware(AgentMiddleware):
         return self._anonymize_tool_result(result, context)
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler):
+        if not self._guard_tool_calls:
+            return await handler(request)
         tool_name = str(request.tool_call.get("name") or "")
         context = self._context(request.runtime, request.state, tool_name=tool_name)
         tool_call = dict(request.tool_call)
@@ -1120,4 +1585,5 @@ __all__ = [
     "PrivacyModelRequestMiddleware",
     "SecurityScannerMiddleware",
     "ToolContentScannerMiddleware",
+    "ToolExecutionSafetyMiddleware",
 ]

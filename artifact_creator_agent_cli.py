@@ -5,14 +5,16 @@ import asyncio
 import json
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from agents.artifact_creator_agent.agent import initialize_agent
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from platform_tools.registry import AgentToolsConfig, build_agent_tools, parse_agent_tools_config
 
 
 EXIT_COMMANDS = {"exit", "/exit", "quit", "/quit"}
@@ -26,12 +28,24 @@ DEFAULT_PROMPTS_DIR = Path("./prompts")
 DEFAULT_CLI_USER_ID = "artifact-creator-cli"
 DEFAULT_CLI_USER_ROLE = "default"
 DEFAULT_CLI_TENANT_ID = "cli"
+ARTIFACT_AGENT_ID = "artifact_creator_agent"
+DEFAULT_AGENT_CONFIG_PATH = Path(__file__).resolve().parent / "data" / "config" / "bot_service" / "load.json"
 ARTIFACT_CLI_CHECKPOINT_PATH = (
     Path(__file__).resolve().parent
     / "data"
     / "artifact_creator_agent"
     / "cli_checkpoints.sqlite"
 )
+
+
+@dataclass(frozen=True)
+class ArtifactAgentRegistrySettings:
+    tools_config: AgentToolsConfig
+    guardrail_tool_profiles: dict[str, Any]
+    guardrail_unprofiled_tools: Literal["block", "allow_read_only"]
+    guardrail_prompt_injection_model: str | dict[str, Any] | None = None
+    guardrail_prompt_injection_model_revision: str | None = None
+    guardrail_prompt_injection_threshold: float | None = None
 
 
 def _persistent_checkpoint_saver():
@@ -95,6 +109,11 @@ def _parse_args() -> argparse.Namespace:
         default="ru",
         help="Agent locale passed to initialize_agent.",
     )
+    parser.add_argument(
+        "--agent-config",
+        default=str(DEFAULT_AGENT_CONFIG_PATH),
+        help="Agent load config used to resolve artifact_creator_agent tools.",
+    )
     system_group.add_argument(
         "--system",
         default=None,
@@ -117,6 +136,14 @@ def _parse_args() -> argparse.Namespace:
         help="Locale passed to the privacy guardrail rail.",
     )
     parser.add_argument(
+        "--allow-external-tool-access",
+        "--allow-external-search",
+        dest="allow_external_tool_access",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow external tools such as web_search and maps_search_places in guardrail context.",
+    )
+    parser.add_argument(
         "--scanners-enabled",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -134,6 +161,28 @@ def _parse_args() -> argparse.Namespace:
         help="Additional banned topic for the scanner profile. Can be repeated.",
     )
     parser.add_argument(
+        "--guardrail-prompt-injection-model",
+        "--prompt-injection-model",
+        dest="guardrail_prompt_injection_model",
+        default=None,
+        help="Optional Hugging Face model path for LLM Guard PromptInjection.",
+    )
+    parser.add_argument(
+        "--guardrail-prompt-injection-model-revision",
+        "--prompt-injection-model-revision",
+        dest="guardrail_prompt_injection_model_revision",
+        default=None,
+        help="Optional model revision for the PromptInjection model.",
+    )
+    parser.add_argument(
+        "--guardrail-prompt-injection-threshold",
+        "--prompt-injection-threshold",
+        dest="guardrail_prompt_injection_threshold",
+        type=float,
+        default=None,
+        help="Optional PromptInjection score threshold.",
+    )
+    parser.add_argument(
         "--save-thread",
         default=None,
         help="Optional path to save the current conversation thread after the run.",
@@ -147,14 +196,23 @@ def _new_config(
     user_id: str = DEFAULT_CLI_USER_ID,
     user_role: str = DEFAULT_CLI_USER_ROLE,
     tenant_id: str = DEFAULT_CLI_TENANT_ID,
+    allow_external_tool_access: bool | None = None,
+    allow_external_search: bool | None = None,
 ) -> tuple[str, dict[str, Any]]:
     resolved_thread_id = thread_id or f"artifact-creator-cli-{uuid.uuid4().hex}"
+    configurable: dict[str, Any] = {
+        "thread_id": resolved_thread_id,
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "user_role": user_role,
+    }
+    if allow_external_tool_access is None:
+        allow_external_tool_access = allow_external_search
+    if allow_external_tool_access is not None:
+        configurable["allow_external_tool_access"] = allow_external_tool_access
     return resolved_thread_id, {
         "configurable": {
-            "thread_id": resolved_thread_id,
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "user_role": user_role,
+            **configurable,
         }
     }
 
@@ -181,6 +239,71 @@ def _load_system_prompt(args: argparse.Namespace) -> tuple[Optional[str], Option
 
     prompt_path = _resolve_system_prompt_path(args.system_file)
     return prompt_path.read_text(encoding="utf-8-sig"), prompt_path
+
+
+def _load_agent_registry_settings(
+    raw_path: str | Path,
+    *,
+    agent_id: str = ARTIFACT_AGENT_ID,
+) -> ArtifactAgentRegistrySettings:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Agent config must be a JSON object: {path}")
+
+    entries = data.get("agents") or data.get("modules")
+    if not isinstance(entries, list):
+        raise ValueError(f"Agent config must contain an agents list: {path}")
+
+    agent_entry = None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("id") == agent_id:
+            agent_entry = entry
+            break
+    if agent_entry is None:
+        raise ValueError(f"Agent config '{path}' does not define agent '{agent_id}'.")
+
+    params = agent_entry.get("params") or {}
+    if not isinstance(params, dict):
+        raise ValueError(f"Agent '{agent_id}' params must be an object.")
+
+    profiles = params.get("guardrail_tool_profiles") or {}
+    if not isinstance(profiles, dict):
+        raise ValueError(f"Agent '{agent_id}' guardrail_tool_profiles must be an object.")
+
+    unprofiled_tools = params.get("guardrail_unprofiled_tools", "block")
+    if unprofiled_tools not in {"block", "allow_read_only"}:
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_unprofiled_tools must be block or allow_read_only."
+        )
+    prompt_injection_model = params.get("guardrail_prompt_injection_model")
+    if prompt_injection_model is not None and not isinstance(prompt_injection_model, (str, dict)):
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_prompt_injection_model must be a string or object."
+        )
+    prompt_injection_model_revision = params.get("guardrail_prompt_injection_model_revision")
+    if prompt_injection_model_revision is not None and not isinstance(prompt_injection_model_revision, str):
+        raise ValueError(
+            f"Agent '{agent_id}' guardrail_prompt_injection_model_revision must be a string."
+        )
+    prompt_injection_threshold = params.get("guardrail_prompt_injection_threshold")
+    if prompt_injection_threshold is not None:
+        prompt_injection_threshold = float(prompt_injection_threshold)
+
+    return ArtifactAgentRegistrySettings(
+        tools_config=parse_agent_tools_config(agent_entry.get("tools"), agent_id=agent_id),
+        guardrail_tool_profiles=dict(profiles),
+        guardrail_unprofiled_tools=unprofiled_tools,
+        guardrail_prompt_injection_model=prompt_injection_model,
+        guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
+        guardrail_prompt_injection_threshold=prompt_injection_threshold,
+    )
+
+
+async def _build_registry_tools(settings: ArtifactAgentRegistrySettings) -> list[Any]:
+    return await build_agent_tools(settings.tools_config)
 
 
 def _build_human_message(user_text: str) -> HumanMessage:
@@ -351,28 +474,52 @@ def main() -> int:
         provider = _parse_provider(args.provider)
         scanner_failure_policy = _parse_scanner_failure_policy(args.scanner_failure_policy)
         system_prompt, system_file_path = _load_system_prompt(args)
+        registry_settings = _load_agent_registry_settings(args.agent_config)
 
         with asyncio.Runner() as runner:
             checkpoint_cm = _persistent_checkpoint_saver()
             checkpoint_saver = runner.run(checkpoint_cm.__aenter__())
             try:
                 runner.run(checkpoint_saver.setup())
+                registry_tools = runner.run(_build_registry_tools(registry_settings))
+                prompt_injection_model = (
+                    args.guardrail_prompt_injection_model
+                    if args.guardrail_prompt_injection_model is not None
+                    else registry_settings.guardrail_prompt_injection_model
+                )
+                prompt_injection_model_revision = (
+                    args.guardrail_prompt_injection_model_revision
+                    if args.guardrail_prompt_injection_model_revision is not None
+                    else registry_settings.guardrail_prompt_injection_model_revision
+                )
+                prompt_injection_threshold = (
+                    args.guardrail_prompt_injection_threshold
+                    if args.guardrail_prompt_injection_threshold is not None
+                    else registry_settings.guardrail_prompt_injection_threshold
+                )
                 agent = initialize_agent(
                     provider=provider,
                     locale=args.locale,
                     checkpoint_saver=checkpoint_saver,
+                    tools=registry_tools,
                     system_prompt=system_prompt,
                     guardrails_enabled=args.guardrails_enabled,
                     guardrails_locale=args.guardrails_locale,
                     guardrail_scanners_enabled=args.scanners_enabled,
                     guardrail_scanner_failure_policy=scanner_failure_policy,
                     guardrail_banned_topics=args.banned_topic,
+                    guardrail_prompt_injection_model=prompt_injection_model,
+                    guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
+                    guardrail_prompt_injection_threshold=prompt_injection_threshold,
+                    guardrail_tool_profiles=registry_settings.guardrail_tool_profiles,
+                    guardrail_unprofiled_tools=registry_settings.guardrail_unprofiled_tools,
                 )
                 thread_id, run_config = _new_config(
                     args.thread_id,
                     user_id=args.user_id,
                     user_role=args.user_role,
                     tenant_id=args.tenant_id,
+                    allow_external_tool_access=args.allow_external_tool_access,
                 )
                 prompt = " ".join(args.prompt).strip()
                 current_turns: list[dict[str, str]] = []
@@ -403,8 +550,12 @@ def main() -> int:
                     f"(thread_id={thread_id}, provider={provider.value})."
                 )
                 print(f"Checkpoint store: {ARTIFACT_CLI_CHECKPOINT_PATH}")
+                tool_names = ", ".join(getattr(tool, "name", type(tool).__name__) for tool in registry_tools)
+                print(f"Registry tools: {tool_names or 'none'}")
                 print(f"Guardrails enabled: {args.guardrails_enabled}")
                 print(f"Scanners enabled: {args.scanners_enabled}")
+                print(f"Prompt injection model: {prompt_injection_model or 'LLM Guard default'}")
+                print(f"External tool access allowed: {args.allow_external_tool_access}")
 
                 if system_file_path is not None:
                     print(f"System prompt was loaded from file: {system_file_path}")
@@ -460,6 +611,7 @@ def main() -> int:
                             user_id=args.user_id,
                             user_role=args.user_role,
                             tenant_id=args.tenant_id,
+                            allow_external_tool_access=args.allow_external_tool_access,
                         )
                         current_turns = []
                         print(f"Started a fresh thread: {thread_id}")

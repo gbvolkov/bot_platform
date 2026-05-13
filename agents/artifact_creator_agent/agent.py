@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Annotated, Any, Dict, List, NotRequired, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Literal, Mapping, NotRequired, Optional, TypedDict
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
@@ -48,11 +48,16 @@ from platform_guardrails.logging import RedactingJSONFileTracer
 from platform_guardrails.middleware import (
     PrivacyModelRequestMiddleware,
     SecurityScannerMiddleware,
-    ToolContentScannerMiddleware,
     guarded_node,
 )
 from platform_guardrails.privacy import PrivacyRail
-from platform_guardrails.scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerFailurePolicy
+from platform_guardrails.scanners import (
+    LLMGuardScannerProfile,
+    LLMGuardScannerRail,
+    ScannerFailurePolicy,
+)
+from platform_guardrails.tool_policy import ARTIFACT_CREATOR_TOOL_PROFILES, ToolSecurityProfile
+from platform_guardrails.tool_registry import GuardedToolRegistry
 
 from .state import (
     ArtifactCreatorAgentContext
@@ -231,7 +236,7 @@ def _build_run_agent(
     system_prompt: Any | None = None,
     security_middleware: Any | None = None,
     privacy_middleware: Any | None = None,
-    tool_content_middleware: Any | None = None,
+    tool_execution_middleware: Any | None = None,
 ):
     @dynamic_prompt
     def build_prompt(request: ModelRequest) -> str:
@@ -251,12 +256,14 @@ def _build_run_agent(
         middleware.append(security_middleware)
     if privacy_middleware is not None:
         middleware.append(privacy_middleware)
-    if tool_content_middleware is not None:
-        middleware.append(tool_content_middleware)
+    if tool_execution_middleware is not None:
+        middleware.append(tool_execution_middleware)
+
+    run_tools = tools if tools is not None else [commit_artifact_final_text]
 
     return create_agent(
         model=model,
-        tools=[commit_artifact_final_text] + (tools or []),
+        tools=run_tools,
         middleware=middleware,
         state_schema=ArtifactCreatorAgentState,
         context_schema=ArtifactCreatorAgentContext,
@@ -269,7 +276,7 @@ def create_run_node(
     system_prompt: Any | None = None,
     security_middleware: Any | None = None,
     privacy_middleware: Any | None = None,
-    tool_content_middleware: Any | None = None,
+    tool_execution_middleware: Any | None = None,
 ):
     run_agent = _build_run_agent(
         model,
@@ -277,7 +284,7 @@ def create_run_node(
         system_prompt,
         security_middleware=security_middleware,
         privacy_middleware=privacy_middleware,
-        tool_content_middleware=tool_content_middleware,
+        tool_execution_middleware=tool_execution_middleware,
     )
 
     def run_node(
@@ -480,7 +487,30 @@ def ready_node(
             "phase": "ready",
         },
     )
-    
+
+
+def _build_guarded_run_tool_bundle(
+    extra_tools: List[Any] | None,
+    *,
+    scanner_rail: LLMGuardScannerRail | None,
+    privacy_rail: PrivacyRail,
+    guardrail_log_path: str,
+    guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None,
+    guardrail_unprofiled_tools: Literal["block", "allow_read_only"],
+):
+    profiles: dict[str, ToolSecurityProfile | Mapping[str, Any]] = dict(ARTIFACT_CREATOR_TOOL_PROFILES)
+    profiles.update(dict(guardrail_tool_profiles or {}))
+
+    run_tools = [commit_artifact_final_text, *(extra_tools or [])]
+    registry = GuardedToolRegistry(unprofiled_tools=guardrail_unprofiled_tools)
+    registry.register_many(run_tools, profiles)
+    return registry.build_bundle(
+        agent_name="artifact_creator_agent.run",
+        scanner_rail=scanner_rail,
+        privacy_rail=privacy_rail,
+        event_log_path=guardrail_log_path,
+    )
+
 
 def initialize_agent(
     provider: ModelType = ModelType.GPT,
@@ -494,8 +524,13 @@ def initialize_agent(
     guardrail_scanners_enabled: bool | None = None,
     guardrail_scanner_failure_policy: ScannerFailurePolicy = "fail_closed",
     guardrail_banned_topics: List[str] | None = None,
+    guardrail_prompt_injection_model: str | Mapping[str, Any] | None = None,
+    guardrail_prompt_injection_model_revision: str | None = None,
+    guardrail_prompt_injection_threshold: float | None = None,
     guardrail_composite_input_scanners: tuple[str, ...] | None = None,
     guardrail_composite_recent_message_limit: int = 20,
+    guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None = None,
+    guardrail_unprofiled_tools: Literal["block", "allow_read_only"] = "block",
 ):
     #set_locale(locale)
     #set_models_locale(locale)
@@ -521,7 +556,9 @@ def initialize_agent(
     run_security_middleware = None
     confirmation_security_middleware = None
     set_prompt_security_middleware = None
-    tool_content_middleware = None
+    tool_execution_middleware = None
+    scanner_rail = None
+    run_tools = [commit_artifact_final_text, *(tools or [])]
     if guardrails_enabled:
         privacy_rail = PrivacyRail.from_palimpsest(locale=guardrails_locale)
         guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
@@ -533,6 +570,7 @@ def initialize_agent(
         run_privacy_middleware = PrivacyModelRequestMiddleware(
             privacy_rail,
             agent_name="artifact_creator_agent.run",
+            guard_tool_calls=False,
             event_log_path=guardrail_log_path,
         )
         confirmation_privacy_middleware = PrivacyModelRequestMiddleware(
@@ -544,9 +582,18 @@ def initialize_agent(
         if guardrail_scanners_enabled is None:
             guardrail_scanners_enabled = guardrails_enabled
         if guardrail_scanners_enabled:
+            scanner_profile_kwargs: dict[str, Any] = {
+                "banned_topics": guardrail_banned_topics,
+                "failure_policy": guardrail_scanner_failure_policy,
+            }
+            if guardrail_prompt_injection_model is not None:
+                scanner_profile_kwargs["prompt_injection_model"] = guardrail_prompt_injection_model
+            if guardrail_prompt_injection_model_revision is not None:
+                scanner_profile_kwargs["prompt_injection_model_revision"] = guardrail_prompt_injection_model_revision
+            if guardrail_prompt_injection_threshold is not None:
+                scanner_profile_kwargs["prompt_injection_threshold"] = guardrail_prompt_injection_threshold
             scanner_profile = LLMGuardScannerProfile.artifact_creator_default(
-                banned_topics=guardrail_banned_topics,
-                failure_policy=guardrail_scanner_failure_policy,
+                **scanner_profile_kwargs,
             )
             scanner_rail = LLMGuardScannerRail(scanner_profile)
             set_prompt_security_middleware = SecurityScannerMiddleware(
@@ -577,11 +624,16 @@ def initialize_agent(
                     is_artifact_confirmed=False
                 ),
             )
-            tool_content_middleware = ToolContentScannerMiddleware(
-                scanner_rail,
-                agent_name="artifact_creator_agent.run",
-                event_log_path=guardrail_log_path,
-            )
+        guarded_tool_bundle = _build_guarded_run_tool_bundle(
+            tools,
+            scanner_rail=scanner_rail,
+            privacy_rail=privacy_rail,
+            guardrail_log_path=guardrail_log_path,
+            guardrail_tool_profiles=guardrail_tool_profiles,
+            guardrail_unprofiled_tools=guardrail_unprofiled_tools,
+        )
+        run_tools = guarded_tool_bundle.tools
+        tool_execution_middleware = guarded_tool_bundle.middleware
 
     builder = StateGraph(ArtifactCreatorAgentState)
     builder.add_node("greetings", create_greetings_node(system_prompt))
@@ -602,11 +654,11 @@ def initialize_agent(
         "run",
         create_run_node(
             llm,
-            tools,
+            run_tools,
             system_prompt,
             security_middleware=run_security_middleware,
             privacy_middleware=run_privacy_middleware,
-            tool_content_middleware=tool_content_middleware,
+            tool_execution_middleware=tool_execution_middleware,
         ),
     )
     builder.add_node(

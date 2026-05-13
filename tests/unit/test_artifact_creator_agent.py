@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pydantic import Field
+from langchain.tools.tool_node import ToolCallRequest
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -623,14 +624,14 @@ def test_initialize_agent_passes_tools_and_system_prompt_to_run_builder(monkeypa
     monkeypatch.setattr(
         artifact_agent,
         "_build_run_agent",
-        lambda model, tools=None, system_prompt=None, security_middleware=None, privacy_middleware=None, tool_content_middleware=None: captured.update(
+        lambda model, tools=None, system_prompt=None, security_middleware=None, privacy_middleware=None, tool_execution_middleware=None: captured.update(
             {
                 "run_model": model,
                 "run_tools": tools,
                 "run_system_prompt": system_prompt,
                 "run_security_middleware": security_middleware,
                 "run_privacy_middleware": privacy_middleware,
-                "run_tool_content_middleware": tool_content_middleware,
+                "run_tool_execution_middleware": tool_execution_middleware,
             }
         ) or (lambda *_args, **_kwargs: {}),
     )
@@ -682,11 +683,11 @@ def test_initialize_agent_passes_tools_and_system_prompt_to_run_builder(monkeypa
     assert graph is not None
     assert captured["greetings_system_prompt"] == "fixed prompt"
     assert captured["run_model"] == "base-llm"
-    assert captured["run_tools"] == [custom_tool]
+    assert captured["run_tools"] == [artifact_agent.commit_artifact_final_text, custom_tool]
     assert captured["run_system_prompt"] == "fixed prompt"
     assert captured["run_security_middleware"] is None
     assert captured["run_privacy_middleware"] is None
-    assert captured["run_tool_content_middleware"] is None
+    assert captured["run_tool_execution_middleware"] is None
     assert captured["confirmation_model"] == "nano-llm"
     assert captured["confirmation_security_middleware"] is None
     assert captured["confirmation_privacy_middleware"] is None
@@ -696,6 +697,15 @@ def test_initialize_agent_passes_tools_and_system_prompt_to_run_builder(monkeypa
 
 def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
     captured: dict[str, object] = {}
+    prompt_model_config = {
+        "path": "custom/prompt-injection-model",
+        "kwargs": {
+            "id2label": {"0": "SAFE", "1": "INJECTION"},
+            "label2id": {"SAFE": 0, "INJECTION": 1},
+        },
+        "pipeline_kwargs": {"max_length": 256, "truncation": True},
+        "tokenizer_kwargs": {"extra_special_tokens": {}},
+    }
 
     monkeypatch.setattr(artifact_agent.config, "LANGFUSE_URL", "https://langfuse.example")
     monkeypatch.setattr(artifact_agent, "RedactingJSONFileTracer", lambda path: "redacting_handler")
@@ -727,10 +737,6 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         captured.setdefault("security_middlewares", []).append((scanner_rail, kwargs))
         return f"security:{kwargs['agent_name']}"
 
-    def fake_tool_content_middleware(scanner_rail, **kwargs):
-        captured.setdefault("tool_content_middlewares", []).append((scanner_rail, kwargs))
-        return f"tool_content:{kwargs['agent_name']}"
-
     monkeypatch.setattr(artifact_agent, "get_llm", fake_get_llm)
     monkeypatch.setattr(artifact_agent.PrivacyRail, "from_palimpsest", staticmethod(fake_from_palimpsest))
     monkeypatch.setattr(artifact_agent, "PrivacyModelRequestMiddleware", fake_privacy_middleware)
@@ -741,7 +747,6 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
     )
     monkeypatch.setattr(artifact_agent, "LLMGuardScannerRail", fake_scanner_rail)
     monkeypatch.setattr(artifact_agent, "SecurityScannerMiddleware", fake_security_middleware)
-    monkeypatch.setattr(artifact_agent, "ToolContentScannerMiddleware", fake_tool_content_middleware)
     monkeypatch.setattr(
         artifact_agent,
         "create_greetings_node",
@@ -750,11 +755,12 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
     monkeypatch.setattr(
         artifact_agent,
         "_build_run_agent",
-        lambda model, tools=None, system_prompt=None, security_middleware=None, privacy_middleware=None, tool_content_middleware=None: captured.update(
+        lambda model, tools=None, system_prompt=None, security_middleware=None, privacy_middleware=None, tool_execution_middleware=None: captured.update(
             {
+                "run_tools": tools,
                 "run_security_middleware": security_middleware,
                 "run_privacy_middleware": privacy_middleware,
-                "run_tool_content_middleware": tool_content_middleware,
+                "run_tool_execution_middleware": tool_execution_middleware,
             }
         ) or (lambda *_args, **_kwargs: {}),
     )
@@ -800,24 +806,32 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         guardrails_locale="ru-RU",
         guardrail_scanner_failure_policy="fail_open",
         guardrail_banned_topics=["generic safety"],
+        guardrail_prompt_injection_model=prompt_model_config,
+        guardrail_prompt_injection_model_revision="model-revision",
+        guardrail_prompt_injection_threshold=0.5,
     )
 
     assert captured["privacy_rail_kwargs"] == {"locale": "ru-RU"}
     assert captured["scanner_profile_kwargs"] == {
         "banned_topics": ["generic safety"],
         "failure_policy": "fail_open",
+        "prompt_injection_model": prompt_model_config,
+        "prompt_injection_model_revision": "model-revision",
+        "prompt_injection_threshold": 0.5,
     }
     assert captured["scanner_rail_profile"] == "scanner_profile"
     assert "set_prompt" in captured["nodes"]
+    assert captured["run_tools"] == [artifact_agent.commit_artifact_final_text]
     assert captured["run_security_middleware"] == "security:artifact_creator_agent.run"
     assert captured["run_privacy_middleware"] == "privacy:artifact_creator_agent.run"
-    assert captured["run_tool_content_middleware"] == "tool_content:artifact_creator_agent.run"
+    assert captured["run_tool_execution_middleware"].__class__.__name__ == "ToolExecutionSafetyMiddleware"
     assert captured["confirmation_security_middleware"] == "security:artifact_creator_agent.confirm"
     assert captured["confirmation_privacy_middleware"] == "privacy:artifact_creator_agent.confirm"
     assert captured["graph_config"] == {"callbacks": ["redacting_handler", "langfuse_handler"]}
     middlewares = captured["privacy_middlewares"]
     assert len(middlewares) == 3
     assert all(item[0] is middlewares[0][0] for item in middlewares)
+    assert middlewares[1][1]["guard_tool_calls"] is False
     security_middlewares = captured["security_middlewares"]
     assert len(security_middlewares) == 3
     assert all(item[0] == "scanner_rail" for item in security_middlewares)
@@ -832,9 +846,127 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
     confirmation_kwargs = security_middlewares[2][1]
     structured = confirmation_kwargs["blocked_structured_response_factory"](object())
     assert structured.is_artifact_confirmed is False
-    assert len(captured["tool_content_middlewares"]) == 1
-    assert captured["tool_content_middlewares"][0][0] == "scanner_rail"
-    assert captured["tool_content_middlewares"][0][1]["agent_name"] == "artifact_creator_agent.run"
+
+
+def test_initialize_agent_includes_profiled_extra_tool_in_guarded_bundle(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(artifact_agent.config, "LANGFUSE_URL", "")
+    monkeypatch.setattr(artifact_agent, "RedactingJSONFileTracer", lambda path: "redacting_handler")
+    monkeypatch.setattr(artifact_agent, "get_llm", lambda **kwargs: f"{kwargs['model']}-llm")
+    monkeypatch.setattr(
+        artifact_agent.PrivacyRail,
+        "from_palimpsest",
+        staticmethod(lambda **_kwargs: object()),
+    )
+    monkeypatch.setattr(
+        artifact_agent,
+        "create_greetings_node",
+        lambda system_prompt=None: (lambda *_args, **_kwargs: {}),
+    )
+    monkeypatch.setattr(
+        artifact_agent,
+        "_build_run_agent",
+        lambda model, tools=None, system_prompt=None, security_middleware=None, privacy_middleware=None, tool_execution_middleware=None: captured.update(
+            {
+                "run_tools": tools,
+                "run_tool_execution_middleware": tool_execution_middleware,
+            }
+        ) or (lambda *_args, **_kwargs: {}),
+    )
+    monkeypatch.setattr(
+        artifact_agent,
+        "create_confirmation_node",
+        lambda model, security_middleware=None, privacy_middleware=None: (lambda *_args, **_kwargs: {}),
+    )
+
+    class FakeCompiledGraph:
+        def with_config(self, value):
+            return self
+
+    class FakeStateGraph:
+        def __init__(self, state_schema):
+            return None
+
+        def add_node(self, name, node):
+            return None
+
+        def add_conditional_edges(self, *args, **kwargs):
+            return None
+
+        def add_edge(self, *args, **kwargs):
+            return None
+
+        def compile(self, checkpointer=None, debug=False):
+            return FakeCompiledGraph()
+
+    monkeypatch.setattr(artifact_agent, "StateGraph", FakeStateGraph)
+
+    extra_tool = SimpleNamespace(name="extra_lookup")
+    artifact_agent.initialize_agent(
+        provider=ModelType.GPT,
+        guardrails_enabled=True,
+        guardrail_scanners_enabled=False,
+        tools=[extra_tool],
+        guardrail_tool_profiles={
+            "extra_lookup": {
+                "name": "extra_lookup",
+                "allowed_roles": ("default",),
+                "side_effect": "read",
+                "category": "internal_state",
+            }
+        },
+    )
+
+    assert captured["run_tools"] == [artifact_agent.commit_artifact_final_text, extra_tool]
+    assert captured["run_tool_execution_middleware"].__class__.__name__ == "ToolExecutionSafetyMiddleware"
+
+
+def test_guarded_commit_tool_profile_preserves_raw_artifact_state(tmp_path):
+    privacy_rail = PrivacyRail(
+        session_manager=PalimpsestSessionManager(FakePrivacyProcessor())
+    )
+    bundle = artifact_agent._build_guarded_run_tool_bundle(
+        None,
+        scanner_rail=None,
+        privacy_rail=privacy_rail,
+        guardrail_log_path=str(tmp_path / "guardrails.jsonl"),
+        guardrail_tool_profiles=None,
+        guardrail_unprofiled_tools="block",
+    )
+    request = ToolCallRequest(
+        tool_call={
+            "name": "commit_artifact_final_text",
+            "args": {"final_text": "fake Ivan"},
+            "id": "call-1",
+            "type": "tool_call",
+        },
+        tool=None,
+        state={},
+        runtime=SimpleNamespace(
+            execution_info=None,
+            config={
+                "configurable": {
+                    "tenant_id": "tenant",
+                    "user_id": "user",
+                    "thread_id": "thread",
+                    "user_role": "default",
+                }
+            },
+        ),
+    )
+
+    def handler(updated_request):
+        return artifact_agent.commit_artifact_final_text.func(
+            final_text=updated_request.tool_call["args"]["final_text"],
+            runtime=SimpleNamespace(tool_call_id="call-1", state={"current_artifact_id": 0}),
+        )
+
+    result = bundle.middleware.wrap_tool_call(request, handler)
+
+    assert result.update["artifacts"][0]["artifact_final_text"] == "deanon[tenant|user|thread](fake Ivan)"
+    assert result.update["phase"] == "confirm"
+    assert result.update["messages"][0].content == "anon[tenant|user|thread]"
 
 
 def test_run_agent_middleware_order_keeps_scanner_before_privacy(monkeypatch):
@@ -852,12 +984,12 @@ def test_run_agent_middleware_order_keeps_scanner_before_privacy(monkeypatch):
         system_prompt="prompt",
         security_middleware="security",
         privacy_middleware="privacy",
-        tool_content_middleware="tool_content",
+        tool_execution_middleware="tool_execution",
     )
 
     assert result == "agent"
     middleware = captured["middleware"]
-    assert middleware[1:] == ["security", "privacy", "tool_content"]
+    assert middleware[1:] == ["security", "privacy", "tool_execution"]
 
 
 def test_confirmation_agent_middleware_order_and_block_factory(monkeypatch):

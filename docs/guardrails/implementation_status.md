@@ -1,6 +1,6 @@
 # Guardrails Implementation Status
 
-Current status as of 2026-05-08.
+Current status as of 2026-05-11.
 
 This document describes what is implemented in the repository now. It is
 separate from the target architecture vision, which intentionally includes later
@@ -88,8 +88,8 @@ enforcement task.
 
 ## Phase 2 - Scanner Enforcement
 
-Status: mostly implemented for `artifact_creator_agent`; Russian-language
-scanner model tuning remains.
+Status: mostly implemented for `artifact_creator_agent`; Russian prompt-injection
+scanner model selection is now configurable.
 
 ### Implemented Modules
 
@@ -100,6 +100,10 @@ scanner model tuning remains.
 - Rejects LLM Guard `Anonymize` and `Deanonymize` in configured profiles.
 - Supports `fail_closed` and `fail_open` scanner failure policies.
 - Defaults guarded agents to `fail_closed`.
+- Supports configurable LLM Guard `PromptInjection` model config, optional
+  explicit revision, and threshold. `platform_guardrails.scanners` does not
+  bundle concrete model paths, thresholds, revisions, or model-specific
+  compatibility defaults; those belong in deployment/agent configuration.
 - Remembers URLs accepted from source input by guardrail context scope so later
   model/tool output can preserve source URLs without treating them as invented
   generated links.
@@ -121,8 +125,12 @@ scanner model tuning remains.
 - Uses `REMOVE_ALL_MESSAGES` replacement for id-less blocked messages.
 - Removes unsafe model-generated tool-call messages from state when tool
   argument scanning blocks.
-- Supports composite input scanning across `state.system_prompt`, runtime system
-  prompt text, and a bounded recent message window.
+- For model-visible tool results, can redact LLM Guard `PromptInjection`
+  sentence-level hits from untrusted tool result text and continue with the
+  sanitized result after re-scanning.
+- Supports composite input scanning across runtime system prompt text, recent
+  human messages, and untrusted tool results. `state.system_prompt` and prior
+  assistant history are not added separately to the composite text.
 
 ### Default Artifact Creator Scanner Profile
 
@@ -132,6 +140,9 @@ Input scanners:
 - `Secrets`: redact detected secrets and continue.
 - `PromptInjection`: block when LLM Guard marks the prompt invalid; default
   matching is sentence-level to catch mixed benign/hostile prompts.
+- `PromptInjection` can use a deployment-supplied Hugging Face model mapping,
+  optional explicit revision, and deployment threshold. When no scanner
+  threshold is supplied, LLM Guard's scanner default is used.
 - `Toxicity`: review/block when invalid.
 - `BanTopics`: review/block for configured generic topics.
 
@@ -204,6 +215,7 @@ Examples:
 | Input/output condition | Current behavior |
 | --- | --- |
 | PromptInjection marks input invalid | Block; model handler is not called; blocked message is removed from state |
+| PromptInjection marks a sentence in a model-visible tool result invalid | Replace the flagged sentence with `[guarded sentence removed]`, re-scan the sanitized result, then continue if clean |
 | PromptInjection scores an indirect-injection-looking pasted text as safe | Allow |
 | Secrets scanner redacts a secret | Continue with sanitized text |
 | TokenLimit marks input invalid | Block |
@@ -223,6 +235,9 @@ Examples:
 - `guardrail_scanners_enabled`
 - `guardrail_scanner_failure_policy`
 - `guardrail_banned_topics`
+- `guardrail_prompt_injection_model`
+- `guardrail_prompt_injection_model_revision`
+- `guardrail_prompt_injection_threshold`
 - `guardrail_composite_input_scanners`
 - `guardrail_composite_recent_message_limit`
 
@@ -231,7 +246,13 @@ enabled, so user-provided system prompt text is scanned before it can be stored
 in `state.system_prompt`.
 
 `data/config/bot_service/load.json` enables guardrails for
-`artifact_creator_agent` and sets scanner failure policy explicitly.
+`artifact_creator_agent`, sets scanner failure policy explicitly, and configures
+`gbv/mdeberta-ru-prompt-injection` as the prompt-injection scanner model. The
+configuration follows the current model README's balanced threshold `0.5`, uses
+`max_length=256`, maps model labels to LLM Guard's expected `INJECTION` label,
+and carries the tokenizer compatibility override locally in config. The
+revision is not pinned by default, so the Hugging Face repo default branch or a
+local downloaded copy can be used.
 
 `artifact_creator_agent_cli.py` provides a manual CLI for exercising the guarded
 agent path with persistent SQLite checkpoints.
@@ -298,7 +319,7 @@ threshold, so the current scanner policy allowed it. That is a policy/model
 coverage gap, not a Phase 2 wiring failure.
 
 Recent Russian and mixed Russian/English prompt-injection checks show the same
-class of residual risk: the middleware composes and scans the right text, but
-the default classifier can still score hostile Russian phrasing below the
+class of residual risk: the middleware composes and scans the right text, but a
+configured classifier can still score hostile Russian phrasing below the
 configured threshold. Closing that gap requires scanner-model evaluation,
 fine-tuning, and calibration rather than another agent-specific heuristic.
