@@ -20,7 +20,7 @@ Reference documents:
 |---|---|---|
 | Staff context missing or unconfirmed | none | Return to Position Identification |
 | Staff context confirmed | `task` -> `kpi_bi_int` | KPI Assignment Lookup |
-| Assignment method details needed | same BI request, method text and note when available | KPI Method Lookup |
+| Assignment method details needed after list | use `kpi-calculation-method-details` | KPI Method Lookup |
 | Final response | none | Answer Synthesis |
 
 ## Workflow
@@ -33,8 +33,8 @@ Reference documents:
 4. Call `task` with `subagent_type: kpi_bi_int` using KPI Assignment Lookup.
 5. Ask BI for all KPI assignments for the resolved context as a row-level list
    of KPI items with the required fields below.
-6. Ask BI to include method text and method note when available, while still
-   returning assignment items that do not have method details.
+6. Do not ask BI to include full calculation method text, full method notes, or
+   formula details in the KPI-list request. Keep the list payload compact.
 7. Count the BI assignment rows.
 8. Preserve every assignment row returned for the exact context.
 9. Synthesize a compact user-facing answer without changing the assignment row
@@ -50,12 +50,16 @@ The request must explicitly ask BI to return:
 - no grouping, deduplication, merging, or aggregation by KPI name;
 - all returned items in stable assignment order;
 - the official applied position context;
-- the fields needed for Mycroft to explain and distinguish each assignment.
+- compact assignment fields needed for Mycroft to distinguish each assignment;
+- method references when available, so a later method-detail request can fetch
+  the method through `kpi-calculation-method-details`.
 
 Each KPI item should include the required fields below when available.
 
-If method text or method note is unavailable for an assignment, BI should still
-return the assignment item and mark those method fields as empty or unavailable.
+The KPI-list request must not ask for full method text, full method notes,
+formula expansion, or calculation-method details. Those belong to
+`kpi-calculation-method-details` when the user asks to disclose or explain a
+specific KPI's calculation method.
 
 ## Required Fields To Request
 
@@ -73,8 +77,7 @@ Request these fields when available:
 - pool flag;
 - calculation frequency;
 - calculation specifics;
-- calculation method;
-- method note.
+- calculation method reference, if available.
 
 ## Answer Rules
 
@@ -93,10 +96,11 @@ Request these fields when available:
   level.
 - Compact wording is allowed only inside each assignment item; it must not
   reduce the number of listed assignments.
-- Add method, frequency, pool, or specifics only when asked or needed for
+- Add frequency, pool, or specifics only when asked or needed for
   understanding.
-- If method text is missing, say that the table contains the KPI but does not
-  disclose its full meaning.
+- Do not include full method text or method notes in the KPI list. If the user
+  asks to disclose or explain a method, formula, note, numerator, denominator,
+  or calculation component, use `kpi-calculation-method-details`.
 - Do not introduce primary, secondary, important, or optional categories unless
   they are explicitly in the database.
 - Never synthesize KPI rows from examples, skill text, fuzzy output, or

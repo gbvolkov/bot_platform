@@ -175,11 +175,17 @@ def test_kpi_position_skills_require_confirmed_position_before_kpi_list():
     assert "numbered list must contain exactly n" in list_skill
     assert "never merge, deduplicate, group, aggregate" in list_skill
     assert "compact wording is allowed only inside each assignment item" in list_skill
+    assert "do not ask bi to include full calculation method text" in list_skill
+    assert "the kpi-list request must not ask for full method text" in list_skill
+    assert "calculation method reference, if available" in list_skill
+    assert "use `kpi-calculation-method-details`" in list_skill
     assert "prefer a validated `staff_structure_id` as the kpi lookup scope" in list_skill
     assert "every kpi-list answer must state the official applied position name" in synthesis_skill
     assert "preserve the bi assignment row count" in synthesis_skill
     assert "must contain exactly n kpi" in synthesis_skill
     assert "do not merge, deduplicate, group, aggregate" in synthesis_skill
+    assert "do not require or wait for full\n  calculation method text" in synthesis_skill
+    assert "method references, that is\n  enough for the kpi-list answer" in synthesis_skill
     assert "repeated kpi names with different calculation detail" in synthesis_skill
     assert "compare the number of numbered kpi items" in synthesis_skill
     assert "employee group means a group of staff within a department" in position_skill
