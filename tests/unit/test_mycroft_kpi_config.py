@@ -320,12 +320,40 @@ def test_kpi_agent_skills_backend_lists_scenario_skills():
 
     assert {skill["name"] for skill in skills} == {
         "kpi-answer-synthesis",
+        "kpi-calculation-method-details",
         "kpi-list-assigned-kpis",
         "kpi-method-explanation",
         "kpi-position-identification",
         "kpi-source-policy",
         "kpi-structure-navigation",
     }
+
+    calculation_skill = next(
+        skill for skill in skills if skill["name"] == "kpi-calculation-method-details"
+    )
+    description = calculation_skill["description"].lower()
+    assert "must be read before answering" in description
+    assert "formula, calculation method, method note, numerator, denominator" in description
+    assert "always call task with subagent_type kpi_bi_int" in description
+    assert "prior conversation context is not enough" in description
+
+
+def test_kpi_calculation_method_details_skill_owns_formula_requests():
+    skill = Path(
+        "agents/mycroft_agent/scenarios/kpi_agent/skills/"
+        "kpi-calculation-method-details/SKILL.md"
+    ).read_text(encoding="utf-8").lower()
+    method_skill = Path(
+        "agents/mycroft_agent/scenarios/kpi_agent/skills/"
+        "kpi-method-explanation/SKILL.md"
+    ).read_text(encoding="utf-8").lower()
+
+    assert "a fresh `kpi_bi_int` result is required for every method-detail request" in skill
+    assert "do not answer from prior kpi-list output" in skill
+    assert "call `task` with `subagent_type: kpi_bi_int` before answering" in skill
+    assert "do not tell bi how to build sql" in skill
+    assert "inside the selected method may be a separate kpi" in skill
+    assert "use `kpi-calculation-method-details` instead" in method_skill
 
 
 def test_kpi_staff_structure_fuzzy_search_tool_returns_exact_candidates():
