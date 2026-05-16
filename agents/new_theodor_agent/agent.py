@@ -19,7 +19,13 @@ import config
 from agents.utils import ModelType
 from platform_utils.llm_logger import JSONFileTracer
 
-from .artifacts_defs import ARTIFACTS
+from .artifacts_defs import (
+    ARTIFACTS,
+    get_artifact_by_id,
+    get_artifact_index,
+    get_next_artifact_id,
+    normalize_artifact_id,
+)
 from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_locale
 from ..store_artifacts import store_artifacts
 
@@ -132,21 +138,30 @@ def create_progress_node(artifact_id: int):
         config: RunnableConfig,
         runtime: Runtime[TheodorAgentContext],
     ) -> TheodorAgentState:
-        current_artifact_id = state.get("current_artifact_id", 0)
+        raw_current_artifact_id = state.get("current_artifact_id", artifact_id)
+        current_artifact_id = normalize_artifact_id(raw_current_artifact_id)
         prev_artifact_id = state.get("prev_artifact_id")
+        if prev_artifact_id is not None:
+            prev_artifact_id = normalize_artifact_id(prev_artifact_id)
 
-        if prev_artifact_id is None or prev_artifact_id != current_artifact_id:
+        if prev_artifact_id is None or prev_artifact_id != artifact_id:
             total_artifacts = len(ARTIFACTS)
-            current_def = ARTIFACTS[artifact_id]
-            current_number = artifact_id + 1
+            artifact_index = get_artifact_index(artifact_id)
+            current_def = get_artifact_by_id(artifact_id)
+            if artifact_index is None or current_def is None:
+                return {"current_artifact_id": current_artifact_id}
+
+            current_number = artifact_index + 1
             current_name = str(current_def.get("name") or f"Artifact {current_number}")
 
-            next_def = ARTIFACTS[artifact_id + 1] if artifact_id + 1 < total_artifacts else None
-            next_number = int(next_def["id"]) + 1 if next_def else None
+            next_artifact_id = get_next_artifact_id(artifact_id)
+            next_def = get_artifact_by_id(next_artifact_id) if next_artifact_id is not None else None
+            next_index = get_artifact_index(next_artifact_id) if next_artifact_id is not None else None
+            next_number = next_index + 1 if next_index is not None else None
             next_name = str(next_def.get("name") or f"Artifact {next_def['id'] + 1}") if next_def else None
 
             banner = _format_progress_banner(
-                completed_count=artifact_id,
+                completed_count=artifact_index,
                 total_count=total_artifacts,
                 current_artifact_number=current_number,
                 current_artifact_name=current_name,
@@ -154,9 +169,13 @@ def create_progress_node(artifact_id: int):
                 next_artifact_name=next_name,
             )
             return {
-                "prev_artifact_id": current_artifact_id,
+                "prev_artifact_id": artifact_id,
+                "current_artifact_id": artifact_id,
                 "messages": [AIMessage(content=banner)]
             }
+
+        if raw_current_artifact_id != current_artifact_id:
+            return {"current_artifact_id": current_artifact_id}
 
         return state
 
@@ -193,10 +212,7 @@ def init_node(
 def _route_by_artifact(state: TheodorAgentState) -> str:
     if not state.get("greeted"):
         return "greetings"
-    artifact_id = state.get("current_artifact_id", 0)
-    if artifact_id is None:
-        artifact_id = 0
-    artifact_id = max(0, min(int(artifact_id), len(ARTIFACTS) - 1))
+    artifact_id = normalize_artifact_id(state.get("current_artifact_id"))
     return f"progress_{artifact_id}"
 
 def create_greetings_node():
@@ -219,10 +235,10 @@ def create_greetings_node():
 
 
 def _after_choice_route(state: TheodorAgentState) -> str:
-    artifact_id = state.get("current_artifact_id", 0)
+    artifact_id = normalize_artifact_id(state.get("current_artifact_id"))
     stage = state.get("current_artifact_state")
     if stage == ArtifactStage.ARTIFACT_CONFIRMED:
-        if artifact_id >= len(ARTIFACTS) - 1:
+        if get_next_artifact_id(artifact_id) is None:
             return "final_output"
         return "advance"
     return "end"
@@ -233,8 +249,10 @@ def advance_node(
     config: RunnableConfig,
     runtime: Runtime[TheodorAgentContext],
 ) -> TheodorAgentState:
-    current_id = state.get("current_artifact_id", 0)
-    next_id = min(current_id + 1, len(ARTIFACTS) - 1)
+    current_id = normalize_artifact_id(state.get("current_artifact_id"))
+    next_id = get_next_artifact_id(current_id)
+    if next_id is None:
+        next_id = current_id
     return {
         "prev_artifact_id": current_id,
         "current_artifact_id": next_id,
@@ -285,8 +303,9 @@ def initialize_agent(
     builder.add_node("init", init_node)
     builder.add_node("greetings", create_greetings_node())
 
-    total_artifacts = len(ARTIFACTS)
-    for artifact in ARTIFACTS:
+    artifacts = list(ARTIFACTS)
+    artifact_ids = [int(artifact["id"]) for artifact in artifacts]
+    for artifact in artifacts:
         artifact_id = int(artifact["id"])
         progress_node_name = f"progress_{artifact_id}"
         choice_node_name = f"choice_agent_{artifact_id}"
@@ -319,13 +338,13 @@ def initialize_agent(
     builder.add_conditional_edges(
         "init",
         _route_by_artifact,
-        {f"progress_{idx}": f"progress_{idx}" for idx in range(total_artifacts)} | {"greetings": "greetings"},
+        {f"progress_{idx}": f"progress_{idx}" for idx in artifact_ids} | {"greetings": "greetings"},
     )
     builder.add_edge("greetings", END)
     builder.add_conditional_edges(
         "advance",
         _route_by_artifact,
-        {f"progress_{idx}": f"progress_{idx}" for idx in range(total_artifacts)},
+        {f"progress_{idx}": f"progress_{idx}" for idx in artifact_ids},
     )
     builder.add_edge("final_output", END)
 

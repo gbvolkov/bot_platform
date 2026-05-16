@@ -112,6 +112,62 @@ def get_artifacts_list()-> str:
     return artifact_list
 
 
+def get_artifact_ids() -> List[int]:
+    return [int(artifact["id"]) for artifact in ARTIFACTS]
+
+
+def get_artifact_index(artifact_id: int) -> Optional[int]:
+    artifact_id = int(artifact_id)
+    for index, artifact in enumerate(ARTIFACTS):
+        if int(artifact["id"]) == artifact_id:
+            return index
+    return None
+
+
+def normalize_artifact_id(artifact_id: Any | None = None) -> int:
+    artifact_ids = get_artifact_ids()
+    if not artifact_ids:
+        return 0
+
+    if artifact_id is None:
+        return artifact_ids[0]
+
+    try:
+        candidate = int(artifact_id)
+    except (TypeError, ValueError):
+        return artifact_ids[0]
+
+    if candidate in artifact_ids:
+        return candidate
+
+    if 0 <= candidate < len(artifact_ids):
+        return artifact_ids[candidate]
+
+    if candidate <= artifact_ids[0]:
+        return artifact_ids[0]
+
+    for known_id in artifact_ids:
+        if candidate <= known_id:
+            return known_id
+    return artifact_ids[-1]
+
+
+def get_artifact_by_id(artifact_id: int) -> Optional[ArtifactDefinition]:
+    normalized_id = normalize_artifact_id(artifact_id)
+    for artifact in ARTIFACTS:
+        if int(artifact["id"]) == normalized_id:
+            return artifact
+    return None
+
+
+def get_next_artifact_id(artifact_id: int) -> Optional[int]:
+    normalized_id = normalize_artifact_id(artifact_id)
+    index = get_artifact_index(normalized_id)
+    if index is None or index + 1 >= len(ARTIFACTS):
+        return None
+    return int(ARTIFACTS[index + 1]["id"])
+
+
 ARTIFACTS_RU: List[ArtifactDefinition] = [
     {
         "id": 0,

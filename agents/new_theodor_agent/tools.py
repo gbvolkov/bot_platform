@@ -6,12 +6,13 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from .artifacts_defs import ARTIFACTS
+from .artifacts_defs import get_artifact_by_id
 from .state import ArtifactStage
 
 def _resolve_definition(artifact_id: int) -> Dict[str, Any]:
-    if 0 <= artifact_id < len(ARTIFACTS):
-        return ARTIFACTS[artifact_id]
+    definition = get_artifact_by_id(artifact_id)
+    if definition is not None:
+        return definition
     return {"id": artifact_id, "name": f"Artifact {artifact_id + 1}"}
 
 

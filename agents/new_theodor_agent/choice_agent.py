@@ -27,7 +27,7 @@ from platform_utils.llm_logger import JSONFileTracer
 from ..tools.yandex_search import YandexSearchTool as SearchTool
 
 
-from .artifacts_defs import ARTIFACTS
+from .artifacts_defs import get_artifact_by_id
 from .locales import DEFAULT_LOCALE, resolve_locale, set_locale as set_global_locale
 
 from .prompts import get_generation_prompt, get_summary_prompt
@@ -156,8 +156,9 @@ class StreamWriterCallbackHandler(BaseCallbackHandler):
 
 
 def _artifact_definition(artifact_id: int) -> Dict[str, Any]:
-    if 0 <= artifact_id < len(ARTIFACTS):
-        return ARTIFACTS[artifact_id]
+    definition = get_artifact_by_id(artifact_id)
+    if definition is not None:
+        return definition
     return {"id": artifact_id, "name": f"Artifact {artifact_id + 1}"}
 
 
