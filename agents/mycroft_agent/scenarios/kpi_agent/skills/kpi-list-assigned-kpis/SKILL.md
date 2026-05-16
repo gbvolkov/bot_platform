@@ -20,7 +20,7 @@ Reference documents:
 |---|---|---|
 | Staff context missing or unconfirmed | none | Return to Position Identification |
 | Staff context confirmed | `task` -> `kpi_bi_int` | KPI Assignment Lookup |
-| Assignment method details needed | same BI request, `LEFT JOIN kpi_method` via `kpi_method_ref` | KPI Method Lookup |
+| Assignment method details needed | same BI request, method text and note when available | KPI Method Lookup |
 | Final response | none | Answer Synthesis |
 
 ## Workflow
@@ -31,15 +31,31 @@ Reference documents:
 3. If the staff context is missing, guessed, or unconfirmed, do not request or
    return KPI assignments; return to `kpi-position-identification`.
 4. Call `task` with `subagent_type: kpi_bi_int` using KPI Assignment Lookup.
-5. Ask BI for all KPI assignments for the resolved context. Include
-   `staff_structure_id`, department path, employee group, position, position
-   level, and responsibility center if known.
-6. Ask BI to include linked method fields through `kpi_method_ref` when
-   available, using `LEFT JOIN` so KPI rows without methods are preserved.
+5. Ask BI for all KPI assignments for the resolved context as a row-level list
+   of KPI items with the required fields below.
+6. Ask BI to include method text and method note when available, while still
+   returning assignment items that do not have method details.
 7. Count the BI assignment rows.
 8. Preserve every assignment row returned for the exact context.
 9. Synthesize a compact user-facing answer without changing the assignment row
    count.
+
+## BI Request Shape
+
+When the user requests KPIs for a position, the request to `kpi_bi_int` must ask
+for a row-level list of KPI assignments for the resolved official staff context.
+
+The request must explicitly ask BI to return:
+- one item per assigned KPI row;
+- no grouping, deduplication, merging, or aggregation by KPI name;
+- all returned items in stable assignment order;
+- the official applied position context;
+- the fields needed for Mycroft to explain and distinguish each assignment.
+
+Each KPI item should include the required fields below when available.
+
+If method text or method note is unavailable for an assignment, BI should still
+return the assignment item and mark those method fields as empty or unavailable.
 
 ## Required Fields To Request
 
