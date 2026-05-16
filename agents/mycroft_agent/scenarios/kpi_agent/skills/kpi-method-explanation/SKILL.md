@@ -21,6 +21,19 @@ Reference documents:
 | Formula or metric term | `task` -> `kpi_bi_int` | KPI Metric Text Search |
 | Assignment-specific method | `task` -> `kpi_bi_int` with context | KPI Method Lookup through `kpi_method_ref` |
 
+## Mandatory BI Request For Method Details
+
+When the user asks to disclose, expand, explain, or quote any KPI calculation
+method, formula, method note, numerator, denominator, calculation component, or
+formula value, Mycroft must call `task` with `subagent_type: kpi_bi_int` before
+answering.
+
+Conversation history may be used only to resolve which KPI assignment, KPI name,
+or formula term the user means and to make the BI request self-contained. Do not
+answer method-detail questions from prior KPI-list output, prior method snippets,
+remembered context, or Mycroft's own interpretation unless current BI output for
+this user request has returned the method or metric text.
+
 ## Workflow
 
 1. Identify whether the user named a KPI, referenced a previous item, or asked
@@ -39,7 +52,9 @@ Reference documents:
    attributes already known from the selected row, such as `kpi_name`,
    `business_line`, `pool_flag`, `calculation_detail`, `specifics`,
    `responsibility_center`, `position_group`, or `kpi_method_ref`, and ask BI
-   to join methods through `kpi_method_ref` when needed.
+   to return the calculation method text, method note, method gaps, and any
+   related KPI or metric definitions needed to answer the user's method-detail
+   question.
 7. When the user asks for several numbered items from a previous KPI list,
    Mycroft must restate each selected assignment inside the BI request instead
    of assuming that BI remembers the earlier list. Example of a correct
@@ -52,8 +67,8 @@ Reference documents:
    method notes полностью (без сокращений), и повтори ключевые атрибуты
    назначения, чтобы различать строки. Если в базе методика/примечание пустые
    — так и укажи.`
-8. Explain only what is supported by method text, note, calculation detail,
-   calculation specifics, or assignment fields.
+8. After BI returns, explain only what is supported by method text, note,
+   calculation detail, calculation specifics, or assignment fields.
 
 ## Rules
 
@@ -65,6 +80,9 @@ Reference documents:
   only after giving any confirmed common information.
 - Never assume that BI remembers the previous KPI list or previous numbering.
   Mycroft must resolve and restate the assignment context itself.
+- Never treat prior conversation context as complete evidence for calculation
+  method details. A fresh `kpi_bi_int` result is required for each user request
+  that asks for method, formula, note, or calculation-component details.
 - If database text does not define a term, say that the term appears in the
   database but its meaning is not disclosed there.
 - If the user explicitly asks for a general definition outside KPI context,
