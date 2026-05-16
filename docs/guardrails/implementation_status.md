@@ -1,6 +1,6 @@
 # Guardrails Implementation Status
 
-Current status as of 2026-05-11.
+Current status as of 2026-05-15.
 
 This document describes what is implemented in the repository now. It is
 separate from the target architecture vision, which intentionally includes later
@@ -12,9 +12,9 @@ The implemented guardrail path is the platform reusable guardrail layer plus the
 sample integration in `artifact_creator_agent`.
 
 Phase 1 foundation primitives are implemented, but not every legacy agent has
-been migrated to the new middleware. Phase 2 scanner enforcement is mostly
-implemented for `artifact_creator_agent` and covered by focused regression
-tests.
+been migrated to the new middleware. Phase 2 scanner enforcement and Phase 3A
+tool execution safety are implemented for `artifact_creator_agent` and covered
+by focused regression tests.
 
 Phase 2 should not yet be treated as fully production-complete for Russian
 workloads. The platform wiring is in place, but the default LLM Guard scanner
@@ -180,7 +180,7 @@ Drafting agent:
 build_prompt
 SecurityScannerMiddleware
 PrivacyModelRequestMiddleware
-ToolContentScannerMiddleware
+ToolExecutionSafetyMiddleware
 ```
 
 Confirmation agent:
@@ -201,7 +201,7 @@ raw user/tool context
   -> model call
   -> Palimpsest de-anonymization
   -> output scanner enforcement
-  -> user response or tool execution
+  -> user response or guarded tool execution
 ```
 
 ### Current Scanner-Policy Behavior
@@ -226,6 +226,39 @@ Examples:
 | Scanner raises and policy is `fail_closed` | Block |
 | Scanner raises and policy is `fail_open` | Allow and audit scanner error |
 
+## Phase 3A - Tool Execution Safety
+
+Status: implemented for `artifact_creator_agent`.
+
+`platform_guardrails/tool_policy.py`
+
+- Defines `ToolSecurityProfile`, `ToolPrivacyProfile`, `ToolResultPolicy`, and
+  `ToolPolicyRail`.
+- Blocks unprofiled tools by default for guarded execution.
+- Enforces role checks, approval-required decisions, file-export permission,
+  sensitive-data permission, and the external-tool runtime switch.
+- External access is not represented by a separate tool-level boolean. A tool is
+  external when `category == "external_access"`. Runtime
+  `allow_external_tool_access=False` blocks tools in that category.
+
+`platform_guardrails/tool_registry.py`
+
+- Registers concrete runtime tools against concrete runtime-name profiles.
+- Builds guarded tool bundles for LangChain agent tool execution.
+- Keeps one shared `PrivacyRail` available to model-request privacy middleware
+  and tool-result privacy transforms, so model input anonymization and tool
+  result anonymization use the same Palimpsest session scope.
+
+`platform_tools/registry.py`
+
+- Resolves platform tool definitions from `platform_tools/tools.json`.
+- Returns a `BuiltAgentTools` bundle containing both tool objects and resolved
+  runtime-name guardrail profiles.
+- Validates tool profiles when tool execution guardrails are enabled.
+- Fails closed when a selected MCP tool cannot be loaded. MCP connection errors
+  are wrapped with the configured server name and target URL for actionable
+  startup logs.
+
 ### Artifact Creator Integration
 
 `initialize_agent(...)` accepts these guardrail parameters:
@@ -245,6 +278,8 @@ Examples:
 - `guardrail_palimpsest_entity_replacements`
 - `guardrail_palimpsest_options`
 - `guardrail_palimpsest_session_options`
+- `guardrail_tool_profiles`
+- `guardrail_unprofiled_tools`
 
 Palimpsest privacy configuration is now part of the per-agent registry contract.
 Agents provide `guardrail_palimpsest_entity_replacements` as the single
@@ -253,12 +288,21 @@ to `fake` or `typed_placeholder`. These configured options are required: if the
 installed Palimpsest API cannot accept them, initialization fails instead of
 falling back to another anonymization mode.
 
+If `guardrail_palimpsest_run_entities` is omitted, the platform derives
+Palimpsest `run_entities` from the keys in
+`guardrail_palimpsest_entity_replacements`. To avoid anonymizing an entity type,
+exclude it from `run_entities`; with the current policy shape, that usually
+means removing it from `entity_replacements`. Palimpsest 0.1.36 does not expose
+a value-level allowlist through `Palimpsest(..., run_entities=...)` or
+`create_session(..., entity_replacements=...)`; public-name exclusions would
+require a separate platform exclusion layer or upstream Palimpsest support.
+
 `set_prompt` is guarded with the common node wrapper when either scanner or
 privacy guardrails are enabled, so user-provided system prompt text is scanned
 or anonymized before it can be stored in `state.system_prompt`.
 
 `data/config/bot_service/load.json` now references guardrails by policy id only:
-`guardrail_policy: "artifact_creator_default"`. The policy definition lives in
+`guardrail_policy: "default_gaurdrails"`. The policy definition lives in
 `data/config/guardrails/policies.json` and independently controls privacy,
 scanner, and tool-execution layers. Inline agent params such as
 `guardrail_privacy_enabled` or `guardrail_tool_profiles` are intentionally not
@@ -270,6 +314,14 @@ MCP server templates use `guardrail_profiles` keyed by runtime tool name, with
 unprefixed MCP names also accepted. When `tool_execution_enabled=false`, these
 tool profile references are inert. When it is true, every selected runtime tool
 must resolve a valid profile or startup fails.
+
+External-tool disabling uses profile category only: profiles with
+`category: "external_access"` require runtime `allow_external_tool_access=True`.
+There is no separate `allow_external_access` field on tool profiles.
+
+The Google Maps MCP template is configured with explicit streamable-HTTP
+timeouts. If the external MCP endpoint is unavailable, startup fails closed with
+a concise `ToolRegistryError`; configured MCP tools are not silently skipped.
 
 Tool result anonymization is controlled independently per tool profile. Set
 `anonymize_result: true` on a tool registry profile, or use
@@ -304,6 +356,12 @@ Focused regression coverage includes:
   when the scanner classifies them as malicious;
 - fail-open/fail-closed behavior;
 - audit logs contain scanner metadata but no raw text;
+- guardrail policy config resolves into agent initialization kwargs;
+- platform tool registry resolves runtime-name guardrail profiles from
+  `platform_tools/tools.json`;
+- MCP connection failures are wrapped with server/URL context;
+- external tool access is gated by `category == "external_access"` and runtime
+  `allow_external_tool_access`;
 - artifact creator middleware wiring and ordering;
 - confirmation block returns `UserConfirmation(False)`;
 - finalization does not crash when `final_artifact_url` is missing;
@@ -312,13 +370,13 @@ Focused regression coverage includes:
   before the model call;
 - CLI helper behavior.
 
-Representative verification command:
+Representative focused verification command:
 
 ```powershell
-uv run pytest -q tests\unit\test_platform_guardrails_scanners.py tests\unit\test_platform_guardrails_middleware.py tests\unit\test_artifact_creator_agent.py tests\unit\test_artifact_creator_agent_cli.py
+uv run pytest -q tests\unit\test_platform_guardrails_tool_policy.py tests\unit\test_bot_service_tool_registry.py tests\unit\test_platform_guardrails_middleware.py
 ```
 
-Last focused run in this workstream: `57 passed`.
+Last focused run in this workstream: `48 passed`.
 
 ## Known Residual Gaps
 
@@ -331,7 +389,8 @@ These are outside the completed Phase 2 platform-wiring scope:
 - fine-tuned or replacement LLM Guard-compatible models for Russian prompt
   injection, toxicity, and banned-topic handling;
 - retrieval chunk scanning for KB, tickets, and web pages;
-- role-based tool authorization;
+- platform-wide rollout of role-based tool authorization beyond guarded agent
+  paths;
 - SQL validation;
 - full policy-as-code;
 - grounding checks;

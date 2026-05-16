@@ -78,6 +78,9 @@ General SQL strategy:
 - If the user asks about departments, hierarchy, staffing plan, employee groups, or positions, query `kpi_staff_structure`.
 - If the user asks about KPIs for a department, employee group, or position, join `kpi_values` to `kpi_staff_structure`.
 - If the user asks how a KPI is calculated, join `kpi_method` to `kpi_values` by `kpi_method_ref`.
+- If the user asks to explain a term, component, numerator, denominator, value, or named metric that appears inside a selected KPI's `calculation_method` or `note`, keep the selected KPI/method row and also search all rows of `kpi_method`.
+- For that related-method search, search `kpi_method.kpi_name`, `kpi_method.calculation_method`, and `kpi_method.note` with normalized `LOWER(TRIM(...)) LIKE ...` predicates.
+- Do not replace the reliable `kpi_values.kpi_method_ref` join with a KPI-name join. Use `kpi_method_ref` for the selected assignment, and use a separate `kpi_method` text search for related KPI definitions.
 - If the user asks to find all KPIs with corresponding methods by name or text, search `kpi_values.kpi_name` together with the relevant fields from `kpi_method`, such as `kpi_method.kpi_name`, `kpi_method.calculation_method`, and `kpi_method.note`.
 - If the request includes `staff_structure_id`, prefer that primary-key filter
   over text filters. Do not combine it with text predicates for department,
