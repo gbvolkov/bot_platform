@@ -27,6 +27,7 @@ from .tool_policy import (
     ToolSecurityProfile,
 )
 from .tool_registry import GuardedToolBundle, GuardedToolEntry, GuardedToolRegistry, ToolRegistryError
+from .url_policy import UrlPolicyConfig, UrlReference, scan_url_policy
 
 __all__ = [
     "GuardrailContext",
@@ -54,10 +55,13 @@ __all__ = [
     "ToolRegistryError",
     "ToolResultPolicy",
     "ToolSecurityProfile",
+    "UrlPolicyConfig",
+    "UrlReference",
     "build_guardrail_context",
     "entity_types_from_replacements",
     "guarded_node",
     "make_decision",
     "privacy_scope_key",
     "redact_value",
+    "scan_url_policy",
 ]

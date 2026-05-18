@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage
 
 import artifact_creator_agent_cli as cli
 from agents.utils import ModelType
+from platform_guardrails.url_policy import UrlPolicyConfig
 
 
 class FakeAgent:
@@ -140,6 +141,7 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_policy(tmp_path,
         "pipeline_kwargs": {"max_length": 256, "truncation": True},
         "tokenizer_kwargs": {"extra_special_tokens": {}},
     }
+    url_policy = UrlPolicyConfig(mode="audit", blocked_domains=("bad.example",))
     monkeypatch.setattr(
         cli,
         "resolve_guardrail_policy",
@@ -152,6 +154,7 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_policy(tmp_path,
             "guardrail_banned_topics": ["topic"],
             "guardrail_prompt_injection_model": prompt_model_config,
             "guardrail_prompt_injection_threshold": 0.5,
+            "guardrail_url_policy": url_policy,
             "guardrail_composite_input_scanners": ("PromptInjection",),
             "guardrail_composite_recent_message_limit": 7,
             "guardrail_palimpsest_run_entities": ["RU_PERSON"],
@@ -200,6 +203,7 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_policy(tmp_path,
     assert settings.guardrail_prompt_injection_model == prompt_model_config
     assert settings.guardrail_prompt_injection_model_revision is None
     assert settings.guardrail_prompt_injection_threshold == 0.5
+    assert settings.guardrail_url_policy is url_policy
     assert settings.guardrail_composite_input_scanners == ("PromptInjection",)
     assert settings.guardrail_composite_recent_message_limit == 7
     assert settings.guardrail_palimpsest_run_entities == ["RU_PERSON"]

@@ -15,6 +15,7 @@ from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from platform_guardrails.config import inline_guardrail_config_keys, resolve_guardrail_policy
+from platform_guardrails.url_policy import UrlPolicyConfig
 from platform_tools.registry import AgentToolsConfig, BuiltAgentTools, build_agent_tool_bundle, parse_agent_tools_config
 
 
@@ -51,6 +52,7 @@ class ArtifactAgentRegistrySettings:
     guardrail_prompt_injection_model: str | dict[str, Any] | None = None
     guardrail_prompt_injection_model_revision: str | None = None
     guardrail_prompt_injection_threshold: float | None = None
+    guardrail_url_policy: UrlPolicyConfig | None = None
     guardrail_composite_input_scanners: tuple[str, ...] | None = None
     guardrail_composite_recent_message_limit: int = 20
     guardrail_palimpsest_run_entities: list[str] | None = None
@@ -333,6 +335,9 @@ def _load_agent_registry_settings(
     prompt_injection_threshold = guardrail_kwargs.get("guardrail_prompt_injection_threshold")
     if prompt_injection_threshold is not None:
         prompt_injection_threshold = float(prompt_injection_threshold)
+    url_policy = guardrail_kwargs.get("guardrail_url_policy")
+    if url_policy is not None and not isinstance(url_policy, UrlPolicyConfig):
+        raise ValueError(f"Agent '{agent_id}' guardrail_url_policy must be a UrlPolicyConfig.")
     composite_input_scanners = guardrail_kwargs.get("guardrail_composite_input_scanners")
     if composite_input_scanners is not None and not isinstance(composite_input_scanners, (list, tuple)):
         raise ValueError(f"Agent '{agent_id}' guardrail_composite_input_scanners must be a list.")
@@ -370,6 +375,7 @@ def _load_agent_registry_settings(
         guardrail_prompt_injection_model=prompt_injection_model,
         guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
         guardrail_prompt_injection_threshold=prompt_injection_threshold,
+        guardrail_url_policy=url_policy,
         guardrail_composite_input_scanners=(
             tuple(str(item) for item in composite_input_scanners)
             if composite_input_scanners is not None
@@ -646,6 +652,7 @@ def main() -> int:
                     guardrail_prompt_injection_model=prompt_injection_model,
                     guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
                     guardrail_prompt_injection_threshold=prompt_injection_threshold,
+                    guardrail_url_policy=registry_settings.guardrail_url_policy,
                     guardrail_composite_input_scanners=registry_settings.guardrail_composite_input_scanners,
                     guardrail_composite_recent_message_limit=registry_settings.guardrail_composite_recent_message_limit,
                     guardrail_palimpsest_run_entities=registry_settings.guardrail_palimpsest_run_entities,

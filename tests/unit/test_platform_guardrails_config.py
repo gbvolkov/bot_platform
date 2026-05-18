@@ -9,6 +9,7 @@ from platform_guardrails.config import (
     inline_guardrail_config_keys,
     resolve_guardrail_policy,
 )
+from platform_guardrails.url_policy import UrlPolicyConfig
 
 
 def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
@@ -29,6 +30,11 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
                         "scanners": {
                             "failure_policy": "fail_open",
                             "banned_topics": ["topic"],
+                            "url_policy": {
+                                "enabled": True,
+                                "mode": "audit",
+                                "blocked_domains": ["bad.example"],
+                            },
                             "composite_input_scanners": ["PromptInjection"],
                             "composite_recent_message_limit": 8,
                         },
@@ -53,6 +59,9 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
     }
     assert kwargs["guardrail_scanner_failure_policy"] == "fail_open"
     assert kwargs["guardrail_banned_topics"] == ["topic"]
+    assert isinstance(kwargs["guardrail_url_policy"], UrlPolicyConfig)
+    assert kwargs["guardrail_url_policy"].mode == "audit"
+    assert kwargs["guardrail_url_policy"].blocked_domains == ("bad.example",)
     assert kwargs["guardrail_composite_input_scanners"] == ("PromptInjection",)
     assert kwargs["guardrail_composite_recent_message_limit"] == 8
 
@@ -63,6 +72,77 @@ def test_resolve_guardrail_policy_rejects_unknown_policy(tmp_path):
 
     with pytest.raises(GuardrailConfigError, match="Unknown guardrail policy"):
         resolve_guardrail_policy("missing", path=path)
+
+
+def test_resolve_guardrail_policy_rejects_enabled_url_policy_without_mode(tmp_path):
+    path = tmp_path / "policies.json"
+    path.write_text(
+        json.dumps(
+            {
+                "policies": {
+                    "sample": {
+                        "scanners_enabled": True,
+                        "scanners": {"url_policy": {"enabled": True}},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GuardrailConfigError, match="url_policy"):
+        resolve_guardrail_policy("sample", path=path)
+
+
+def test_resolve_guardrail_policy_rejects_invalid_url_policy_mode(tmp_path):
+    path = tmp_path / "policies.json"
+    path.write_text(
+        json.dumps(
+            {
+                "policies": {
+                    "sample": {
+                        "scanners_enabled": True,
+                        "scanners": {
+                            "url_policy": {
+                                "enabled": True,
+                                "mode": "observe",
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GuardrailConfigError, match="url_policy"):
+        resolve_guardrail_policy("sample", path=path)
+
+
+def test_resolve_guardrail_policy_rejects_invalid_url_policy_domain_list(tmp_path):
+    path = tmp_path / "policies.json"
+    path.write_text(
+        json.dumps(
+            {
+                "policies": {
+                    "sample": {
+                        "scanners_enabled": True,
+                        "scanners": {
+                            "url_policy": {
+                                "enabled": True,
+                                "mode": "audit",
+                                "blocked_domains": ["https://bad.example/path"],
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GuardrailConfigError, match="url_policy"):
+        resolve_guardrail_policy("sample", path=path)
 
 
 def test_inline_guardrail_config_keys_detects_removed_load_json_fields():

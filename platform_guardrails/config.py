@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from .url_policy import coerce_url_policy_config
+
 
 DEFAULT_GUARDRAIL_POLICY_CONFIG_PATH = (
     Path(__file__).resolve().parent.parent
@@ -24,6 +26,7 @@ INLINE_GUARDRAIL_CONFIG_KEYS = frozenset(
         "guardrail_prompt_injection_model",
         "guardrail_prompt_injection_model_revision",
         "guardrail_prompt_injection_threshold",
+        "guardrail_url_policy",
         "guardrail_composite_input_scanners",
         "guardrail_composite_recent_message_limit",
         "guardrail_palimpsest_run_entities",
@@ -131,6 +134,17 @@ def guardrail_policy_to_init_kwargs(policy: Mapping[str, Any], *, policy_id: str
         )
     if scanners.get("prompt_injection_threshold") is not None:
         kwargs["guardrail_prompt_injection_threshold"] = float(scanners["prompt_injection_threshold"])
+    if scanners.get("url_policy") is not None:
+        try:
+            url_policy = coerce_url_policy_config(
+                _require_dict(scanners["url_policy"], f"{policy_id}.scanners.url_policy")
+            )
+        except (TypeError, ValueError) as exc:
+            raise GuardrailConfigError(
+                f"Invalid guardrail policy field '{policy_id}.scanners.url_policy': {exc}"
+            ) from exc
+        if url_policy is not None:
+            kwargs["guardrail_url_policy"] = url_policy
     if scanners.get("composite_input_scanners") is not None:
         kwargs["guardrail_composite_input_scanners"] = tuple(
             _require_list(

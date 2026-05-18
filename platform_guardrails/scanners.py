@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import re
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
-from urllib.parse import urlsplit
 
 from .context import GuardrailContext
 from .decisions import GuardrailDecision, allow, block, redact
 from .injection import scanner_category, scanner_decision
+from .url_policy import UrlPolicyConfig, coerce_url_policy_config, normalized_url_keys, scan_url_policy
 
 
 ScannerFailurePolicy = Literal["fail_closed", "fail_open"]
@@ -20,12 +19,6 @@ GENERIC_BANNED_TOPICS = [
     "illegal activity",
     "explicit sexual content",
 ]
-URL_PATTERN = re.compile(
-    r"(?i)\b(?:https?://)?(?:(?:[a-z0-9-]+\.)+[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})"
-    r"(?::\d{1,5})?(?:/[^\s<>()\"']*)?"
-)
-
-
 @dataclass(frozen=True)
 class ScannerSpec:
     name: str
@@ -57,6 +50,7 @@ class LLMGuardScannerProfile:
     composite_input_scanners: Sequence[ScannerSpec] = field(default_factory=tuple)
     failure_policy: ScannerFailurePolicy = "fail_closed"
     fail_fast: bool = False
+    url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_scanners", tuple(_coerce_spec(spec) for spec in self.input_scanners))
@@ -66,6 +60,7 @@ class LLMGuardScannerProfile:
             "composite_input_scanners",
             tuple(_coerce_spec(spec) for spec in self.composite_input_scanners),
         )
+        object.__setattr__(self, "url_policy", coerce_url_policy_config(self.url_policy))
         if self.failure_policy not in {"fail_closed", "fail_open"}:
             raise ValueError("failure_policy must be 'fail_closed' or 'fail_open'.")
 
@@ -79,6 +74,7 @@ class LLMGuardScannerProfile:
         prompt_injection_threshold: float | None = None,
         prompt_injection_model: str | Mapping[str, Any] | None = None,
         prompt_injection_model_revision: str | None = None,
+        url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None,
     ) -> "LLMGuardScannerProfile":
         topics = list(GENERIC_BANNED_TOPICS if banned_topics is None else banned_topics)
         prompt_injection_config: dict[str, Any] = {
@@ -113,6 +109,7 @@ class LLMGuardScannerProfile:
             output_scanners=tuple(output_scanners),
             composite_input_scanners=(prompt_injection,),
             failure_policy=failure_policy,
+            url_policy=url_policy,
         )
 
 
@@ -152,6 +149,7 @@ class LLMGuardScannerRail:
             source_urls=set(),
             failure_policy=self._profile.failure_policy,
             fail_fast=self._profile.fail_fast,
+            url_policy=None,
             instance_for_spec=lambda spec: self._instance_for_spec(spec, "input"),
             scan_one=lambda scanner, value: scanner.scan(value),
         )
@@ -177,6 +175,7 @@ class LLMGuardScannerRail:
             source_urls=self._source_urls_for_context(context),
             failure_policy=self._profile.failure_policy,
             fail_fast=self._profile.fail_fast,
+            url_policy=self._profile.url_policy,
             instance_for_spec=lambda spec: self._instance_for_spec(spec, "output"),
             scan_one=lambda scanner, value: scanner.scan(prompt, value),
         )
@@ -200,6 +199,7 @@ class LLMGuardScannerRail:
             source_urls=set(),
             failure_policy=self._profile.failure_policy,
             fail_fast=self._profile.fail_fast,
+            url_policy=None,
             instance_for_spec=lambda spec: self._instance_for_spec(spec, "input"),
             scan_one=lambda scanner, value: scanner.scan(value),
         )
@@ -474,12 +474,30 @@ def _scan_text(
     source_urls: set[str],
     failure_policy: ScannerFailurePolicy,
     fail_fast: bool,
+    url_policy: UrlPolicyConfig | None,
     instance_for_spec: Callable[[ScannerSpec], Any],
     scan_one: Callable[[Any, str], tuple[str, bool, float]],
 ) -> ScannerScanResult:
     current = text
     decisions: list[GuardrailDecision] = []
-    if not current or not specs:
+    if not current:
+        return ScannerScanResult(text=current, decisions=decisions)
+
+    if stage == "output" and url_policy is not None:
+        url_policy_decisions = scan_url_policy(
+            current,
+            context,
+            url_policy,
+            stage=stage,
+            boundary=boundary,
+            prompt=prompt,
+            source_urls=source_urls,
+        )
+        decisions.extend(url_policy_decisions)
+        if any(not decision["allowed"] for decision in url_policy_decisions):
+            return ScannerScanResult(text=current, decisions=decisions)
+
+    if not specs:
         return ScannerScanResult(text=current, decisions=decisions)
 
     for spec in specs:
@@ -543,25 +561,7 @@ def _scan_text(
 
 
 def _normalized_urls(text: str) -> set[str]:
-    urls: set[str] = set()
-    for match in URL_PATTERN.finditer(text or ""):
-        raw_url = match.group(0).strip().rstrip(".,;!?)]}")
-        if not raw_url:
-            continue
-        parseable_url = raw_url if "://" in raw_url else f"http://{raw_url}"
-        parsed = urlsplit(parseable_url)
-        host = parsed.hostname.lower() if parsed.hostname else ""
-        if not host:
-            continue
-        try:
-            parsed_port = parsed.port
-        except ValueError:
-            parsed_port = None
-        port = f":{parsed_port}" if parsed_port is not None else ""
-        path = parsed.path.rstrip("/")
-        query = f"?{parsed.query}" if parsed.query else ""
-        urls.add(f"{host}{port}{path}{query}")
-    return urls
+    return normalized_url_keys(text)
 
 
 def _output_urls_are_prompt_sourced(prompt: str, output: str) -> bool:

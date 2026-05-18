@@ -43,6 +43,7 @@ from langgraph.graph.message import add_messages
 
 from platform_guardrails.privacy import PalimpsestSessionManager, PrivacyRail
 from platform_guardrails.scanners import LLMGuardScannerProfile, ScannerSpec
+from platform_guardrails.url_policy import UrlPolicyConfig
 
 
 class BlockingInputScanner:
@@ -706,6 +707,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         "tokenizer_kwargs": {"extra_special_tokens": {}},
     }
     entity_replacements = {"RU_PERSON": "typed_placeholder"}
+    url_policy = UrlPolicyConfig(mode="audit", blocked_domains=("bad.example",))
 
     monkeypatch.setattr(artifact_agent.config, "LANGFUSE_URL", "https://langfuse.example")
     monkeypatch.setattr(artifact_agent, "RedactingJSONFileTracer", lambda path: "redacting_handler")
@@ -811,6 +813,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         guardrail_prompt_injection_model=prompt_model_config,
         guardrail_prompt_injection_model_revision="model-revision",
         guardrail_prompt_injection_threshold=0.5,
+        guardrail_url_policy=url_policy,
         guardrail_palimpsest_run_entities=["RU_PERSON"],
         guardrail_palimpsest_entity_replacements=entity_replacements,
         guardrail_palimpsest_options={"placeholder_mode": "typed"},
@@ -830,6 +833,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         "prompt_injection_model": prompt_model_config,
         "prompt_injection_model_revision": "model-revision",
         "prompt_injection_threshold": 0.5,
+        "url_policy": url_policy,
     }
     assert captured["scanner_rail_profile"] == "scanner_profile"
     assert "set_prompt" in captured["nodes"]

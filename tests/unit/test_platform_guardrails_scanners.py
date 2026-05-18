@@ -18,6 +18,7 @@ from platform_guardrails.scanners import (
     LLMGuardScannerRail,
     ScannerSpec,
 )
+from platform_guardrails.url_policy import UrlPolicyConfig
 from platform_guardrails.middleware import PrivacyModelRequestMiddleware, ToolContentScannerMiddleware
 from langchain.tools.tool_node import ToolCallRequest
 
@@ -885,6 +886,105 @@ def test_tool_content_scanner_allows_remembered_source_url_without_human_message
 
     assert output_scanner.seen == []
     assert result.content == "ok"
+
+
+def test_url_policy_runs_before_malicious_urls_scanner():
+    output_scanner = FakeOutputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            output_scanners=[ScannerSpec("MaliciousURLs", scanner=output_scanner)],
+            url_policy=UrlPolicyConfig(mode="enforce", blocked_domains=("bad.example",)),
+        )
+    )
+
+    result = rail.scan_output_text("", "Open https://bad.example", _context())
+
+    assert result.blocked_decision is not None
+    assert result.blocked_decision["metadata"]["rail"] == "url_policy"
+    assert output_scanner.seen == []
+
+
+def test_url_policy_audit_mode_continues_to_malicious_urls_scanner():
+    output_scanner = FakeOutputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            output_scanners=[ScannerSpec("MaliciousURLs", scanner=output_scanner)],
+            url_policy=UrlPolicyConfig(mode="audit", blocked_domains=("bad.example",)),
+        )
+    )
+
+    result = rail.scan_output_text("", "Open https://bad.example", _context())
+
+    assert result.blocked_decision is None
+    assert result.decisions[0]["metadata"]["rail"] == "url_policy"
+    assert output_scanner.seen == [("", "Open https://bad.example")]
+
+
+def test_url_policy_denylist_overrides_remembered_source_url():
+    input_scanner = FakeInputScanner(valid=True, score=0.0)
+    output_scanner = FakeOutputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            input_scanners=[ScannerSpec("PromptInjection", scanner=input_scanner)],
+            output_scanners=[ScannerSpec("MaliciousURLs", scanner=output_scanner)],
+            url_policy=UrlPolicyConfig(mode="enforce", blocked_domains=("bad.example",)),
+        )
+    )
+    context = _context()
+    rail.scan_input_text("Source URL: https://bad.example/path", context)
+
+    result = rail.scan_output_text("", "Reuse https://bad.example/path", context)
+
+    assert result.blocked_decision is not None
+    assert result.blocked_decision["metadata"]["rail"] == "url_policy"
+    assert result.blocked_decision["metadata"]["source_url"] is True
+    assert output_scanner.seen == []
+
+
+def test_tool_content_scanner_uses_url_policy_for_tool_arguments():
+    scanner = FakeOutputScanner(valid=True, score=0.0)
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            output_scanners=[ScannerSpec("MaliciousURLs", scanner=scanner)],
+            url_policy=UrlPolicyConfig(mode="enforce", blocked_domains=("bad.example",)),
+        )
+    )
+    middleware = ToolContentScannerMiddleware(rail, agent_name="artifact_creator_agent.run")
+    tool_request_message = AIMessage(
+        content="",
+        id="ai-tool-1",
+        tool_calls=[
+            {
+                "name": "commit_artifact_final_text",
+                "args": {"final_text": "Open https://bad.example"},
+                "id": "call-1",
+            }
+        ],
+    )
+    request = ToolCallRequest(
+        tool_call={
+            "name": "commit_artifact_final_text",
+            "args": {"final_text": "Open https://bad.example"},
+            "id": "call-1",
+            "type": "tool_call",
+        },
+        tool=None,
+        state={"messages": [tool_request_message]},
+        runtime=_runtime(),
+    )
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return AIMessage(content="should not happen")
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert called is False
+    assert scanner.seen == []
+    assert isinstance(result, Command)
+    assert result.update["messages"][-1].id.startswith("guardrail-block-")
 
 
 def test_security_scan_registers_source_urls_for_later_tool_scans():

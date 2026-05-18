@@ -1,6 +1,6 @@
 # Guardrails Implementation Status
 
-Current status as of 2026-05-15.
+Current status as of 2026-05-18.
 
 This document describes what is implemented in the repository now. It is
 separate from the target architecture vision, which intentionally includes later
@@ -12,9 +12,9 @@ The implemented guardrail path is the platform reusable guardrail layer plus the
 sample integration in `artifact_creator_agent`.
 
 Phase 1 foundation primitives are implemented, but not every legacy agent has
-been migrated to the new middleware. Phase 2 scanner enforcement and Phase 3A
-tool execution safety are implemented for `artifact_creator_agent` and covered
-by focused regression tests.
+been migrated to the new middleware. Phase 2 scanner enforcement, deterministic
+URL/domain policy, and Phase 3A tool execution safety are implemented for
+`artifact_creator_agent` and covered by focused regression tests.
 
 Phase 2 should not yet be treated as fully production-complete for Russian
 workloads. The platform wiring is in place, but the default LLM Guard scanner
@@ -156,6 +156,15 @@ Composite input scanners:
 
 Output and tool-argument scanners:
 
+- `platform_guardrails.url_policy`: config-only deterministic URL/domain policy
+  that runs before `MaliciousURLs` when configured. It supports audit/enforce
+  modes, exact and wildcard domain rules, private/local host blocking,
+  userinfo URL blocking, mixed-script IDN checks, and protected-domain
+  lookalike checks. URL matching canonicalizes IDNA/punycode hosts and Unicode
+  DNS dot separators such as `。`, `．`, and `｡`, so non-Latin configured
+  domains and non-Latin URLs are handled through the same deterministic path.
+  Source URLs are still allowed to be preserved, but explicit deterministic
+  violations override source preservation.
 - `MaliciousURLs`: block when LLM Guard classifies a generated URL as malicious
   above threshold and the URL was not already present in accepted source input.
 - `Toxicity`: review/block when invalid.
@@ -207,8 +216,9 @@ raw user/tool context
 ### Current Scanner-Policy Behavior
 
 The current policy trusts scanner decisions. If a scanner marks content as safe,
-the platform allows it. The platform does not add hidden deterministic phishing,
-prompt-injection, or URL heuristics on top of LLM Guard allow decisions.
+the platform allows it, except where the configured deterministic URL/domain
+policy produces an enforce-mode block. The platform does not add hidden
+deterministic prompt-injection heuristics on top of LLM Guard allow decisions.
 
 Examples:
 
@@ -219,9 +229,11 @@ Examples:
 | PromptInjection scores an indirect-injection-looking pasted text as safe | Allow |
 | Secrets scanner redacts a secret | Continue with sanitized text |
 | TokenLimit marks input invalid | Block |
+| URL policy finds a violation in `audit` mode | Allow and audit the URL-policy decision before LLM Guard URL scanning |
+| URL policy finds a violation in `enforce` mode | Block before LLM Guard URL scanning |
 | MaliciousURLs scores a generated URL above threshold | Block response/tool call |
-| MaliciousURLs scores a password-reset lookalike URL below threshold | Allow |
-| URL was supplied by the user as source material and later appears in CRM/artifact text | Allow preserving it as source data |
+| MaliciousURLs scores a password-reset lookalike URL below threshold and URL policy has no matching rule | Allow |
+| URL was supplied by the user as source material and later appears in CRM/artifact text | Allow preserving it as source data unless URL policy blocks it |
 | Palimpsest restores client PII in the final user-facing response | Show restored values; do not mask with LLM Guard Sensitive |
 | Scanner raises and policy is `fail_closed` | Block |
 | Scanner raises and policy is `fail_open` | Allow and audit scanner error |
@@ -274,6 +286,7 @@ Status: implemented for `artifact_creator_agent`.
 - `guardrail_prompt_injection_threshold`
 - `guardrail_composite_input_scanners`
 - `guardrail_composite_recent_message_limit`
+- `guardrail_url_policy`
 - `guardrail_palimpsest_run_entities`
 - `guardrail_palimpsest_entity_replacements`
 - `guardrail_palimpsest_options`
@@ -302,11 +315,16 @@ privacy guardrails are enabled, so user-provided system prompt text is scanned
 or anonymized before it can be stored in `state.system_prompt`.
 
 `data/config/bot_service/load.json` now references guardrails by policy id only:
-`guardrail_policy: "default_gaurdrails"`. The policy definition lives in
+`guardrail_policy: "default_guardrails"`. The policy definition lives in
 `data/config/guardrails/policies.json` and independently controls privacy,
 scanner, and tool-execution layers. Inline agent params such as
 `guardrail_privacy_enabled` or `guardrail_tool_profiles` are intentionally not
 part of the load config contract.
+
+The local `default_guardrails` policy now resolves deterministic URL policy
+configuration into `guardrail_url_policy`. The current rollout posture is audit
+first: URL policy can log deterministic findings before changing user-visible
+behavior, and enforce mode is available for policy-controlled blocking.
 
 Tool execution profiles live with the tool registry in
 `platform_tools/tools.json`. Internal tool templates use `guardrail_profile`;
@@ -333,6 +351,13 @@ user/model input anonymization is enabled for the agent. A profile with
 `artifact_creator_agent_cli.py` provides a manual CLI for exercising the guarded
 agent path with persistent SQLite checkpoints.
 
+Manual CLI validation on 2026-05-18 confirmed that an artifact response
+containing `https://bad.example/path` produced a `url_policy` audit decision in
+`logs/artifact_creator_agent_202605181222_guardrails.jsonl`. The decision used
+`mode: audit`, `rule: blocked_domain`, `boundary: model_response`, and
+`source_url: true`; audit mode allowed the response while recording the
+deterministic URL-policy finding.
+
 ### Finalization Handling
 
 The confirmation path returns structured `UserConfirmation(False)` when scanner
@@ -354,6 +379,9 @@ Focused regression coverage includes:
 - user-facing output does not mask Palimpsest-restored data;
 - source URL memory allows source URLs but still blocks generated malicious URLs
   when the scanner classifies them as malicious;
+- deterministic URL/domain policy audit and enforce behavior;
+- URL-policy denylist, allowlist, private host, userinfo URL, IDNA, mixed-script,
+  Unicode DNS dot separator, non-Latin configured domain, and lookalike checks;
 - fail-open/fail-closed behavior;
 - audit logs contain scanner metadata but no raw text;
 - guardrail policy config resolves into agent initialization kwargs;
@@ -370,20 +398,30 @@ Focused regression coverage includes:
   before the model call;
 - CLI helper behavior.
 
-Representative focused verification command:
+Representative URL-policy verification command:
 
 ```powershell
-uv run pytest -q tests\unit\test_platform_guardrails_tool_policy.py tests\unit\test_bot_service_tool_registry.py tests\unit\test_platform_guardrails_middleware.py
+uv run pytest -q tests\unit\test_platform_guardrails_url_policy.py tests\unit\test_platform_guardrails_scanners.py
 ```
 
-Last focused run in this workstream: `48 passed`.
+Last focused URL-policy/scanner run in this workstream: `48 passed`.
+
+Last full unit run in this workstream:
+
+```powershell
+uv run pytest -q tests\unit
+```
+
+Result: `368 passed, 7 skipped`.
 
 ## Known Residual Gaps
 
 These are outside the completed Phase 2 platform-wiring scope:
 
-- deterministic phishing URL rules;
-- company-domain allowlists or denylist policy;
+- production blocklist/allowlist contents and update process;
+- public feed ingestion from sources such as URLhaus, Spamhaus, PhishTank, or
+  OpenPhish;
+- runtime reputation lookups such as Google Safe Browsing/Web Risk;
 - strict heuristic indirect-prompt-injection policy on top of LLM Guard;
 - production-certified Russian and mixed-language scanner model quality;
 - fine-tuned or replacement LLM Guard-compatible models for Russian prompt
@@ -396,10 +434,10 @@ These are outside the completed Phase 2 platform-wiring scope:
 - grounding checks;
 - rollout of the common middleware to all agents.
 
-The password-reset URL example demonstrates this distinction: `MaliciousURLs`
-ran, but the LLM Guard classifier scored the generated URL below the configured
-threshold, so the current scanner policy allowed it. That is a policy/model
-coverage gap, not a Phase 2 wiring failure.
+The password-reset URL example demonstrates this distinction: if no deterministic
+URL policy rule matches and `MaliciousURLs` scores the generated URL below the
+configured threshold, the current scanner policy allows it. That is a
+policy/model/list-coverage gap, not a Phase 2 wiring failure.
 
 Recent Russian and mixed Russian/English prompt-injection checks show the same
 class of residual risk: the middleware composes and scans the right text, but a

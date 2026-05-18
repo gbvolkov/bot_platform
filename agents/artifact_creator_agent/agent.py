@@ -62,6 +62,7 @@ from platform_guardrails.tool_policy import (
     coerce_tool_security_profile,
 )
 from platform_guardrails.tool_registry import GuardedToolRegistry
+from platform_guardrails.url_policy import UrlPolicyConfig
 
 from .state import (
     ArtifactCreatorAgentContext
@@ -552,6 +553,7 @@ def initialize_agent(
     guardrail_prompt_injection_model: str | Mapping[str, Any] | None = None,
     guardrail_prompt_injection_model_revision: str | None = None,
     guardrail_prompt_injection_threshold: float | None = None,
+    guardrail_url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None,
     guardrail_composite_input_scanners: tuple[str, ...] | None = None,
     guardrail_composite_recent_message_limit: int = 20,
     guardrail_palimpsest_run_entities: List[str] | None = None,
@@ -645,6 +647,8 @@ def initialize_agent(
             scanner_profile_kwargs["prompt_injection_model_revision"] = guardrail_prompt_injection_model_revision
         if guardrail_prompt_injection_threshold is not None:
             scanner_profile_kwargs["prompt_injection_threshold"] = guardrail_prompt_injection_threshold
+        if guardrail_url_policy is not None:
+            scanner_profile_kwargs["url_policy"] = guardrail_url_policy
         scanner_profile = LLMGuardScannerProfile.artifact_creator_default(
             **scanner_profile_kwargs,
         )
