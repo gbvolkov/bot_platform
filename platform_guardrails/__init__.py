@@ -2,6 +2,14 @@
 
 from .context import GuardrailContext, build_guardrail_context, privacy_scope_key
 from .decisions import GuardrailDecision, make_decision
+from .graph_compiler import PlatformGraphCompiler
+from .graph_spec import (
+    AgentGraphSpec,
+    AgentNodeSpec,
+    CallableNodeSpec,
+    NodeGuardrailPolicy,
+    PlatformStateGraph,
+)
 from .logging import GuardrailEventLogger, RedactingJSONFileTracer, redact_value
 from .middleware import (
     PalimpsestSessionMiddleware,
@@ -19,6 +27,7 @@ from .privacy import (
     entity_types_from_replacements,
 )
 from .scanners import LLMGuardScannerProfile, LLMGuardScannerRail, ScannerSpec
+from .runtime import PlatformGuardrailRuntime
 from .tool_policy import (
     ARTIFACT_CREATOR_TOOL_PROFILES,
     ToolPolicyRail,
@@ -32,11 +41,18 @@ from .url_policy import UrlPolicyConfig, UrlReference, scan_url_policy
 __all__ = [
     "GuardrailContext",
     "GuardrailDecision",
+    "AgentGraphSpec",
+    "AgentNodeSpec",
+    "CallableNodeSpec",
     "GuardrailEventLogger",
     "PalimpsestSessionManager",
     "PalimpsestSessionMiddleware",
     "PrivacyModelRequestMiddleware",
     "PrivacyRail",
+    "NodeGuardrailPolicy",
+    "PlatformGraphCompiler",
+    "PlatformGuardrailRuntime",
+    "PlatformStateGraph",
     "RedactingJSONFileTracer",
     "LLMGuardScannerProfile",
     "LLMGuardScannerRail",

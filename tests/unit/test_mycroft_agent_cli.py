@@ -19,6 +19,7 @@ from agents.mycroft_agent.cli_config import (
     SkillsConfig,
     SubagentsConfig,
     build_internal_tools,
+    resolve_cli_config_path,
     load_cli_config,
     load_mcp_tools_from_config,
     required_environment_variables,
@@ -48,7 +49,7 @@ def test_load_cli_config_reads_required_sections(tmp_path):
             {
                 "system_prompt": {
                     "type": "file",
-                    "path": "scenario_prompt.txt",
+                    "path": str(prompt_path),
                 },
                 "subagents": {
                     "stateless": ["simple_agent", "new_ideator", "web_search_agent"],
@@ -144,7 +145,7 @@ def test_load_cli_config_reads_system_prompt_from_file(tmp_path):
             {
                 "system_prompt": {
                     "type": "file",
-                    "path": "prompt.txt",
+                    "path": str(prompt_path),
                 },
                 "subagents": {
                     "stateless": ["simple_agent"],
@@ -164,6 +165,54 @@ def test_load_cli_config_reads_system_prompt_from_file(tmp_path):
         stateless=("simple_agent",),
         stateful=(),
     )
+
+
+def test_default_cli_config_path_uses_working_directory_config_root(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MYCROFT_CONFIG_ROOT", raising=False)
+
+    assert resolve_cli_config_path() == (
+        tmp_path / "data" / "config" / "mycroft" / "gaz_config.json"
+    )
+
+
+def test_default_cli_config_path_allows_configurable_root(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MYCROFT_CONFIG_ROOT", "runtime/configs")
+
+    assert resolve_cli_config_path() == (
+        tmp_path / "runtime" / "configs" / "gaz_config.json"
+    )
+
+
+def test_load_cli_config_resolves_system_prompt_from_working_directory(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+    prompt_path = tmp_path / "prompts" / "prompt.txt"
+    prompt_path.parent.mkdir()
+    prompt_path.write_text("Prompt from working directory.", encoding="utf-8")
+    config_path = tmp_path / "data" / "config" / "mycroft" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": {
+                    "type": "file",
+                    "path": "prompts/prompt.txt",
+                },
+                "subagents": {"stateless": [], "stateful": []},
+                "internal_tools": [],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_cli_config(config_path)
+
+    assert config.system_prompt == "Prompt from working directory."
 
 
 def test_load_cli_config_rejects_legacy_agents_field(tmp_path):
@@ -415,9 +464,7 @@ def test_default_cli_config_uses_generic_config_file():
 
 
 def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
-    config = load_cli_config(
-        Path("C:/Projects/bot_platform/agents/mycroft_agent/ingos_products_cli_config.json")
-    )
+    config = load_cli_config(Path("data/config/mycroft/ingos_products_config.json"))
 
     assert config.subagents == SubagentsConfig(
         stateless=("web_search_agent",),
@@ -443,9 +490,7 @@ def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
 
 
 def test_kpi_agent_cli_config_loads_kpi_bi_subagent_and_skills():
-    config = load_cli_config(
-        Path("C:/Projects/bot_platform/agents/mycroft_agent/kpi_agent_cli_config.json")
-    )
+    config = load_cli_config(Path("data/config/mycroft/kpi_agent_config.json"))
 
     assert config.subagents == SubagentsConfig(
         stateless=("kpi_bi_int",),

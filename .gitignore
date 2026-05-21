@@ -1,6 +1,14 @@
 __pycache__
 .venv
-data
+data/*
+!data/config/
+data/config/*
+#!data/config/bot_service/
+#!data/config/bot_service/load.json
+!data/config/mycroft/
+!data/config/mycroft/**
+!data/config/guardrails/
+!data/config/guardrails/**
 keys
 logs
 models

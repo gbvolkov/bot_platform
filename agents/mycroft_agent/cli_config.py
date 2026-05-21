@@ -10,7 +10,10 @@ from typing import Any, Callable
 
 from langchain_mcp_adapters.tools import load_mcp_tools
 
-DEFAULT_CLI_CONFIG_PATH = Path(__file__).with_name("cli_config.json")
+MYCROFT_CONFIG_ROOT_ENV = "MYCROFT_CONFIG_ROOT"
+DEFAULT_MYCROFT_CONFIG_ROOT = Path("data/config/mycroft")
+DEFAULT_CLI_CONFIG_NAME = "gaz_config.json"
+DEFAULT_CLI_CONFIG_PATH = DEFAULT_MYCROFT_CONFIG_ROOT / DEFAULT_CLI_CONFIG_NAME
 _BRACED_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _ALLOWED_MCP_TRANSPORTS = {
     "stdio",
@@ -78,11 +81,23 @@ class MycroftCliConfig:
 
 def resolve_cli_config_path(raw_path: str | Path | None = None) -> Path:
     if raw_path is None:
-        return DEFAULT_CLI_CONFIG_PATH
+        return default_cli_config_path()
     candidate = Path(raw_path)
     if candidate.is_absolute():
         return candidate
-    return candidate.resolve()
+    return (Path.cwd() / candidate).resolve()
+
+
+def mycroft_config_root() -> Path:
+    raw_root = os.environ.get(MYCROFT_CONFIG_ROOT_ENV, "").strip()
+    root = Path(raw_root) if raw_root else DEFAULT_MYCROFT_CONFIG_ROOT
+    if root.is_absolute():
+        return root
+    return (Path.cwd() / root).resolve()
+
+
+def default_cli_config_path() -> Path:
+    return mycroft_config_root() / DEFAULT_CLI_CONFIG_NAME
 
 
 def load_cli_config(raw_path: str | Path | None = None) -> MycroftCliConfig:
@@ -96,7 +111,7 @@ def load_cli_config(raw_path: str | Path | None = None) -> MycroftCliConfig:
             "Use 'subagents.stateless' and 'subagents.stateful'."
         )
 
-    system_prompt = _parse_system_prompt(data.get("system_prompt"), config_dir=path.parent)
+    system_prompt = _parse_system_prompt(data.get("system_prompt"))
     skills = _parse_skills(data.get("skills"))
     subagents = _parse_subagents(data.get("subagents"))
     internal_tools = _parse_internal_tools(data.get("internal_tools") or [])
@@ -284,7 +299,7 @@ def _parse_skills(value: Any) -> SkillsConfig:
     return SkillsConfig(paths=tuple(_require_str(item, "skills.paths[]") for item in raw_paths))
 
 
-def _parse_system_prompt(value: Any, *, config_dir: Path) -> str:
+def _parse_system_prompt(value: Any) -> str:
     if isinstance(value, str):
         return _require_str(value, "system_prompt")
     if not isinstance(value, dict):
@@ -297,7 +312,7 @@ def _parse_system_prompt(value: Any, *, config_dir: Path) -> str:
         prompt_path = _require_str(value.get("path"), "system_prompt.path")
         resolved_prompt_path = Path(prompt_path)
         if not resolved_prompt_path.is_absolute():
-            resolved_prompt_path = (config_dir / resolved_prompt_path).resolve()
+            resolved_prompt_path = (Path.cwd() / resolved_prompt_path).resolve()
         if not resolved_prompt_path.is_file():
             raise FileNotFoundError(
                 f"Mycroft CLI system prompt file not found: {resolved_prompt_path}"

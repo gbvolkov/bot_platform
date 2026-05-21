@@ -349,6 +349,226 @@ def test_agent_registry_injects_resolved_tool_profiles_when_tool_guardrails_enab
     assert captured["factory_params"]["guardrail_tool_profiles"] == profiles
 
 
+def test_agent_registry_uses_platform_graph_factory_when_configured(monkeypatch):
+    captured = {}
+
+    class FakeRuntime:
+        tool_execution_enabled = False
+
+    class FakeRuntimeFactory:
+        @staticmethod
+        def from_policy_id(policy_id, *, agent_id):
+            captured["runtime_policy_id"] = policy_id
+            captured["runtime_agent_id"] = agent_id
+            return FakeRuntime()
+
+    class FakeCompiler:
+        def compile(self, spec, *, guardrail_runtime=None, checkpointer=None, tools=None, tool_profiles=None):
+            captured["compiled_spec"] = spec
+            captured["guardrail_runtime"] = guardrail_runtime
+            captured["checkpointer"] = checkpointer
+            captured["tools"] = tools
+            captured["tool_profiles"] = tool_profiles
+            return {"compiled": spec}
+
+    def legacy_factory(**_params):
+        raise AssertionError("legacy factory should not be called")
+
+    def graph_factory(**params):
+        captured["graph_params"] = params
+        return {"spec": "ok"}
+
+    monkeypatch.setattr(agent_registry_module, "PlatformGuardrailRuntime", FakeRuntimeFactory)
+    monkeypatch.setattr(agent_registry_module, "PlatformGraphCompiler", lambda: FakeCompiler())
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._definitions = {
+        "platform_agent": AgentDefinition(
+            id="platform_agent",
+            name="Platform",
+            description="Platform guarded",
+            factory=legacy_factory,
+            default_provider=ModelType.GPT,
+            supported_content_types=(ContentType.TEXT_FILES,),
+            init_params={},
+            graph_factory=graph_factory,
+            graph_param_names=frozenset({"provider"}),
+            guardrail_policy_id="default_guardrails",
+            guardrail_mode="platform",
+        )
+    }
+    registry._instances = {}
+    registry._init_tasks = {}
+    registry._init_errors = {}
+    registry._checkpointer = None
+    registry._checkpointer_cm = None
+    registry._checkpointer_lock = asyncio.Lock()
+
+    async def run_initialization():
+        registry._start_initialization("platform_agent")
+        await registry._init_tasks["platform_agent"]
+        await asyncio.sleep(0)
+
+    asyncio.run(run_initialization())
+
+    assert captured["graph_params"] == {"provider": ModelType.GPT}
+    assert captured["runtime_policy_id"] == "default_guardrails"
+    assert captured["runtime_agent_id"] == "platform_agent"
+    assert captured["compiled_spec"] == {"spec": "ok"}
+    assert registry._instances["platform_agent"] == {"compiled": {"spec": "ok"}}
+
+
+def test_agent_config_parses_top_level_platform_guardrails(monkeypatch):
+    module = ModuleType("demo_platform_agent")
+
+    def initialize_agent():
+        return object()
+
+    def build_agent_graph():
+        return {"spec": "ok"}
+
+    module.initialize_agent = initialize_agent
+    module.build_agent_graph = build_agent_graph
+    monkeypatch.setitem(sys.modules, "demo_platform_agent", module)
+
+    definitions = agent_registry_module._build_definitions_from_config(
+        {
+            "agents": [
+                {
+                    "id": "demo",
+                    "name": "Demo",
+                    "description": "Demo agent",
+                    "module": "demo_platform_agent",
+                    "guardrails": {
+                        "policy": "default_guardrails",
+                        "mode": "platform",
+                    },
+                    "tools": [
+                        {
+                            "type": "internal",
+                            "name": "web_search_tool",
+                            "params": {
+                                "max_results": 2,
+                                "summarize": True,
+                            },
+                        }
+                    ],
+                    "params": {
+                        "provider": "openai",
+                        "allow_external_tool_access": True,
+                    },
+                }
+            ]
+        },
+        ModelType.GPT,
+        (),
+    )
+
+    definition = definitions["demo"]
+    assert definition.guardrail_policy_id == "default_guardrails"
+    assert definition.guardrail_mode == "platform"
+    assert definition.graph_factory is build_agent_graph
+    assert definition.factory is initialize_agent
+    assert definition.tools_config.internal_tools[0].name == "web_search_tool"
+    assert definition.tools_config.internal_tools[0].params == {
+        "max_results": 2,
+        "summarize": True,
+    }
+    assert definition.init_params["allow_external_tool_access"] is True
+
+
+def test_agent_registry_platform_mode_requires_graph_factory():
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._definitions = {
+        "broken": AgentDefinition(
+            id="broken",
+            name="Broken",
+            description="Missing graph factory",
+            factory=lambda **_params: object(),
+            default_provider=ModelType.GPT,
+            supported_content_types=(),
+            guardrail_policy_id="default_guardrails",
+            guardrail_mode="platform",
+        )
+    }
+    registry._instances = {}
+    registry._init_tasks = {}
+    registry._init_errors = {}
+    registry._checkpointer = None
+    registry._checkpointer_cm = None
+    registry._checkpointer_lock = asyncio.Lock()
+
+    async def run_initialization():
+        registry._start_initialization("broken")
+        with pytest.raises(ValueError, match="build_agent_graph"):
+            await registry._init_tasks["broken"]
+        await asyncio.sleep(0)
+
+    asyncio.run(run_initialization())
+
+    assert isinstance(registry._init_errors["broken"], ValueError)
+
+
+def test_agent_registry_platform_mode_requires_tool_profiles(monkeypatch):
+    captured = {}
+    derived_tools = [SimpleNamespace(name="web_search")]
+    profiles = {"web_search": {"name": "web_search"}}
+
+    class FakeRuntime:
+        tool_execution_enabled = True
+
+    class FakeRuntimeFactory:
+        @staticmethod
+        def from_policy_id(_policy_id, *, agent_id):
+            return FakeRuntime()
+
+    class FakeCompiler:
+        def compile(self, spec, *, guardrail_runtime=None, checkpointer=None, tools=None, tool_profiles=None):
+            captured["tools"] = tools
+            captured["tool_profiles"] = tool_profiles
+            return {"compiled": spec}
+
+    async def fake_build_agent_tool_bundle(tools_config, *, require_guardrail_profiles=False):
+        captured["require_guardrail_profiles"] = require_guardrail_profiles
+        return BuiltAgentTools(tools=derived_tools, guardrail_profiles=profiles)
+
+    monkeypatch.setattr(agent_registry_module, "PlatformGuardrailRuntime", FakeRuntimeFactory)
+    monkeypatch.setattr(agent_registry_module, "PlatformGraphCompiler", lambda: FakeCompiler())
+    monkeypatch.setattr(agent_registry_module, "build_agent_tool_bundle", fake_build_agent_tool_bundle)
+    registry = AgentRegistry.__new__(AgentRegistry)
+    registry._definitions = {
+        "platform_tools": AgentDefinition(
+            id="platform_tools",
+            name="Platform tools",
+            description="Platform guarded tools",
+            factory=lambda **_params: object(),
+            default_provider=ModelType.GPT,
+            supported_content_types=(ContentType.TEXT_FILES,),
+            tools_config=parse_agent_tools_config(["web_search_tool"], agent_id="platform_tools"),
+            graph_factory=lambda **_params: {"spec": "ok"},
+            graph_param_names=frozenset({"provider"}),
+            guardrail_policy_id="default_guardrails",
+            guardrail_mode="platform",
+        )
+    }
+    registry._instances = {}
+    registry._init_tasks = {}
+    registry._init_errors = {}
+    registry._checkpointer = None
+    registry._checkpointer_cm = None
+    registry._checkpointer_lock = asyncio.Lock()
+
+    async def run_initialization():
+        registry._start_initialization("platform_tools")
+        await registry._init_tasks["platform_tools"]
+        await asyncio.sleep(0)
+
+    asyncio.run(run_initialization())
+
+    assert captured["require_guardrail_profiles"] is True
+    assert captured["tools"] == derived_tools
+    assert captured["tool_profiles"] == profiles
+
+
 def test_agent_registry_fails_if_tools_configured_for_agent_without_tools_param(monkeypatch):
     async def fake_build_agent_tool_bundle(_tools_config, *, require_guardrail_profiles=False):
         raise AssertionError("tools should not be built when signature cannot accept them")

@@ -17,7 +17,7 @@ def test_configured_agent_builds_mycroft_from_config(monkeypatch, tmp_path):
     config_path.write_text(
         json.dumps(
             {
-                "system_prompt": {"type": "file", "path": "system_prompt.txt"},
+                "system_prompt": {"type": "file", "path": str(prompt_path)},
                 "skills": {"paths": ["skills/marketing_analyst"]},
                 "subagents": {
                     "stateless": ["stateless_agent"],
@@ -109,7 +109,7 @@ def test_configured_agent_accepts_repo_relative_config_path(monkeypatch):
 
     initialize_agent(
         provider=ModelType.GPT,
-        config_path="agents/mycroft_agent/scenarios/marketing_analyst/config.json",
+        config_path="data/config/mycroft/scenarios/marketing_analyst/config.json",
     )
 
     assert "internal GAZ marketing-materials analyst" in captured["system_prompt"]

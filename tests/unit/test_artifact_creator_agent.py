@@ -731,8 +731,9 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         captured["scanner_profile_kwargs"] = kwargs
         return "scanner_profile"
 
-    def fake_scanner_rail(profile):
+    def fake_scanner_rail(profile, **kwargs):
         captured["scanner_rail_profile"] = profile
+        captured["scanner_rail_kwargs"] = kwargs
         return "scanner_rail"
 
     def fake_security_middleware(scanner_rail, **kwargs):
@@ -836,6 +837,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         "url_policy": url_policy,
     }
     assert captured["scanner_rail_profile"] == "scanner_profile"
+    assert captured["scanner_rail_kwargs"] == {"verbose_logging": False}
     assert "set_prompt" in captured["nodes"]
     assert captured["run_tools"] == [artifact_agent.commit_artifact_final_text]
     assert captured["run_security_middleware"] == "security:artifact_creator_agent.run"

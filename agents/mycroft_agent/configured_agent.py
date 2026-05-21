@@ -13,6 +13,7 @@ from .cli_config import (
     build_internal_tools,
     load_cli_config,
     load_mcp_tools_from_config,
+    resolve_cli_config_path,
     validate_required_environment,
 )
 from .subagent_loader import initialize_configured_subagents
@@ -41,10 +42,7 @@ class PosixVirtualFilesystemBackend(FilesystemBackend):
 
 
 def _resolve_config_path(raw_path: str | Path) -> Path:
-    path = Path(raw_path)
-    if path.is_absolute():
-        return path
-    return (_REPO_ROOT / path).resolve()
+    return resolve_cli_config_path(raw_path)
 
 
 def normalize_skill_source(raw_path: str) -> str:

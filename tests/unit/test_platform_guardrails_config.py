@@ -22,6 +22,7 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
                         "privacy_enabled": True,
                         "scanners_enabled": False,
                         "tool_execution_enabled": True,
+                        "logging": {"verbose": True},
                         "privacy": {
                             "locale": "ru-RU",
                             "entity_replacements": {"RU_PERSON": "typed_placeholder"},
@@ -35,6 +36,7 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
                                 "mode": "audit",
                                 "blocked_domains": ["bad.example"],
                             },
+                            "scan_system_prompt": False,
                             "composite_input_scanners": ["PromptInjection"],
                             "composite_recent_message_limit": 8,
                         },
@@ -50,6 +52,7 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
     assert kwargs["guardrail_privacy_enabled"] is True
     assert kwargs["guardrail_scanners_enabled"] is False
     assert kwargs["guardrail_tool_execution_enabled"] is True
+    assert kwargs["guardrail_verbose_logging"] is True
     assert kwargs["guardrails_locale"] == "ru-RU"
     assert kwargs["guardrail_palimpsest_entity_replacements"] == {
         "RU_PERSON": "typed_placeholder"
@@ -62,8 +65,16 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
     assert isinstance(kwargs["guardrail_url_policy"], UrlPolicyConfig)
     assert kwargs["guardrail_url_policy"].mode == "audit"
     assert kwargs["guardrail_url_policy"].blocked_domains == ("bad.example",)
+    assert kwargs["guardrail_scan_system_prompt"] is False
     assert kwargs["guardrail_composite_input_scanners"] == ("PromptInjection",)
     assert kwargs["guardrail_composite_recent_message_limit"] == 8
+
+
+def test_default_guardrails_do_not_scan_system_prompt():
+    kwargs = resolve_guardrail_policy("default_guardrails")
+
+    assert kwargs["guardrail_scan_system_prompt"] is False
+    assert kwargs["guardrail_verbose_logging"] is True
 
 
 def test_resolve_guardrail_policy_rejects_unknown_policy(tmp_path):

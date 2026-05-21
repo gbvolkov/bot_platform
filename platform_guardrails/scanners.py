@@ -120,6 +120,7 @@ class LLMGuardScannerRail:
         *,
         input_factory: Callable[[ScannerSpec], Any] | None = None,
         output_factory: Callable[[ScannerSpec], Any] | None = None,
+        verbose_logging: bool = False,
     ) -> None:
         self._profile = profile or LLMGuardScannerProfile.artifact_creator_default()
         self._input_factory = input_factory or _build_input_scanner
@@ -127,10 +128,15 @@ class LLMGuardScannerRail:
         self._input_instances: dict[int, Any] = {}
         self._output_instances: dict[int, Any] = {}
         self._source_urls_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
+        self._verbose_logging = verbose_logging
 
     @property
     def profile(self) -> LLMGuardScannerProfile:
         return self._profile
+
+    @property
+    def verbose_logging(self) -> bool:
+        return self._verbose_logging
 
     def scan_input_text(
         self,
@@ -138,11 +144,16 @@ class LLMGuardScannerRail:
         context: GuardrailContext,
         *,
         boundary: str = "model_request",
+        excluded_scanner_names: Iterable[str] = (),
     ) -> ScannerScanResult:
+        excluded = {str(name) for name in excluded_scanner_names}
+        specs = tuple(
+            spec for spec in self._profile.input_scanners if spec.name not in excluded
+        )
         result = _scan_text(
             text,
             context,
-            specs=self._profile.input_scanners,
+            specs=specs,
             stage="input",
             boundary=boundary,
             prompt="",
@@ -152,6 +163,7 @@ class LLMGuardScannerRail:
             url_policy=None,
             instance_for_spec=lambda spec: self._instance_for_spec(spec, "input"),
             scan_one=lambda scanner, value: scanner.scan(value),
+            verbose_log_injections=self._verbose_logging,
         )
         if result.blocked_decision is None:
             self._remember_source_urls(context, text)
@@ -178,6 +190,7 @@ class LLMGuardScannerRail:
             url_policy=self._profile.url_policy,
             instance_for_spec=lambda spec: self._instance_for_spec(spec, "output"),
             scan_one=lambda scanner, value: scanner.scan(prompt, value),
+            verbose_log_injections=self._verbose_logging,
         )
 
     def scan_composite_input_text(
@@ -202,6 +215,7 @@ class LLMGuardScannerRail:
             url_policy=None,
             instance_for_spec=lambda spec: self._instance_for_spec(spec, "input"),
             scan_one=lambda scanner, value: scanner.scan(value),
+            verbose_log_injections=self._verbose_logging,
         )
 
     def redact_prompt_injection_sentences(
@@ -216,6 +230,7 @@ class LLMGuardScannerRail:
         decisions: list[GuardrailDecision] = []
         redacted_count = 0
         highest_score = 0.0
+        confirmed_injection_texts: list[str] = []
 
         prompt_injection_specs = [
             spec for spec in self._profile.input_scanners if spec.name == "PromptInjection"
@@ -265,6 +280,7 @@ class LLMGuardScannerRail:
                     continue
                 current = updated
                 redacted_count += 1
+                confirmed_injection_texts.append(sentence)
                 highest_score = max(highest_score, risk_score if risk_score >= 0 else 0.0)
 
         if redacted_count:
@@ -280,6 +296,10 @@ class LLMGuardScannerRail:
                         "boundary": boundary,
                         "sanitized_changed": current != text,
                         "redacted_sentences": redacted_count,
+                        **_confirmed_injection_metadata(
+                            confirmed_injection_texts,
+                            verbose=self._verbose_logging,
+                        ),
                         **_context_metadata(context),
                     },
                 )
@@ -477,6 +497,7 @@ def _scan_text(
     url_policy: UrlPolicyConfig | None,
     instance_for_spec: Callable[[ScannerSpec], Any],
     scan_one: Callable[[Any, str], tuple[str, bool, float]],
+    verbose_log_injections: bool = False,
 ) -> ScannerScanResult:
     current = text
     decisions: list[GuardrailDecision] = []
@@ -541,6 +562,9 @@ def _scan_text(
             continue
 
         sanitized_changed = sanitized != current
+        metadata = _context_metadata(context)
+        if verbose_log_injections and spec.name == "PromptInjection" and not is_valid:
+            metadata.update(_confirmed_injection_metadata(current, verbose=True))
         decision = scanner_decision(
             scanner_name=spec.name,
             is_valid=is_valid,
@@ -548,7 +572,7 @@ def _scan_text(
             sanitized_changed=sanitized_changed,
             stage=stage,
             boundary=boundary,
-            metadata=_context_metadata(context),
+            metadata=metadata,
         )
         decisions.append(decision)
 
@@ -629,6 +653,24 @@ def _context_metadata(context: GuardrailContext) -> dict[str, Any]:
         "request_id": context.get("request_id"),
         "tool_name": context.get("tool_name"),
     }
+
+
+def _confirmed_injection_metadata(
+    text: str | Sequence[str],
+    *,
+    verbose: bool,
+) -> dict[str, Any]:
+    if not verbose:
+        return {}
+    if isinstance(text, str):
+        return {"confirmed_injection_text": text}
+    values = [value for value in text if isinstance(value, str) and value]
+    if not values:
+        return {}
+    metadata: dict[str, Any] = {"confirmed_injection_texts": values}
+    if len(values) == 1:
+        metadata["confirmed_injection_text"] = values[0]
+    return metadata
 
 
 def _build_input_scanner(spec: ScannerSpec) -> Any:

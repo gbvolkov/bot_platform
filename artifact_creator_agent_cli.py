@@ -53,6 +53,8 @@ class ArtifactAgentRegistrySettings:
     guardrail_prompt_injection_model_revision: str | None = None
     guardrail_prompt_injection_threshold: float | None = None
     guardrail_url_policy: UrlPolicyConfig | None = None
+    guardrail_scan_system_prompt: bool = True
+    guardrail_verbose_logging: bool = False
     guardrail_composite_input_scanners: tuple[str, ...] | None = None
     guardrail_composite_recent_message_limit: int = 20
     guardrail_palimpsest_run_entities: list[str] | None = None
@@ -202,6 +204,12 @@ def _parse_args() -> argparse.Namespace:
         help="Optional PromptInjection score threshold.",
     )
     parser.add_argument(
+        "--guardrail-verbose-logging",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include confirmed prompt-injection text in guardrail logs. Defaults to registry config.",
+    )
+    parser.add_argument(
         "--save-thread",
         default=None,
         help="Optional path to save the current conversation thread after the run.",
@@ -338,6 +346,12 @@ def _load_agent_registry_settings(
     url_policy = guardrail_kwargs.get("guardrail_url_policy")
     if url_policy is not None and not isinstance(url_policy, UrlPolicyConfig):
         raise ValueError(f"Agent '{agent_id}' guardrail_url_policy must be a UrlPolicyConfig.")
+    scan_system_prompt = guardrail_kwargs.get("guardrail_scan_system_prompt", True)
+    if not isinstance(scan_system_prompt, bool):
+        raise ValueError(f"Agent '{agent_id}' guardrail_scan_system_prompt must be a boolean.")
+    verbose_logging = guardrail_kwargs.get("guardrail_verbose_logging", False)
+    if not isinstance(verbose_logging, bool):
+        raise ValueError(f"Agent '{agent_id}' guardrail_verbose_logging must be a boolean.")
     composite_input_scanners = guardrail_kwargs.get("guardrail_composite_input_scanners")
     if composite_input_scanners is not None and not isinstance(composite_input_scanners, (list, tuple)):
         raise ValueError(f"Agent '{agent_id}' guardrail_composite_input_scanners must be a list.")
@@ -376,6 +390,8 @@ def _load_agent_registry_settings(
         guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
         guardrail_prompt_injection_threshold=prompt_injection_threshold,
         guardrail_url_policy=url_policy,
+        guardrail_scan_system_prompt=scan_system_prompt,
+        guardrail_verbose_logging=verbose_logging,
         guardrail_composite_input_scanners=(
             tuple(str(item) for item in composite_input_scanners)
             if composite_input_scanners is not None
@@ -600,6 +616,11 @@ def main() -> int:
                     if args.guardrail_prompt_injection_threshold is not None
                     else registry_settings.guardrail_prompt_injection_threshold
                 )
+                verbose_logging = (
+                    args.guardrail_verbose_logging
+                    if args.guardrail_verbose_logging is not None
+                    else registry_settings.guardrail_verbose_logging
+                )
                 privacy_enabled = (
                     args.privacy_enabled
                     if args.privacy_enabled is not None
@@ -653,6 +674,8 @@ def main() -> int:
                     guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
                     guardrail_prompt_injection_threshold=prompt_injection_threshold,
                     guardrail_url_policy=registry_settings.guardrail_url_policy,
+                    guardrail_scan_system_prompt=registry_settings.guardrail_scan_system_prompt,
+                    guardrail_verbose_logging=verbose_logging,
                     guardrail_composite_input_scanners=registry_settings.guardrail_composite_input_scanners,
                     guardrail_composite_recent_message_limit=registry_settings.guardrail_composite_recent_message_limit,
                     guardrail_palimpsest_run_entities=registry_settings.guardrail_palimpsest_run_entities,

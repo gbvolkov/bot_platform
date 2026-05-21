@@ -16,10 +16,14 @@ been migrated to the new middleware. Phase 2 scanner enforcement, deterministic
 URL/domain policy, and Phase 3A tool execution safety are implemented for
 `artifact_creator_agent` and covered by focused regression tests.
 
-Phase 2 should not yet be treated as fully production-complete for Russian
-workloads. The platform wiring is in place, but the default LLM Guard scanner
-models need Russian and mixed Russian/English evaluation, threshold calibration,
-and likely fine-tuning or replacement before broad rollout.
+Phase 2 should not yet be treated as fully production-complete for all
+production workloads. The platform wiring is in place. Russian and mixed
+Russian/English prompt-injection benchmarking and representative evaluation set
+creation are complete for the current workstream, and the configured
+prompt-injection threshold has been calibrated to `0.839796`. Remaining
+production hardening is now focused on rollout monitoring, regression additions
+for newly discovered misses, and any future fine-tuning or model replacement if
+new evaluation data shows recall is insufficient.
 
 ## Phase 1 - Foundation
 
@@ -89,7 +93,8 @@ enforcement task.
 ## Phase 2 - Scanner Enforcement
 
 Status: mostly implemented for `artifact_creator_agent`; Russian prompt-injection
-scanner model selection is now configurable.
+scanner model selection and calibrated threshold are now configurable through
+guardrail policy.
 
 ### Implemented Modules
 
@@ -143,6 +148,9 @@ Input scanners:
 - `PromptInjection` can use a deployment-supplied Hugging Face model mapping,
   optional explicit revision, and deployment threshold. When no scanner
   threshold is supplied, LLM Guard's scanner default is used.
+- Current local policy calibration for the Russian prompt-injection model uses
+  `prompt_injection_threshold: 0.839796` in both `default_guardrails` and
+  `persons_guardrails`.
 - `Toxicity`: review/block when invalid.
 - `BanTopics`: review/block for configured generic topics.
 
@@ -326,6 +334,13 @@ configuration into `guardrail_url_policy`. The current rollout posture is audit
 first: URL policy can log deterministic findings before changing user-visible
 behavior, and enforce mode is available for policy-controlled blocking.
 
+Runtime reputation checks, operational update process for URL/domain rules,
+promotion from URL-policy `audit` mode to `enforce` mode, and URL-policy
+monitoring are intentionally postponed. When monitoring is implemented later, it
+should aggregate structured decision metadata by `rule`, `mode`, `boundary`,
+action outcome, agent, and `source_url` without logging raw prompts, full
+outputs, secrets, or Palimpsest mappings.
+
 Tool execution profiles live with the tool registry in
 `platform_tools/tools.json`. Internal tool templates use `guardrail_profile`;
 MCP server templates use `guardrail_profiles` keyed by runtime tool name, with
@@ -382,6 +397,8 @@ Focused regression coverage includes:
 - deterministic URL/domain policy audit and enforce behavior;
 - URL-policy denylist, allowlist, private host, userinfo URL, IDNA, mixed-script,
   Unicode DNS dot separator, non-Latin configured domain, and lookalike checks;
+- calibrated Russian/mixed Russian-English prompt-injection threshold is
+  resolved from guardrail policy as deployment configuration;
 - fail-open/fail-closed behavior;
 - audit logs contain scanner metadata but no raw text;
 - guardrail policy config resolves into agent initialization kwargs;
@@ -418,14 +435,19 @@ Result: `368 passed, 7 skipped`.
 
 These are outside the completed Phase 2 platform-wiring scope:
 
-- production blocklist/allowlist contents and update process;
+- production blocklist/allowlist contents and update process; postponed;
 - public feed ingestion from sources such as URLhaus, Spamhaus, PhishTank, or
   OpenPhish;
-- runtime reputation lookups such as Google Safe Browsing/Web Risk;
+- runtime reputation lookups such as Google Safe Browsing/Web Risk; postponed;
+- URL-policy audit-to-enforce promotion; postponed until audit logs show an
+  acceptable false-positive rate;
+- URL-policy monitoring by structured rule/mode/boundary metrics; postponed;
 - strict heuristic indirect-prompt-injection policy on top of LLM Guard;
-- production-certified Russian and mixed-language scanner model quality;
+- ongoing Russian and mixed-language scanner regression additions as new misses
+  are discovered;
 - fine-tuned or replacement LLM Guard-compatible models for Russian prompt
-  injection, toxicity, and banned-topic handling;
+  injection, toxicity, and banned-topic handling if future evaluation shows
+  recall is insufficient;
 - retrieval chunk scanning for KB, tickets, and web pages;
 - platform-wide rollout of role-based tool authorization beyond guarded agent
   paths;
@@ -439,8 +461,8 @@ URL policy rule matches and `MaliciousURLs` scores the generated URL below the
 configured threshold, the current scanner policy allows it. That is a
 policy/model/list-coverage gap, not a Phase 2 wiring failure.
 
-Recent Russian and mixed Russian/English prompt-injection checks show the same
-class of residual risk: the middleware composes and scans the right text, but a
-configured classifier can still score hostile Russian phrasing below the
-configured threshold. Closing that gap requires scanner-model evaluation,
-fine-tuning, and calibration rather than another agent-specific heuristic.
+Russian and mixed Russian/English prompt-injection benchmarking and threshold
+calibration are complete for the current workstream. The residual risk is now
+operational: keep adding regression cases for newly discovered false negatives,
+and revisit model fine-tuning or replacement only if future evaluation data
+shows the calibrated classifier is not meeting recall targets.

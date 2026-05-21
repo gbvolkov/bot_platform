@@ -1,7 +1,7 @@
 {
   "system_prompt": {
     "type": "file",
-    "path": "gaz_sales_system_prompt.txt"
+    "path": "agents/mycroft_agent/gaz_sales_system_prompt.txt"
   },
   "skills": {
     "paths": [

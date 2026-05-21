@@ -554,6 +554,8 @@ def initialize_agent(
     guardrail_prompt_injection_model_revision: str | None = None,
     guardrail_prompt_injection_threshold: float | None = None,
     guardrail_url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None,
+    guardrail_scan_system_prompt: bool = True,
+    guardrail_verbose_logging: bool = False,
     guardrail_composite_input_scanners: tuple[str, ...] | None = None,
     guardrail_composite_recent_message_limit: int = 20,
     guardrail_palimpsest_run_entities: List[str] | None = None,
@@ -592,6 +594,7 @@ def initialize_agent(
     run_tools = [commit_artifact_final_text, *(tools or [])]
     guardrail_log_path = f"./logs/{log_name}_guardrails.jsonl"
     privacy_rail = None
+    scanner_state_keys = ("system_prompt",) if guardrail_scan_system_prompt else ()
     if (
         guardrail_tool_execution_enabled
         and not guardrail_scanners_enabled
@@ -652,12 +655,16 @@ def initialize_agent(
         scanner_profile = LLMGuardScannerProfile.artifact_creator_default(
             **scanner_profile_kwargs,
         )
-        scanner_rail = LLMGuardScannerRail(scanner_profile)
+        scanner_rail = LLMGuardScannerRail(
+            scanner_profile,
+            verbose_logging=guardrail_verbose_logging,
+        )
         set_prompt_security_middleware = SecurityScannerMiddleware(
             scanner_rail,
             agent_name="artifact_creator_agent.set_prompt",
             event_log_path=guardrail_log_path,
-            scan_state_keys=("system_prompt",),
+            scan_state_keys=scanner_state_keys,
+            include_system_prompt_in_scans=guardrail_scan_system_prompt,
             composite_input_scanners=guardrail_composite_input_scanners,
             composite_recent_message_limit=guardrail_composite_recent_message_limit,
             composite_message_roles=("human", "tool"),
@@ -666,8 +673,9 @@ def initialize_agent(
             scanner_rail,
             agent_name="artifact_creator_agent.run",
             event_log_path=guardrail_log_path,
-            scan_system_prompt=True,
-            scan_state_keys=("system_prompt",),
+            scan_system_prompt=guardrail_scan_system_prompt,
+            scan_state_keys=scanner_state_keys,
+            include_system_prompt_in_scans=guardrail_scan_system_prompt,
             composite_input_scanners=guardrail_composite_input_scanners,
             composite_recent_message_limit=guardrail_composite_recent_message_limit,
         )
@@ -702,7 +710,8 @@ def initialize_agent(
             set_prompt_node,
             security_middleware=set_prompt_security_middleware,
             privacy_middleware=set_prompt_privacy_middleware,
-            scan_state_keys=("system_prompt",),
+            scan_state_keys=scanner_state_keys,
+            privacy_state_keys=("system_prompt",),
             composite_input_scanners=guardrail_composite_input_scanners,
             composite_recent_message_limit=guardrail_composite_recent_message_limit,
             composite_message_roles=("human", "tool"),

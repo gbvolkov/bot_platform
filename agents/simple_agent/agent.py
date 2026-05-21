@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
-from typing import Annotated, Any, Dict, List, NotRequired, Optional, TypedDict
+from typing import Any, List
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest, dynamic_prompt
@@ -14,7 +13,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks import BaseCallbackHandler
 
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START
 from langgraph.runtime import Runtime
 from langgraph.config import get_stream_writer
 
@@ -25,6 +24,9 @@ from langfuse.langchain import CallbackHandler
 import config
 
 from agents.utils import ModelType, get_llm
+from platform_guardrails.graph_compiler import PlatformGraphCompiler
+from platform_guardrails.graph_spec import NodeGuardrailPolicy, PlatformStateGraph
+from platform_guardrails.runtime import PlatformGuardrailRuntime
 from platform_utils.llm_logger import JSONFileTracer
 
 from .state import SimpleAgentContext, SimpleAgentState
@@ -191,20 +193,9 @@ def create_run_node(model: BaseChatModel):
     return run_node
 
 
-def initialize_agent(
-    provider: ModelType = ModelType.GPT,
-    use_platform_store: bool = False,
-    locale: str = "en",
-    checkpoint_saver=None,
-    *,
-    streaming: bool = True,
-):
-    #set_locale(locale)
-    #set_models_locale(locale)
-    log_name = f"simple_agent_{time.strftime('%Y%m%d%H%M')}"
+def _build_callback_handlers(log_name: str) -> list[Any]:
     json_handler = JSONFileTracer(f"./logs/{log_name}")
-    #callback_handlers = [json_handler]
-    callback_handlers = [StreamWriterCallbackHandler(), json_handler]
+    callback_handlers: list[Any] = [StreamWriterCallbackHandler(), json_handler]
     if config.LANGFUSE_URL and len(config.LANGFUSE_URL) > 0:
         _ = Langfuse(
             public_key=config.LANGFUSE_PUBLIC,
@@ -212,15 +203,52 @@ def initialize_agent(
             host=config.LANGFUSE_URL,
         )
         callback_handlers += [CallbackHandler()]
+    return callback_handlers
 
-    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
+
+def _build_dynamic_prompt():
+    @dynamic_prompt
+    def build_prompt(request: ModelRequest) -> str:
+        state: SimpleAgentState = request.state
+        system_prompt = state.get("system_prompt")
+        return system_prompt or DEFAULT_SYSTEM_PROMPT_RU
+
+    return build_prompt
+
+
+def build_agent_graph(
+    provider: ModelType = ModelType.GPT,
+    use_platform_store: bool = False,
+    locale: str = "en",
+    *,
+    streaming: bool = True,
+    tools: List[Any] | None = None,
+):
+    #set_locale(locale)
+    #set_models_locale(locale)
+    log_name = f"simple_agent_{time.strftime('%Y%m%d%H%M')}"
+    callback_handlers = _build_callback_handlers(log_name)
     llm = get_llm(model="base", provider=provider.value, temperature=0.4, streaming=streaming)
-    
-    builder = StateGraph(SimpleAgentState)
-    builder.add_node("greetings", create_greetings_node())
-    builder.add_node("set_prompt", create_set_prompt_node(llm))
-    builder.add_node("cleanup", cleanup_messages_node)
-    builder.add_node("run", create_run_node(llm))
+
+    builder = PlatformStateGraph(SimpleAgentState)
+    builder.add_node("greetings", create_greetings_node(), guardrails=False)
+    builder.add_node(
+        "set_prompt",
+        create_set_prompt_node(llm),
+        guardrails=NodeGuardrailPolicy(
+            composite_message_roles=("human", "tool"),
+        ),
+    )
+    builder.add_node("cleanup", cleanup_messages_node, guardrails=False)
+    builder.add_agent_node(
+        "run",
+        model=llm,
+        prompt=_build_dynamic_prompt(),
+        tools_source="platform",
+        tools=tools or [],
+        state_schema=SimpleAgentState,
+        context_schema=SimpleAgentContext,
+    )
 
     builder.add_conditional_edges(
         START,
@@ -237,5 +265,30 @@ def initialize_agent(
     builder.add_edge("cleanup", "run")
     builder.add_edge("run", END)
 
-    graph = builder.compile(checkpointer=memory, debug=False).with_config({"callbacks": callback_handlers})
-    return graph
+    return builder.to_spec(callbacks=callback_handlers, compile_options={"debug": False})
+
+
+def initialize_agent(
+    provider: ModelType = ModelType.GPT,
+    use_platform_store: bool = False,
+    locale: str = "en",
+    checkpoint_saver=None,
+    *,
+    streaming: bool = True,
+    tools: List[Any] | None = None,
+):
+    memory = None if use_platform_store else checkpoint_saver or MemorySaver()
+    spec = build_agent_graph(
+        provider=provider,
+        use_platform_store=use_platform_store,
+        locale=locale,
+        streaming=streaming,
+        tools=tools,
+    )
+    return PlatformGraphCompiler().compile(
+        spec,
+        guardrail_runtime=PlatformGuardrailRuntime.disabled(agent_id="simple_agent"),
+        checkpointer=memory,
+        tools=tools or [],
+        tool_profiles={},
+    )

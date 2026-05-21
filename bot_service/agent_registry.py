@@ -8,7 +8,7 @@ import logging
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Literal, Tuple
 from collections.abc import AsyncIterator
 
 #from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -16,6 +16,8 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from agents.utils import ModelType
 from platform_guardrails.config import inline_guardrail_config_keys, resolve_guardrail_policy
+from platform_guardrails.graph_compiler import PlatformGraphCompiler
+from platform_guardrails.runtime import PlatformGuardrailRuntime
 
 from .config import settings
 from .initialize_agents import parse_yaml
@@ -45,6 +47,11 @@ class AgentDefinition:
     checkpoint_saver: Any = None
     param_names: frozenset[str] = field(default_factory=frozenset)
     accepts_kwargs: bool = False
+    graph_factory: Callable[..., Any] | None = None
+    graph_param_names: frozenset[str] = field(default_factory=frozenset)
+    graph_accepts_kwargs: bool = False
+    guardrail_policy_id: str | None = None
+    guardrail_mode: Literal["none", "platform", "agent"] = "none"
 
 
 _SKIP_CHECKPOINTER = object()
@@ -153,12 +160,18 @@ def _parse_streaming_config(
     return modes, subgraphs
 
 
-def _import_initialize_agent(module_path: str) -> Callable[..., Any]:
+def _import_agent_module(module_path: str) -> Any:
     module = importlib.import_module(module_path)
+    return module
+
+
+def _import_agent_factories(module_path: str) -> tuple[Callable[..., Any], Callable[..., Any] | None]:
+    module = _import_agent_module(module_path)
     init_fn = getattr(module, "initialize_agent", None)
     if not callable(init_fn):
         raise AttributeError(f"{module_path} does not expose initialize_agent().")
-    return init_fn
+    graph_fn = getattr(module, "build_agent_graph", None)
+    return init_fn, graph_fn if callable(graph_fn) else None
 
 
 def _get_signature_info(init_fn: Callable[..., Any]) -> tuple[frozenset[str], bool]:
@@ -167,6 +180,24 @@ def _get_signature_info(init_fn: Callable[..., Any]) -> tuple[frozenset[str], bo
     param_names = frozenset(signature.parameters.keys())
     accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params)
     return param_names, accepts_kwargs
+
+
+def _parse_guardrails_config(value: Any, *, agent_id: str) -> tuple[str | None, Literal["none", "platform", "agent"]]:
+    if value is None:
+        return None, "none"
+    if not isinstance(value, dict):
+        raise ValueError(f"Agent '{agent_id}' guardrails must be a mapping.")
+    policy = value.get("policy")
+    if policy is not None:
+        policy = _require_str(policy, "guardrails.policy")
+    mode = str(value.get("mode") or ("platform" if policy else "none")).strip().lower()
+    if mode not in {"none", "platform", "agent"}:
+        raise ValueError(
+            f"Agent '{agent_id}' guardrails.mode must be one of: none, platform, agent."
+        )
+    if mode != "none" and not policy:
+        raise ValueError(f"Agent '{agent_id}' guardrails.policy is required when guardrails are enabled.")
+    return policy, mode  # type: ignore[return-value]
 
 
 def _parse_init_context(value: Any, *, agent_id: str) -> Dict[str, Any]:
@@ -249,7 +280,22 @@ def _build_definitions_from_config(
         if not isinstance(params, dict):
             raise ValueError(f"Agent '{agent_id}' params must be a mapping.")
         params = dict(params)
+        top_level_guardrail_policy, guardrail_mode = _parse_guardrails_config(
+            entry.get("guardrails"),
+            agent_id=agent_id,
+        )
         guardrail_policy = params.pop("guardrail_policy", None)
+        if guardrail_policy is not None and top_level_guardrail_policy is not None:
+            raise ValueError(
+                f"Agent '{agent_id}' cannot combine top-level guardrails with params.guardrail_policy."
+            )
+        if top_level_guardrail_policy is not None:
+            inline_keys = inline_guardrail_config_keys(params)
+            if inline_keys:
+                names = ", ".join(sorted(inline_keys))
+                raise ValueError(
+                    f"Agent '{agent_id}' mixes top-level guardrails with inline guardrail params: {names}."
+                )
         if guardrail_policy is not None:
             inline_keys = inline_guardrail_config_keys(params)
             if inline_keys:
@@ -258,12 +304,18 @@ def _build_definitions_from_config(
                     f"Agent '{agent_id}' mixes guardrail_policy with inline guardrail params: {names}."
                 )
             params.update(resolve_guardrail_policy(guardrail_policy))
+            top_level_guardrail_policy = str(guardrail_policy)
+            guardrail_mode = "agent"
         tools_config = parse_agent_tools_config(entry.get("tools"), agent_id=agent_id)
         init_context = _parse_init_context(entry.get("init_context"), agent_id=agent_id)
         provider = _coerce_provider(params.pop("provider", None), default_provider)
         checkpoint_saver = params.pop("checkpoint_saver", None)
-        init_fn = _import_initialize_agent(module_path)
+        init_fn, graph_fn = _import_agent_factories(module_path)
         param_names, accepts_kwargs = _get_signature_info(init_fn)
+        graph_param_names: frozenset[str] = frozenset()
+        graph_accepts_kwargs = False
+        if graph_fn is not None:
+            graph_param_names, graph_accepts_kwargs = _get_signature_info(graph_fn)
         definitions[agent_id] = AgentDefinition(
             id=agent_id,
             name=name,
@@ -281,6 +333,11 @@ def _build_definitions_from_config(
             checkpoint_saver=checkpoint_saver,
             param_names=param_names,
             accepts_kwargs=accepts_kwargs,
+            graph_factory=graph_fn,
+            graph_param_names=graph_param_names,
+            graph_accepts_kwargs=graph_accepts_kwargs,
+            guardrail_policy_id=top_level_guardrail_policy,
+            guardrail_mode=guardrail_mode,
         )
     return definitions
 
@@ -378,6 +435,11 @@ class AgentRegistry:
         async def build_async() -> Any:
             params = dict(definition.init_params)
             params["provider"] = provider
+            platform_mode = definition.guardrail_mode == "platform"
+            if platform_mode and definition.graph_factory is None:
+                raise ValueError(
+                    f"Agent '{agent_id}' uses platform guardrails, but its module does not expose build_agent_graph()."
+                )
 
             checkpoint_key = _normalize_checkpoint_saver(definition.checkpoint_saver)
             checkpoint_saver = _SKIP_CHECKPOINTER
@@ -390,31 +452,48 @@ class AgentRegistry:
                     definition.checkpoint_saver,
                 )
 
-            if checkpoint_saver is not _SKIP_CHECKPOINTER:
+            if checkpoint_saver is not _SKIP_CHECKPOINTER and not platform_mode:
                 params["checkpoint_saver"] = checkpoint_saver
 
             if definition.init_context:
-                if "init_context" in definition.param_names or definition.accepts_kwargs:
+                param_names = definition.graph_param_names if platform_mode else definition.param_names
+                accepts_kwargs = definition.graph_accepts_kwargs if platform_mode else definition.accepts_kwargs
+                if "init_context" in param_names or accepts_kwargs:
                     params["init_context"] = dict(definition.init_context)
                 else:
                     LOG.warning(
-                        "Agent '%s' init_context configured but initialize_agent() does not accept init_context; skipping.",
+                        "Agent '%s' init_context configured but factory does not accept init_context; skipping.",
                         agent_id,
                     )
 
+            tool_bundle = None
+            platform_runtime = None
+            if platform_mode:
+                platform_runtime = PlatformGuardrailRuntime.from_policy_id(
+                    definition.guardrail_policy_id,
+                    agent_id=agent_id,
+                )
+
             if definition.tools_config.configured:
-                if "tools" not in definition.param_names and not definition.accepts_kwargs:
+                param_names = definition.graph_param_names if platform_mode else definition.param_names
+                accepts_kwargs = definition.graph_accepts_kwargs if platform_mode else definition.accepts_kwargs
+                legacy_require_profiles = bool(params.get("guardrail_tool_execution_enabled", False))
+                require_profiles = (
+                    platform_runtime.tool_execution_enabled
+                    if platform_runtime is not None
+                    else legacy_require_profiles
+                )
+                if not platform_mode and "tools" not in param_names and not accepts_kwargs:
                     raise ValueError(
                         f"Agent '{agent_id}' config declares tools, but initialize_agent() "
                         "does not accept a 'tools' parameter."
                     )
-                require_profiles = bool(params.get("guardrail_tool_execution_enabled", False))
                 tool_bundle = await build_agent_tool_bundle(
                     definition.tools_config,
                     require_guardrail_profiles=require_profiles,
                 )
                 configured_tools = tool_bundle.tools
-                if require_profiles:
+                if not platform_mode and require_profiles:
                     if "guardrail_tool_profiles" not in definition.param_names and not definition.accepts_kwargs:
                         raise ValueError(
                             f"Agent '{agent_id}' enables tool execution guardrails, but initialize_agent() "
@@ -432,22 +511,48 @@ class AgentRegistry:
                         raise ValueError(
                             f"Agent '{agent_id}' params.guardrail_tool_profiles must be an object."
                         )
-                existing_tools = params.get("tools")
-                if existing_tools is None:
-                    params["tools"] = configured_tools
-                elif isinstance(existing_tools, (list, tuple)):
-                    params["tools"] = [*existing_tools, *configured_tools]
-                else:
-                    raise ValueError(
-                        f"Agent '{agent_id}' params.tools must be a list when config tools are also declared."
-                    )
+                if not platform_mode or "tools" in param_names or accepts_kwargs:
+                    existing_tools = params.get("tools")
+                    if existing_tools is None:
+                        params["tools"] = configured_tools
+                    elif isinstance(existing_tools, (list, tuple)):
+                        params["tools"] = [*existing_tools, *configured_tools]
+                    else:
+                        raise ValueError(
+                            f"Agent '{agent_id}' params.tools must be a list when config tools are also declared."
+                        )
 
-            if not definition.accepts_kwargs:
+            if platform_mode:
+                if not definition.graph_accepts_kwargs:
+                    params = {
+                        key: value
+                        for key, value in params.items()
+                        if key in definition.graph_param_names
+                    }
+            elif not definition.accepts_kwargs:
                 params = {key: value for key, value in params.items() if key in definition.param_names}
 
             loop = asyncio.get_running_loop()
 
             # Keep your current pattern: build agent in executor thread
+            if platform_mode:
+                assert definition.graph_factory is not None
+                assert platform_runtime is not None
+                selected_tools = [] if tool_bundle is None else tool_bundle.tools
+                tool_profiles = {} if tool_bundle is None else dict(tool_bundle.guardrail_profiles)
+
+                def build_platform_graph() -> Any:
+                    spec = definition.graph_factory(**params)
+                    return PlatformGraphCompiler().compile(
+                        spec,
+                        guardrail_runtime=platform_runtime,
+                        checkpointer=None if checkpoint_saver is _SKIP_CHECKPOINTER else checkpoint_saver,
+                        tools=selected_tools,
+                        tool_profiles=tool_profiles,
+                    )
+
+                return await loop.run_in_executor(None, build_platform_graph)
+
             return await loop.run_in_executor(None, lambda: definition.factory(**params))
 
         loop = asyncio.get_running_loop()

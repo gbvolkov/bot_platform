@@ -19,7 +19,7 @@ from agents.llm_utils import get_llm
 from agents.utils import ModelType, extract_text
 
 
-DEFAULT_CONFIG_PATH = Path("agents/mycroft_agent/cli_config.json")
+DEFAULT_CONFIG_PATH = Path("data/config/mycroft/gaz_config.json")
 DEFAULT_OUTPUT_DIR = Path("docs/gaz/simulations")
 DEFAULT_USER_ID = "mycroft-gaz-simulation"
 DEFAULT_AGENT_LOCALE = {

@@ -9,26 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgent
-from agents.mycroft_agent.agent import VALID_MODEL_SIZES, initialize_agent
-from agents.mycroft_agent.cli_config import (
-    build_internal_tools,
-    default_cli_config_path,
-    list_available_internal_tools,
-    load_cli_config,
-    load_mcp_tools_from_config,
-    validate_required_environment,
-)
-from agents.mycroft_agent.configured_agent import (
-    build_skills_backend,
-    normalize_skill_source,
-)
-from agents.mycroft_agent.subagent_loader import initialize_configured_subagents
+from agents.mycroft_agent.agent import VALID_MODEL_SIZES
+from agents.mycroft_agent.configured_agent import initialize_agent
+from agents.mycroft_agent.cli_config import default_cli_config_path, list_available_internal_tools
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
-
 
 EXIT_COMMANDS = {"exit", "/exit", "quit", "/quit"}
 RESET_COMMANDS = {"reset", "/reset"}
@@ -37,7 +24,6 @@ MULTILINE_START_COMMANDS = {"/multi", "/multiline", "<<<"}
 MULTILINE_END_COMMANDS = {"/send", "/end", ">>>"}
 MULTILINE_CANCEL_COMMANDS = {"/cancel", "/abort"}
 SAVE_THREAD_COMMANDS = {"/save-thread", "/save"}
-DEFAULT_PROMPTS_DIR = Path("./prompts")
 DEFAULT_AGENT_LOCALE = {
     "save_confirmation": "[You can now download the file.]({url})"
 }
@@ -74,9 +60,8 @@ def _parse_model_size(raw_value: str) -> str:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Interactive CLI for agents.mycroft_agent."
+        description="Interactive CLI for agents.gaz_agent."
     )
-    system_group = parser.add_mutually_exclusive_group()
     parser.add_argument(
         "prompt",
         nargs="*",
@@ -85,7 +70,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         default=str(default_cli_config_path()),
-        help="Path to the Mycroft CLI JSON config.",
+        help="Path to the Mycroft GAZ JSON config.",
     )
     parser.add_argument(
         "--provider",
@@ -101,16 +86,6 @@ def _parse_args() -> argparse.Namespace:
         "--thread-id",
         default=None,
         help="Optional thread id. If omitted, a random one is generated.",
-    )
-    system_group.add_argument(
-        "--system",
-        default=None,
-        help="Optional system prompt override.",
-    )
-    system_group.add_argument(
-        "--system-file",
-        default=None,
-        help="Read the system prompt override from a file.",
     )
     parser.add_argument(
         "--temperature",
@@ -241,30 +216,6 @@ def _parse_save_thread_command(user_input: str) -> str | None:
     if len(parts) == 1:
         return ""
     return parts[1].strip()
-
-
-def _resolve_system_prompt_path(raw_path: str) -> Path:
-    candidate = Path(raw_path)
-    if candidate.is_file():
-        return candidate
-    if not candidate.is_absolute():
-        prompt_candidate = DEFAULT_PROMPTS_DIR / candidate
-        if prompt_candidate.is_file():
-            return prompt_candidate
-    raise FileNotFoundError(
-        f"System prompt file not found: {raw_path}. "
-        f"Checked '{candidate}' and '{DEFAULT_PROMPTS_DIR / candidate}'."
-    )
-
-
-def _load_system_prompt(args: argparse.Namespace) -> tuple[Optional[str], Optional[Path]]:
-    if args.system is not None:
-        return args.system, None
-    if not args.system_file:
-        return None, None
-
-    prompt_path = _resolve_system_prompt_path(args.system_file)
-    return prompt_path.read_text(encoding="utf-8-sig"), prompt_path
 
 
 def _extract_last_ai_text(result: dict[str, Any]) -> str:
@@ -530,88 +481,25 @@ def _collect_multiline_input() -> Optional[str]:
     return "\n".join(lines).strip()
 
 
-_initialize_configured_subagents = initialize_configured_subagents
-
-
-def _tool_name(tool: Any) -> str:
-    return str(getattr(tool, "name", repr(tool)))
-
-
-def _print_runtime_summary(
-    *,
-    config_path: str,
-    stateless_subagents: list[SubAgent | CompiledSubAgent],
-    stateful_subagents: list[SubAgent | CompiledSubAgent],
-    internal_tools: list[Any],
-    mcp_tools: list[Any],
-) -> None:
-    print(f"Mycroft config: {config_path}")
-    if stateless_subagents:
-        print(
-            "Configured stateless subagents: "
-            + ", ".join(agent["name"] for agent in stateless_subagents)
-        )
-    else:
-        print("Configured stateless subagents: none")
-
-    if stateful_subagents:
-        print(
-            "Configured stateful subagents: "
-            + ", ".join(agent["name"] for agent in stateful_subagents)
-        )
-    else:
-        print("Configured stateful subagents: none")
-
-    all_tool_names = [_tool_name(tool) for tool in [*internal_tools, *mcp_tools]]
-    if all_tool_names:
-        print("Configured tools: " + ", ".join(all_tool_names))
-    else:
-        print("Configured tools: none")
-
-    if mcp_tools:
-        print("MCP tools: " + ", ".join(_tool_name(tool) for tool in mcp_tools))
-    else:
-        print("MCP tools: none")
-
-
 def main() -> int:
     args = _parse_args()
 
     try:
         provider = _parse_provider(args.provider)
         model_size = _parse_model_size(args.model_size)
-        cli_config = load_cli_config(args.config)
-        validate_required_environment(cli_config, provider.value)
-        system_prompt_override, system_file_path = _load_system_prompt(args)
-        system_prompt = system_prompt_override or cli_config.system_prompt
 
         with asyncio.Runner() as runner:
             checkpoint_cm = _persistent_checkpoint_saver()
             checkpoint_saver = runner.run(checkpoint_cm.__aenter__())
             try:
                 runner.run(checkpoint_saver.setup())
-                stateless_subagents = runner.run(
-                    _initialize_configured_subagents(cli_config.subagents.stateless)
-                )
-                stateful_subagents = runner.run(
-                    _initialize_configured_subagents(cli_config.subagents.stateful)
-                )
-                internal_tools = build_internal_tools(cli_config.internal_tools)
-                mcp_tools = runner.run(load_mcp_tools_from_config(cli_config.mcp))
-                skills = tuple(normalize_skill_source(skill) for skill in cli_config.skills.paths)
                 agent = initialize_agent(
                     provider=provider,
+                    config_path=args.config,
                     model_size=model_size,
                     temperature=args.temperature,
-                    system_prompt=system_prompt,
-                    tools=[*internal_tools, *mcp_tools],
-                    stateless_subagents=stateless_subagents,
-                    stateful_subagents=stateful_subagents,
                     streaming=False,
                     checkpoint_saver=checkpoint_saver,
-                    interrupt_on=cli_config.deepagents.interrupt_on or None,
-                    skills=skills,
-                    backend=build_skills_backend(skills),
                 )
 
                 thread_id, run_config = _new_config(args.thread_id)
@@ -641,23 +529,10 @@ def main() -> int:
                     return 0
 
                 print(
-                    f"mycroft_agent CLI started (thread_id={thread_id}, provider={provider.value}, model_size={model_size})."
+                    f"mycroft_gaz_agent CLI started (thread_id={thread_id}, provider={provider.value}, model_size={model_size})."
                 )
                 print(f"Checkpoint store: {MYCROFT_CLI_CHECKPOINT_PATH}")
-                _print_runtime_summary(
-                    config_path=args.config,
-                    stateless_subagents=stateless_subagents,
-                    stateful_subagents=stateful_subagents,
-                    internal_tools=internal_tools,
-                    mcp_tools=mcp_tools,
-                )
-
-                if system_file_path is not None:
-                    print(f"System prompt override was loaded from file: {system_file_path}")
-                elif system_prompt_override:
-                    print("System prompt override was provided through the command line.")
-                else:
-                    print("Using the system prompt from the Mycroft CLI config.")
+                print(f"Mycroft GAZ config: {args.config}")
 
                 _print_help()
                 print("")
@@ -724,9 +599,6 @@ def main() -> int:
                         current_turns.append({"user": user_input, "assistant": answer})
                         print(f"\nMycroft: {answer}\n")
             finally:
-                from bot_service.agent_registry import agent_registry
-
-                runner.run(agent_registry.aclose())
                 runner.run(checkpoint_cm.__aexit__(None, None, None))
     except Exception as exc:
         print(f"Failed to start CLI: {exc}", file=sys.stderr)

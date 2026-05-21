@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List
 
 from langchain.agents.middleware import AgentMiddleware, ExtendedModelResponse, ModelResponse
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -149,6 +149,7 @@ _SCAN_TEXT_KEYS = ("text", "content", "input", "title", "caption", "markdown", "
 _TOOL_RESULT_TRUSTED_KEY = "guardrail_tool_result_trusted"
 _TOOL_RESULT_TOOL_NAME_KEY = "guardrail_tool_name"
 _TOOL_RESULT_ANONYMIZED_KEY = "guardrail_tool_result_anonymized"
+_TOOL_RESULT_PROMPT_INJECTION_CHECKED_KEY = "guardrail_tool_result_prompt_injection_checked"
 
 
 def _message_is_untrusted_input(message: BaseMessage) -> bool:
@@ -157,6 +158,10 @@ def _message_is_untrusted_input(message: BaseMessage) -> bool:
 
 def _message_is_model_output(message: BaseMessage) -> bool:
     return isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+
+
+def _message_is_system_prompt(message: BaseMessage) -> bool:
+    return isinstance(message, SystemMessage) or getattr(message, "type", None) == "system"
 
 
 def _message_is_tool_result(message: BaseMessage) -> bool:
@@ -168,6 +173,11 @@ def _tool_result_is_untrusted(message: BaseMessage) -> bool:
     if _TOOL_RESULT_TRUSTED_KEY in additional_kwargs:
         return not bool(additional_kwargs[_TOOL_RESULT_TRUSTED_KEY])
     return True
+
+
+def _tool_result_prompt_injection_checked(message: BaseMessage) -> bool:
+    additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+    return bool(additional_kwargs.get(_TOOL_RESULT_PROMPT_INJECTION_CHECKED_KEY))
 
 
 def _tool_profile_result_is_untrusted(profile: ToolSecurityProfile) -> bool:
@@ -249,11 +259,15 @@ def _include_in_composite_input(
         if role == "human":
             return True
         if role == "tool":
+            if _tool_result_prompt_injection_checked(message):
+                return False
             return _tool_result_is_untrusted(message)
         return False
     if role not in allowed_roles:
         return False
     if role == "tool":
+        if _tool_result_prompt_injection_checked(message):
+            return False
         return _tool_result_is_untrusted(message)
     return True
 
@@ -279,6 +293,7 @@ class SecurityScannerMiddleware(AgentMiddleware):
         event_log_path: str | None = None,
         scan_system_prompt: bool = False,
         scan_state_keys: Iterable[str] = (),
+        include_system_prompt_in_scans: bool = True,
         composite_input_scanners: Iterable[str] | None = None,
         composite_recent_message_limit: int = 20,
         composite_message_roles: Iterable[str] | None = None,
@@ -289,6 +304,7 @@ class SecurityScannerMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._events = event_logger or GuardrailEventLogger(event_log_path)
         self._scan_system_prompt = scan_system_prompt
+        self._include_system_prompt_in_scans = include_system_prompt_in_scans
         self._state_keys_to_scan = tuple(scan_state_keys)
         self._composite_input_scanners = (
             None if composite_input_scanners is None else tuple(composite_input_scanners)
@@ -365,12 +381,18 @@ class SecurityScannerMiddleware(AgentMiddleware):
         boundary: str,
         prompt: str = "",
         output: bool = False,
+        excluded_scanner_names: Iterable[str] = (),
     ) -> tuple[Any, GuardrailDecision | None]:
         if isinstance(content, str):
             result = (
                 self._scanners.scan_output_text(prompt, content, context, boundary=boundary)
                 if output
-                else self._scanners.scan_input_text(content, context, boundary=boundary)
+                else self._scanners.scan_input_text(
+                    content,
+                    context,
+                    boundary=boundary,
+                    excluded_scanner_names=excluded_scanner_names,
+                )
             )
             self._log_scan_result(result)
             return result.text, result.blocked_decision
@@ -385,6 +407,7 @@ class SecurityScannerMiddleware(AgentMiddleware):
                         boundary=boundary,
                         prompt=prompt,
                         output=output,
+                        excluded_scanner_names=excluded_scanner_names,
                     )
                     if decision is not None:
                         return content, decision
@@ -400,6 +423,7 @@ class SecurityScannerMiddleware(AgentMiddleware):
                                 boundary=boundary,
                                 prompt=prompt,
                                 output=output,
+                                excluded_scanner_names=excluded_scanner_names,
                             )
                             if decision is not None:
                                 return content, decision
@@ -427,12 +451,22 @@ class SecurityScannerMiddleware(AgentMiddleware):
             if not should_scan:
                 updated_messages.append(message)
                 continue
+            excluded_scanner_names = (
+                ("PromptInjection",)
+                if (
+                    not output
+                    and _message_is_tool_result(message)
+                    and _tool_result_prompt_injection_checked(message)
+                )
+                else ()
+            )
             scanned_content, decision = self._scan_content(
                 getattr(message, "content", None),
                 context,
                 boundary=boundary,
                 prompt=prompt,
                 output=output,
+                excluded_scanner_names=excluded_scanner_names,
             )
             if decision is not None:
                 message_id = getattr(message, "id", None)
@@ -490,6 +524,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
         )
         message_parts: list[str] = []
         for message in source_messages:
+            if not self._include_system_prompt_in_scans and _message_is_system_prompt(message):
+                continue
             role = _message_role(message).lower()
             if not _include_in_composite_input(message, allowed_roles=allowed_roles):
                 continue
@@ -611,7 +647,7 @@ class SecurityScannerMiddleware(AgentMiddleware):
             state,
             messages,
             context,
-            system_prompt=system_prompt,
+            system_prompt=system_prompt if self._include_system_prompt_in_scans else None,
         )
         if decision is not None:
             return None, decision, remove_message_ids, replacement_messages
@@ -640,7 +676,23 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 remove_message_ids=remove_message_ids,
                 replacement_messages=replacement_messages,
             )
-        prompt = _join_message_text(updated_request.messages, system_prompt=getattr(updated_request, "system_prompt", None))
+        prompt_messages = (
+            updated_request.messages
+            if self._include_system_prompt_in_scans
+            else [
+                message
+                for message in updated_request.messages
+                if not _message_is_system_prompt(message)
+            ]
+        )
+        prompt = _join_message_text(
+            prompt_messages,
+            system_prompt=(
+                getattr(updated_request, "system_prompt", None)
+                if self._include_system_prompt_in_scans
+                else None
+            ),
+        )
         return self._scan_model_result(handler(updated_request), context, prompt=prompt)
 
     async def awrap_model_call(self, request, handler):
@@ -652,7 +704,23 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 remove_message_ids=remove_message_ids,
                 replacement_messages=replacement_messages,
             )
-        prompt = _join_message_text(updated_request.messages, system_prompt=getattr(updated_request, "system_prompt", None))
+        prompt_messages = (
+            updated_request.messages
+            if self._include_system_prompt_in_scans
+            else [
+                message
+                for message in updated_request.messages
+                if not _message_is_system_prompt(message)
+            ]
+        )
+        prompt = _join_message_text(
+            prompt_messages,
+            system_prompt=(
+                getattr(updated_request, "system_prompt", None)
+                if self._include_system_prompt_in_scans
+                else None
+            ),
+        )
         return self._scan_model_result(await handler(updated_request), context, prompt=prompt)
 
 
@@ -910,6 +978,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
                         redacted.text,
                         context,
                         boundary="tool_result",
+                        excluded_scanner_names=("PromptInjection",),
                     )
                     self._log_scan_result(verified)
                     return verified.text, verified.blocked_decision
@@ -964,6 +1033,8 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         self,
         message: BaseMessage,
         profile: ToolSecurityProfile,
+        *,
+        prompt_injection_checked: bool,
     ) -> BaseMessage:
         if not _message_is_tool_result(message):
             return message
@@ -972,6 +1043,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         additional_kwargs[_TOOL_RESULT_TRUSTED_KEY] = not _tool_profile_result_is_untrusted(profile)
         additional_kwargs[_TOOL_RESULT_TOOL_NAME_KEY] = profile.name
         additional_kwargs[_TOOL_RESULT_ANONYMIZED_KEY] = _tool_profile_anonymizes_result(profile)
+        additional_kwargs[_TOOL_RESULT_PROMPT_INJECTION_CHECKED_KEY] = prompt_injection_checked
         updated.additional_kwargs = additional_kwargs
         return updated
 
@@ -1074,7 +1146,13 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         )
         updated = copy(message)
         updated.content = transformed
-        return self._mark_tool_result_trust(updated, profile), None
+        return self._mark_tool_result_trust(
+            updated,
+            profile,
+            prompt_injection_checked=(
+                self._scanners is not None and profile.result_policy.scan_result
+            ),
+        ), None
 
     def _process_command_messages(
         self,
@@ -1540,6 +1618,12 @@ def _blocked_node_command(
     )
 
 
+def _result_with_update(result: Any, update: dict[str, Any]) -> Any:
+    if isinstance(result, Command):
+        return _command_with_update(result, update)
+    return update
+
+
 def _call_graph_node(node: Callable[..., Any], state: Dict[str, Any], config: RunnableConfig, runtime: Any) -> Any:
     return node(state, config=config, runtime=runtime)
 
@@ -1556,12 +1640,16 @@ def guarded_node(
     *,
     security_middleware: SecurityScannerMiddleware | None = None,
     privacy_middleware: PrivacyModelRequestMiddleware | None = None,
+    scan_output: bool = False,
     scan_state_keys: Iterable[str] = ("system_prompt",),
+    privacy_state_keys: Iterable[str] | None = None,
     composite_input_scanners: Iterable[str] | None = ("PromptInjection",),
     composite_recent_message_limit: int = 20,
     composite_message_roles: Iterable[str] | None = None,
 ) -> RunnableCallable:
     """Wrap a LangGraph node with common scanner and privacy guardrails."""
+
+    privacy_keys = tuple(scan_state_keys if privacy_state_keys is None else privacy_state_keys)
 
     def _prepare_state(state: Dict[str, Any], runtime: Any) -> Dict[str, Any] | Command:
         guarded_state = dict(state or {})
@@ -1586,18 +1674,45 @@ def guarded_node(
             guarded_state = privacy_middleware.anonymize_node_state(
                 guarded_state,
                 runtime,
-                state_keys=scan_state_keys,
+                state_keys=privacy_keys,
             )
         return guarded_state
 
     def _finish_result(result: Any, runtime: Any, scanned_state: Dict[str, Any]) -> Any:
+        if security_middleware is not None and scan_output:
+            context = security_middleware._context(runtime, scanned_state)
+            messages = None
+            if isinstance(result, Command):
+                update = getattr(result, "update", None)
+                if isinstance(update, dict):
+                    messages = update.get("messages")
+            elif isinstance(result, dict):
+                messages = result.get("messages")
+            if messages is not None:
+                source_messages = messages if isinstance(messages, list) else [messages]
+                scanned, decision, _remove_message_ids, _replacement_messages = security_middleware._scan_messages(
+                    source_messages,
+                    context,
+                    boundary="node_response",
+                    prompt=_join_message_text(scanned_state.get("messages") or []),
+                    output=True,
+                )
+                if decision is not None:
+                    return _blocked_node_command(decision)
+                if isinstance(result, Command):
+                    update = dict(getattr(result, "update", None) or {})
+                    update["messages"] = scanned
+                    result = _result_with_update(result, update)
+                elif isinstance(result, dict):
+                    result = {**result, "messages": scanned}
+
         if privacy_middleware is None:
             return result
         return privacy_middleware.deanonymize_node_result(
             result,
             runtime,
             scanned_state,
-            state_keys=scan_state_keys,
+            state_keys=privacy_keys,
         )
 
     def invoke(state: Dict[str, Any], config: RunnableConfig = None, runtime: Any = None) -> Any:

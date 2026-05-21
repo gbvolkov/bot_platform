@@ -1,0 +1,113 @@
+{
+  "policies": {
+    "default_guardrails": {
+      "privacy_enabled": true,
+      "scanners_enabled": true,
+      "tool_execution_enabled": true,
+      "logging": {
+        "verbose": true
+      },
+      "privacy": {
+        "locale": "ru-RU",
+        "entity_replacements": {
+          "CREDIT_CARD": "fake",
+          "PHONE_NUMBER": "fake",
+          "IP_ADDRESS": "typed_placeholder",
+          "URL": "typed_placeholder",
+          "RU_PASSPORT": "fake",
+          "SNILS": "fake",
+          "INN": "fake",
+          "RU_BANK_ACC": "typed_placeholder",
+          "TICKET_NUMBER": "typed_placeholder"
+        }
+      },
+      "scanners": {
+        "failure_policy": "fail_closed",
+        "prompt_injection_model": {
+          "path": "gbv/mdeberta-ru-prompt-injection",
+          "kwargs": {
+            "id2label": {
+              "0": "SAFE",
+              "1": "INJECTION"
+            },
+            "label2id": {
+              "SAFE": 0,
+              "INJECTION": 1
+            }
+          },
+          "pipeline_kwargs": {
+            "return_token_type_ids": false,
+            "max_length": 256,
+            "truncation": true
+          },
+          "tokenizer_kwargs": {
+            "extra_special_tokens": {}
+          }
+        },
+        "prompt_injection_threshold": 0.839796,
+        "scan_system_prompt": false,
+        "url_policy": {
+          "enabled": true,
+          "mode": "audit",
+          "blocked_domains": [
+            "bad.example"
+          ],
+          "allowed_domains": [],
+          "protected_domains": [],
+          "block_private_hosts": true,
+          "block_userinfo_urls": true,
+          "block_mixed_script_idn": true
+        }
+      }
+    },
+    "persons_guardrails": {
+      "privacy_enabled": true,
+      "scanners_enabled": true,
+      "tool_execution_enabled": true,
+      "logging": {
+        "verbose": false
+      },
+      "privacy": {
+        "locale": "ru-RU",
+        "entity_replacements": {
+          "RU_PERSON": "typed_placeholder",
+          "CREDIT_CARD": "fake",
+          "PHONE_NUMBER": "fake",
+          "IP_ADDRESS": "typed_placeholder",
+          "URL": "typed_placeholder",
+          "RU_PASSPORT": "fake",
+          "SNILS": "fake",
+          "INN": "fake",
+          "RU_BANK_ACC": "typed_placeholder",
+          "TICKET_NUMBER": "typed_placeholder"
+        }
+      },
+      "scanners": {
+        "failure_policy": "fail_closed",
+        "prompt_injection_model": {
+          "path": "gbv/mdeberta-ru-prompt-injection",
+          "kwargs": {
+            "id2label": {
+              "0": "SAFE",
+              "1": "INJECTION"
+            },
+            "label2id": {
+              "SAFE": 0,
+              "INJECTION": 1
+            }
+          },
+          "pipeline_kwargs": {
+            "return_token_type_ids": false,
+            "max_length": 256,
+            "truncation": true
+          },
+          "tokenizer_kwargs": {
+            "extra_special_tokens": {}
+          }
+        },
+        "prompt_injection_threshold": 0.839796
+      }
+    }
+
+  }
+}

@@ -1,7 +1,7 @@
 {
   "system_prompt": {
     "type": "file",
-    "path": "system_prompt.txt"
+    "path": "agents/mycroft_agent/scenarios/marketing_analyst/system_prompt.txt"
   },
   "skills": {
     "paths": [

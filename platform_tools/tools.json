@@ -31,6 +31,22 @@
         "max_text_chars": 12000,
         "max_items": 10
       }
+    },
+    "internal_state_no_result_scan": {
+      "allowed_roles": [
+        "default",
+        "service_desk",
+        "sales_manager"
+      ],
+      "side_effect": "none",
+      "category": "internal_state",
+      "sensitivity": "internal",
+      "anonymize_result": false,
+      "result_policy": {
+        "scan_result": false,
+        "max_text_chars": 4000,
+        "max_items": 20
+      }
     }
   },
   "internal_tools": [
@@ -91,7 +107,8 @@
     },
     {
       "id": "think_tool",
-      "factory": "agents.tools.think:ThinkTool"
+      "factory": "agents.tools.think:ThinkTool",
+      "guardrail_profile": "internal_state_no_result_scan"
     }
   ],
   "mcp_servers": [

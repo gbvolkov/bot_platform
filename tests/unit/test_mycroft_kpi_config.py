@@ -15,7 +15,7 @@ from agents.mycroft_agent.cli_config import (
 from agents.mycroft_agent.configured_agent import build_skills_backend, normalize_skill_source
 
 
-CONFIG_PATH = Path("agents/mycroft_agent/scenarios/kpi_agent/config.json")
+CONFIG_PATH = Path("data/config/mycroft/scenarios/kpi_agent/config.json")
 SKILLS_PATH = "agents/mycroft_agent/scenarios/kpi_agent/skills"
 PROMPT_PATH = Path("agents/mycroft_agent/scenarios/kpi_agent/system_prompt.txt")
 KPI_AGENT_CATALOG_PATH = Path(

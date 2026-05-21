@@ -27,6 +27,8 @@ INLINE_GUARDRAIL_CONFIG_KEYS = frozenset(
         "guardrail_prompt_injection_model_revision",
         "guardrail_prompt_injection_threshold",
         "guardrail_url_policy",
+        "guardrail_scan_system_prompt",
+        "guardrail_verbose_logging",
         "guardrail_composite_input_scanners",
         "guardrail_composite_recent_message_limit",
         "guardrail_palimpsest_run_entities",
@@ -112,6 +114,14 @@ def guardrail_policy_to_init_kwargs(policy: Mapping[str, Any], *, policy_id: str
     scanners = policy.get("scanners") or {}
     if not isinstance(scanners, Mapping):
         raise GuardrailConfigError(f"{policy_id}.scanners must be an object.")
+    logging_config = policy.get("logging") or {}
+    if not isinstance(logging_config, Mapping):
+        raise GuardrailConfigError(f"{policy_id}.logging must be an object.")
+    if logging_config.get("verbose") is not None:
+        kwargs["guardrail_verbose_logging"] = _require_bool(
+            logging_config["verbose"],
+            f"{policy_id}.logging.verbose",
+        )
     if scanners.get("failure_policy") is not None:
         kwargs["guardrail_scanner_failure_policy"] = _require_str(
             scanners["failure_policy"],
@@ -145,6 +155,11 @@ def guardrail_policy_to_init_kwargs(policy: Mapping[str, Any], *, policy_id: str
             ) from exc
         if url_policy is not None:
             kwargs["guardrail_url_policy"] = url_policy
+    if scanners.get("scan_system_prompt") is not None:
+        kwargs["guardrail_scan_system_prompt"] = _require_bool(
+            scanners["scan_system_prompt"],
+            f"{policy_id}.scanners.scan_system_prompt",
+        )
     if scanners.get("composite_input_scanners") is not None:
         kwargs["guardrail_composite_input_scanners"] = tuple(
             _require_list(
