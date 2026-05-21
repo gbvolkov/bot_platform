@@ -11,6 +11,7 @@ from typing import Any, Callable
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 MYCROFT_CONFIG_ROOT_ENV = "MYCROFT_CONFIG_ROOT"
+MYCROFT_PROJECT_ROOT_ENV = "MYCROFT_PROJECT_ROOT"
 DEFAULT_MYCROFT_CONFIG_ROOT = Path("data/config/mycroft")
 DEFAULT_CLI_CONFIG_NAME = "gaz_config.json"
 DEFAULT_CLI_CONFIG_PATH = DEFAULT_MYCROFT_CONFIG_ROOT / DEFAULT_CLI_CONFIG_NAME
@@ -82,18 +83,20 @@ class MycroftCliConfig:
 def resolve_cli_config_path(raw_path: str | Path | None = None) -> Path:
     if raw_path is None:
         return default_cli_config_path()
-    candidate = Path(raw_path)
-    if candidate.is_absolute():
-        return candidate
-    return (Path.cwd() / candidate).resolve()
+    return _resolve_path(raw_path, root=project_root(), field_name="config_path")
 
 
 def mycroft_config_root() -> Path:
     raw_root = os.environ.get(MYCROFT_CONFIG_ROOT_ENV, "").strip()
     root = Path(raw_root) if raw_root else DEFAULT_MYCROFT_CONFIG_ROOT
-    if root.is_absolute():
-        return root
-    return (Path.cwd() / root).resolve()
+    return _resolve_path(root, root=project_root(), field_name=MYCROFT_CONFIG_ROOT_ENV)
+
+
+def project_root() -> Path:
+    raw_root = os.environ.get(MYCROFT_PROJECT_ROOT_ENV, "").strip()
+    if not raw_root:
+        return Path.cwd().resolve()
+    return _resolve_path(raw_root, root=Path.cwd(), field_name=MYCROFT_PROJECT_ROOT_ENV)
 
 
 def default_cli_config_path() -> Path:
@@ -310,9 +313,11 @@ def _parse_system_prompt(value: Any) -> str:
     prompt_type = _require_str(value.get("type"), "system_prompt.type")
     if prompt_type == "file":
         prompt_path = _require_str(value.get("path"), "system_prompt.path")
-        resolved_prompt_path = Path(prompt_path)
-        if not resolved_prompt_path.is_absolute():
-            resolved_prompt_path = (Path.cwd() / resolved_prompt_path).resolve()
+        resolved_prompt_path = _resolve_path(
+            prompt_path,
+            root=project_root(),
+            field_name="system_prompt.path",
+        )
         if not resolved_prompt_path.is_file():
             raise FileNotFoundError(
                 f"Mycroft CLI system prompt file not found: {resolved_prompt_path}"
@@ -477,6 +482,18 @@ def _require_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"Mycroft CLI config field '{field_name}' must be a boolean.")
     return value
+
+
+def _resolve_path(raw_path: str | Path, *, root: Path, field_name: str) -> Path:
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    if candidate.drive or candidate.root:
+        raise ValueError(
+            f"Mycroft CLI config field '{field_name}' must be a relative path "
+            "without a leading slash or an absolute path with a drive/root."
+        )
+    return (root / candidate).resolve()
 
 
 def _collect_env_placeholders(value: Any) -> list[str]:

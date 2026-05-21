@@ -215,6 +215,66 @@ def test_load_cli_config_resolves_system_prompt_from_working_directory(
     assert config.system_prompt == "Prompt from working directory."
 
 
+def test_load_cli_config_resolves_system_prompt_from_configured_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    cwd = tmp_path / "runtime"
+    cwd.mkdir()
+    project_root = tmp_path / "project"
+    prompt_path = project_root / "agents" / "mycroft_agent" / "prompt.txt"
+    prompt_path.parent.mkdir(parents=True)
+    prompt_path.write_text("Prompt from configured project root.", encoding="utf-8")
+    config_path = cwd / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": {
+                    "type": "file",
+                    "path": "agents/mycroft_agent/prompt.txt",
+                },
+                "subagents": {"stateless": [], "stateful": []},
+                "internal_tools": [],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("MYCROFT_PROJECT_ROOT", str(project_root))
+
+    config = load_cli_config(config_path)
+
+    assert config.system_prompt == "Prompt from configured project root."
+
+
+def test_load_cli_config_rejects_windows_rooted_relative_prompt_path(tmp_path):
+    if Path("/agents/mycroft_agent/gaz_sales_system_prompt.txt").is_absolute():
+        pytest.skip("Windows rooted-relative path behavior only.")
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "system_prompt": {
+                    "type": "file",
+                    "path": "/agents/mycroft_agent/gaz_sales_system_prompt.txt",
+                },
+                "subagents": {"stateless": [], "stateful": []},
+                "internal_tools": [],
+                "mcp": {"tool_name_prefix": True, "servers": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_cli_config(config_path)
+
+    assert "system_prompt.path" in str(exc_info.value)
+    assert "without a leading slash" in str(exc_info.value)
+
+
 def test_load_cli_config_rejects_legacy_agents_field(tmp_path):
     config_path = tmp_path / "mycroft.json"
     config_path.write_text(
