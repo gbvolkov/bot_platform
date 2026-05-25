@@ -26,6 +26,7 @@ INLINE_GUARDRAIL_CONFIG_KEYS = frozenset(
         "guardrail_prompt_injection_model",
         "guardrail_prompt_injection_model_revision",
         "guardrail_prompt_injection_threshold",
+        "guardrail_tool_result_prompt_injection_threshold",
         "guardrail_url_policy",
         "guardrail_scan_system_prompt",
         "guardrail_verbose_logging",
@@ -144,6 +145,10 @@ def guardrail_policy_to_init_kwargs(policy: Mapping[str, Any], *, policy_id: str
         )
     if scanners.get("prompt_injection_threshold") is not None:
         kwargs["guardrail_prompt_injection_threshold"] = float(scanners["prompt_injection_threshold"])
+    if scanners.get("tool_result_prompt_injection_threshold") is not None:
+        kwargs["guardrail_tool_result_prompt_injection_threshold"] = float(
+            scanners["tool_result_prompt_injection_threshold"]
+        )
     if scanners.get("url_policy") is not None:
         try:
             url_policy = coerce_url_policy_config(

@@ -173,6 +173,42 @@ def test_artifact_default_profile_can_configure_prompt_injection_model():
     assert profile.composite_input_scanners[0].config == spec.config
 
 
+def test_artifact_default_profile_can_configure_tool_result_prompt_injection_threshold():
+    profile = LLMGuardScannerProfile.artifact_creator_default(
+        prompt_injection_threshold=0.65,
+        tool_result_prompt_injection_threshold=0.82,
+    )
+
+    spec = next(spec for spec in profile.input_scanners if spec.name == "PromptInjection")
+
+    assert spec.config["threshold"] == 0.65
+    assert profile.composite_input_scanners[0].config["threshold"] == 0.65
+    assert profile.tool_result_prompt_injection_threshold == 0.82
+
+
+def test_tool_result_prompt_injection_scan_uses_tool_result_threshold():
+    seen_configs: list[dict] = []
+
+    def input_factory(spec: ScannerSpec) -> FakeInputScanner:
+        if spec.name == "PromptInjection":
+            seen_configs.append(dict(spec.config))
+        return FakeInputScanner(valid=True, score=0.0)
+
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile.artifact_creator_default(
+            prompt_injection_threshold=0.65,
+            tool_result_prompt_injection_threshold=0.82,
+        ),
+        input_factory=input_factory,
+    )
+
+    rail.scan_input_text("user text", _context(), boundary="model_request")
+    rail.scan_input_text("tool text", _context(), boundary="tool_result")
+
+    assert seen_configs[0]["threshold"] == 0.65
+    assert seen_configs[1]["threshold"] == 0.82
+
+
 def test_artifact_default_profile_can_pin_prompt_injection_model_revision():
     profile = LLMGuardScannerProfile.artifact_creator_default(
         prompt_injection_model="custom/prompt-injection-model",
@@ -204,6 +240,7 @@ def test_artifact_default_profile_uses_llm_guard_threshold_when_not_configured()
 
     assert "threshold" not in spec.config
     assert profile.composite_input_scanners[0].config == spec.config
+    assert profile.tool_result_prompt_injection_threshold is None
 
 
 def test_prompt_injection_model_config_normalizes_json_label_keys():

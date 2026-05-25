@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -76,6 +77,20 @@ class FakePromptInjectionScannerThatWouldBlockRedactedText(FakePromptInjectionSe
         self.seen.append(prompt)
         is_blocked = (
             self.blocked_sentence in prompt
+            or PROMPT_INJECTION_SENTENCE_PLACEHOLDER in prompt
+        )
+        return prompt, not is_blocked, 1.0 if is_blocked else 0.0
+
+
+class FakePromptInjectionNoiseScanner:
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def scan(self, prompt: str):
+        self.seen.append(prompt)
+        is_blocked = (
+            "Ссылка на статью" in prompt
+            or "END OF DOCUMENT" in prompt
             or PROMPT_INJECTION_SENTENCE_PLACEHOLDER in prompt
         )
         return prompt, not is_blocked, 1.0 if is_blocked else 0.0
@@ -226,6 +241,24 @@ def test_nested_tool_privacy_anonymize_result_boolean_maps_to_result_transform()
     )
 
     assert registry.entries["lookup"].profile.privacy.result_transform == "anonymize"
+
+
+def test_tool_result_policy_accepts_prompt_injection_threshold_override():
+    registry = GuardedToolRegistry.from_tools(
+        [NamedTool("lookup")],
+        {
+            "lookup": {
+                "name": "lookup",
+                "allowed_roles": ["default"],
+                "result_policy": {
+                    "scan_result": True,
+                    "prompt_injection_threshold": 0.91,
+                },
+            }
+        },
+    )
+
+    assert registry.entries["lookup"].profile.result_policy.prompt_injection_threshold == 0.91
 
 
 def test_artifact_creator_default_tool_profile_has_no_privacy_transforms():
@@ -513,6 +546,136 @@ def test_unsafe_tool_result_is_blocked():
 
     assert isinstance(result, Command)
     assert result.update["messages"][-1].content == SECURITY_BLOCK_MESSAGE_RU
+
+
+def test_tool_result_prompt_injection_scan_filters_known_noise_for_scanner_only():
+    scanner = FakePromptInjectionNoiseScanner()
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)])
+    )
+    middleware = _middleware(_profile("lookup"), scanner_rail=rail)
+    content = (
+        "Useful text.\n\n"
+        "** Ссылка на статью: https://example.test/article **\n"
+        "========= END OF DOCUMENT ============\n"
+        f"{PROMPT_INJECTION_SENTENCE_PLACEHOLDER}"
+    )
+
+    result = middleware.wrap_tool_call(
+        _request("lookup"),
+        lambda _request: ToolMessage(content=content, tool_call_id="call-1"),
+    )
+
+    assert isinstance(result, ToolMessage)
+    assert result.content == content
+    assert len(scanner.seen) == 1
+    assert "Ссылка на статью" not in scanner.seen[0]
+    assert "END OF DOCUMENT" not in scanner.seen[0]
+    assert PROMPT_INJECTION_SENTENCE_PLACEHOLDER not in scanner.seen[0]
+    assert len(re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", scanner.seen[0])) == 3
+
+
+def test_tool_result_prompt_injection_scan_prefers_tool_profile_threshold():
+    seen_prompt_injection_configs: list[dict] = []
+
+    def input_factory(spec: ScannerSpec) -> FakeInputScanner:
+        if spec.name == "PromptInjection":
+            seen_prompt_injection_configs.append(dict(spec.config))
+        return FakeInputScanner(valid=True, score=0.0)
+
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile.artifact_creator_default(
+            prompt_injection_threshold=0.65,
+            tool_result_prompt_injection_threshold=0.82,
+        ),
+        input_factory=input_factory,
+    )
+    middleware = _middleware(
+        _profile(
+            "lookup",
+            result_policy=ToolResultPolicy(prompt_injection_threshold=0.91),
+        ),
+        scanner_rail=rail,
+    )
+
+    result = middleware.wrap_tool_call(
+        _request("lookup"),
+        lambda _request: ToolMessage(content="tool result", tool_call_id="call-1"),
+    )
+
+    assert isinstance(result, ToolMessage)
+    assert seen_prompt_injection_configs[0]["threshold"] == 0.91
+
+
+def test_model_request_does_not_filter_human_prompt_injection_scan_by_default():
+    scanner = FakePromptInjectionNoiseScanner()
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)])
+    )
+    middleware = SecurityScannerMiddleware(rail, agent_name="test_agent.run")
+    content = "** Ссылка на статью: https://example.test/article **"
+    model_request = ModelRequest(
+        model=object(),
+        system_prompt=None,
+        messages=[HumanMessage(content=content, id="human-1")],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={"messages": []},
+        runtime=_runtime(),
+    )
+
+    result = middleware.wrap_model_call(
+        model_request,
+        lambda _request: ModelResponse(result=[AIMessage(content="ok")]),
+    )
+
+    blocked_response = getattr(result, "model_response", result)
+    assert blocked_response.result[0].content == SECURITY_BLOCK_MESSAGE_RU
+    assert scanner.seen == [content]
+
+
+def test_unchecked_tool_message_scan_filters_known_noise_without_changing_content():
+    scanner = FakePromptInjectionNoiseScanner()
+    rail = LLMGuardScannerRail(
+        LLMGuardScannerProfile(
+            input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)],
+            composite_input_scanners=[ScannerSpec("PromptInjection", scanner=scanner)],
+        )
+    )
+    middleware = SecurityScannerMiddleware(rail, agent_name="test_agent.run")
+    content = (
+        "Useful text.\n\n"
+        "** Ссылка на статью: https://example.test/article **\n"
+        "========= END OF DOCUMENT ============"
+    )
+    model_request = ModelRequest(
+        model=object(),
+        system_prompt=None,
+        messages=[
+            HumanMessage(content="summarize the tool result", id="human-1"),
+            ToolMessage(content=content, tool_call_id="call-1", id="tool-1"),
+        ],
+        tool_choice=None,
+        tools=[],
+        response_format=None,
+        state={"messages": []},
+        runtime=_runtime(),
+    )
+    captured: dict[str, object] = {}
+
+    def handler(updated_request):
+        captured["messages"] = updated_request.messages
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    result = middleware.wrap_model_call(model_request, handler)
+
+    assert isinstance(result, ModelResponse)
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages[1].content == content
+    assert all("Ссылка на статью" not in seen for seen in scanner.seen[1:])
+    assert all("END OF DOCUMENT" not in seen for seen in scanner.seen[1:])
 
 
 def test_prompt_injection_tool_result_redacts_flagged_sentence_and_continues():

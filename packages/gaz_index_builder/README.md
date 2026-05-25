@@ -138,14 +138,23 @@ Prerequisites:
 Set these values in `.env`:
 
 ```env
-YANDEX_OBJECT_STORAGE_BUCKET=your-bucket
+YANDEX_OBJECT_STORAGE_BUCKET=gbv-gazsales
 YANDEX_OBJECT_STORAGE_PREFIX=gaz-docs
 YANDEX_OBJECT_STORAGE_ENDPOINT=https://storage.yandexcloud.net
+YANDEX_CLOUD_FOLDER_ID=b1gt23jcnbib316dc05q
+YANDEX_OBJECT_STORAGE_RESOURCE_ID=e3e3b2vb681dc13mlm7i
+YANDEX_OBJECT_STORAGE_CLASS=STANDARD
+YANDEX_OBJECT_STORAGE_VERSIONING=disabled
+YANDEX_OBJECT_STORAGE_CREATED_AT=2026-05-22T13:02:12.984088Z
 
 GAZ_DOCS_ROOT=./data/gaz-docs
 GAZ_INDEX_ROOT=./data/gaz-index
 GAZ_COLLECTION_ID=gaz
 ```
+
+The sync command uses only bucket, prefix, endpoint, and AWS-compatible
+credentials. Folder ID, resource ID, storage class, versioning, and creation
+date are retained in `.env` as Yandex Cloud bucket metadata for audit/logging.
 
 Run from the package directory:
 

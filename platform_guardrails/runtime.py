@@ -215,6 +215,10 @@ def _build_scanner_rail(kwargs: Mapping[str, Any]) -> LLMGuardScannerRail:
         scanner_profile_kwargs["prompt_injection_threshold"] = kwargs[
             "guardrail_prompt_injection_threshold"
         ]
+    if kwargs.get("guardrail_tool_result_prompt_injection_threshold") is not None:
+        scanner_profile_kwargs["tool_result_prompt_injection_threshold"] = kwargs[
+            "guardrail_tool_result_prompt_injection_threshold"
+        ]
     if kwargs.get("guardrail_url_policy") is not None:
         scanner_profile_kwargs["url_policy"] = kwargs["guardrail_url_policy"]
     return LLMGuardScannerRail(

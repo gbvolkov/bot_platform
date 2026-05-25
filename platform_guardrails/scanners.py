@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
+from uuid import uuid4
 
 from .context import GuardrailContext
 from .decisions import GuardrailDecision, allow, block, redact
@@ -13,6 +15,11 @@ ScannerFailurePolicy = Literal["fail_closed", "fail_open"]
 
 FORBIDDEN_LLM_GUARD_SCANNERS = {"Anonymize", "Deanonymize"}
 PROMPT_INJECTION_SENTENCE_PLACEHOLDER = "[guarded sentence removed]"
+_TOOL_RESULT_PROMPT_INJECTION_NOISE_PATTERNS = (
+    re.compile(r"\*\*\s*Ссылка на статью:\s*[^*\r\n]+?\s*\*\*"),
+    re.compile(r"=+\s*END OF DOCUMENT\s*=+"),
+    re.compile(re.escape(PROMPT_INJECTION_SENTENCE_PLACEHOLDER)),
+)
 GENERIC_BANNED_TOPICS = [
     "self-harm instructions",
     "weapons construction",
@@ -51,6 +58,7 @@ class LLMGuardScannerProfile:
     failure_policy: ScannerFailurePolicy = "fail_closed"
     fail_fast: bool = False
     url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None
+    tool_result_prompt_injection_threshold: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_scanners", tuple(_coerce_spec(spec) for spec in self.input_scanners))
@@ -61,6 +69,12 @@ class LLMGuardScannerProfile:
             tuple(_coerce_spec(spec) for spec in self.composite_input_scanners),
         )
         object.__setattr__(self, "url_policy", coerce_url_policy_config(self.url_policy))
+        if self.tool_result_prompt_injection_threshold is not None:
+            object.__setattr__(
+                self,
+                "tool_result_prompt_injection_threshold",
+                float(self.tool_result_prompt_injection_threshold),
+            )
         if self.failure_policy not in {"fail_closed", "fail_open"}:
             raise ValueError("failure_policy must be 'fail_closed' or 'fail_open'.")
 
@@ -72,6 +86,7 @@ class LLMGuardScannerProfile:
         failure_policy: ScannerFailurePolicy = "fail_closed",
         token_limit: int = 8192,
         prompt_injection_threshold: float | None = None,
+        tool_result_prompt_injection_threshold: float | None = None,
         prompt_injection_model: str | Mapping[str, Any] | None = None,
         prompt_injection_model_revision: str | None = None,
         url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None,
@@ -110,6 +125,7 @@ class LLMGuardScannerProfile:
             composite_input_scanners=(prompt_injection,),
             failure_policy=failure_policy,
             url_policy=url_policy,
+            tool_result_prompt_injection_threshold=tool_result_prompt_injection_threshold,
         )
 
 
@@ -125,8 +141,8 @@ class LLMGuardScannerRail:
         self._profile = profile or LLMGuardScannerProfile.artifact_creator_default()
         self._input_factory = input_factory or _build_input_scanner
         self._output_factory = output_factory or _build_output_scanner
-        self._input_instances: dict[int, Any] = {}
-        self._output_instances: dict[int, Any] = {}
+        self._input_instances: dict[Any, Any] = {}
+        self._output_instances: dict[Any, Any] = {}
         self._source_urls_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
         self._verbose_logging = verbose_logging
 
@@ -145,10 +161,16 @@ class LLMGuardScannerRail:
         *,
         boundary: str = "model_request",
         excluded_scanner_names: Iterable[str] = (),
+        prompt_injection_text_filter: Callable[[str], str] | None = None,
+        prompt_injection_threshold: float | None = None,
     ) -> ScannerScanResult:
         excluded = {str(name) for name in excluded_scanner_names}
         specs = tuple(
             spec for spec in self._profile.input_scanners if spec.name not in excluded
+        )
+        prompt_injection_threshold = self._resolve_prompt_injection_threshold(
+            boundary=boundary,
+            prompt_injection_threshold=prompt_injection_threshold,
         )
         result = _scan_text(
             text,
@@ -161,9 +183,17 @@ class LLMGuardScannerRail:
             failure_policy=self._profile.failure_policy,
             fail_fast=self._profile.fail_fast,
             url_policy=None,
-            instance_for_spec=lambda spec: self._instance_for_spec(spec, "input"),
+            instance_for_spec=lambda spec: self._input_instance_for_scan(
+                spec,
+                prompt_injection_threshold=prompt_injection_threshold,
+            ),
             scan_one=lambda scanner, value: scanner.scan(value),
             verbose_log_injections=self._verbose_logging,
+            scanner_input_filter=(
+                _prompt_injection_scanner_input_filter(prompt_injection_text_filter)
+                if prompt_injection_text_filter is not None
+                else None
+            ),
         )
         if result.blocked_decision is None:
             self._remember_source_urls(context, text)
@@ -225,19 +255,28 @@ class LLMGuardScannerRail:
         *,
         boundary: str = "tool_result",
         placeholder: str = PROMPT_INJECTION_SENTENCE_PLACEHOLDER,
+        prompt_injection_text_filter: Callable[[str], str] | None = None,
+        prompt_injection_threshold: float | None = None,
     ) -> ScannerScanResult:
         current = text
         decisions: list[GuardrailDecision] = []
         redacted_count = 0
         highest_score = 0.0
         confirmed_injection_texts: list[str] = []
+        prompt_injection_threshold = self._resolve_prompt_injection_threshold(
+            boundary=boundary,
+            prompt_injection_threshold=prompt_injection_threshold,
+        )
 
         prompt_injection_specs = [
             spec for spec in self._profile.input_scanners if spec.name == "PromptInjection"
         ]
         for spec in prompt_injection_specs:
             try:
-                scanner = self._instance_for_spec(spec, "input")
+                scanner = self._input_instance_for_scan(
+                    spec,
+                    prompt_injection_threshold=prompt_injection_threshold,
+                )
                 sentences = _prompt_injection_sentence_inputs(scanner, current)
             except Exception as exc:  # noqa: BLE001 - scanner errors are policy-controlled
                 decisions.append(
@@ -258,7 +297,12 @@ class LLMGuardScannerRail:
                 if not isinstance(sentence, str) or not sentence.strip():
                     continue
                 try:
-                    _sanitized, is_valid, risk_score = scanner.scan(sentence)
+                    scanner_text = (
+                        prompt_injection_text_filter(sentence)
+                        if prompt_injection_text_filter is not None
+                        else sentence
+                    )
+                    _sanitized, is_valid, risk_score = scanner.scan(scanner_text)
                 except Exception as exc:  # noqa: BLE001 - scanner errors are policy-controlled
                     decisions.append(
                         _scanner_error_decision(
@@ -306,15 +350,48 @@ class LLMGuardScannerRail:
             )
         return ScannerScanResult(text=current, decisions=decisions)
 
-    def _instance_for_spec(self, spec: ScannerSpec, stage: Literal["input", "output"]) -> Any:
+    def _instance_for_spec(
+        self,
+        spec: ScannerSpec,
+        stage: Literal["input", "output"],
+        *,
+        cache_key: Any | None = None,
+    ) -> Any:
         if spec.scanner is not None:
             return spec.scanner
         cache = self._input_instances if stage == "input" else self._output_instances
-        key = id(spec)
+        key = id(spec) if cache_key is None else cache_key
         if key not in cache:
             factory = self._input_factory if stage == "input" else self._output_factory
             cache[key] = factory(spec)
         return cache[key]
+
+    def _input_instance_for_scan(
+        self,
+        spec: ScannerSpec,
+        *,
+        prompt_injection_threshold: float | None = None,
+    ) -> Any:
+        if spec.name != "PromptInjection" or prompt_injection_threshold is None:
+            return self._instance_for_spec(spec, "input")
+        override = _scanner_spec_with_threshold(spec, prompt_injection_threshold)
+        return self._instance_for_spec(
+            override,
+            "input",
+            cache_key=(id(spec), "prompt_injection_threshold", prompt_injection_threshold),
+        )
+
+    def _resolve_prompt_injection_threshold(
+        self,
+        *,
+        boundary: str,
+        prompt_injection_threshold: float | None,
+    ) -> float | None:
+        if prompt_injection_threshold is not None:
+            return float(prompt_injection_threshold)
+        if boundary == "tool_result":
+            return self._profile.tool_result_prompt_injection_threshold
+        return None
 
     def reset_context(self, context: GuardrailContext) -> None:
         self._source_urls_by_scope.pop(_source_url_scope(context), None)
@@ -353,8 +430,16 @@ def scan_input_text(
     context: GuardrailContext,
     *,
     boundary: str = "model_request",
+    prompt_injection_text_filter: Callable[[str], str] | None = None,
+    prompt_injection_threshold: float | None = None,
 ) -> ScannerScanResult:
-    return rail.scan_input_text(text, context, boundary=boundary)
+    return rail.scan_input_text(
+        text,
+        context,
+        boundary=boundary,
+        prompt_injection_text_filter=prompt_injection_text_filter,
+        prompt_injection_threshold=prompt_injection_threshold,
+    )
 
 
 def scan_output_text(
@@ -462,6 +547,32 @@ def _prompt_injection_sentence_inputs(scanner: Any, text: str) -> list[str]:
     return list(inputs or [])
 
 
+def filter_tool_result_prompt_injection_noise(text: str) -> str:
+    """Replace known tool-result boilerplate before PromptInjection scoring."""
+
+    filtered = text
+    for pattern in _TOOL_RESULT_PROMPT_INJECTION_NOISE_PATTERNS:
+        filtered = pattern.sub(lambda _match: str(uuid4()), filtered)
+    return filtered
+
+
+def _scanner_spec_with_threshold(spec: ScannerSpec, threshold: float) -> ScannerSpec:
+    config = dict(spec.config)
+    config["threshold"] = float(threshold)
+    return ScannerSpec(spec.name, config, scanner=spec.scanner)
+
+
+def _prompt_injection_scanner_input_filter(
+    text_filter: Callable[[str], str],
+) -> Callable[[ScannerSpec, str], str]:
+    def _filter(spec: ScannerSpec, text: str) -> str:
+        if spec.name != "PromptInjection":
+            return text
+        return text_filter(text)
+
+    return _filter
+
+
 def _replace_first_occurrence(text: str, target: str, replacement: str) -> tuple[str, bool]:
     index = text.find(target)
     if index < 0:
@@ -498,6 +609,7 @@ def _scan_text(
     instance_for_spec: Callable[[ScannerSpec], Any],
     scan_one: Callable[[Any, str], tuple[str, bool, float]],
     verbose_log_injections: bool = False,
+    scanner_input_filter: Callable[[ScannerSpec, str], str] | None = None,
 ) -> ScannerScanResult:
     current = text
     decisions: list[GuardrailDecision] = []
@@ -546,7 +658,12 @@ def _scan_text(
 
         try:
             scanner = instance_for_spec(spec)
-            sanitized, is_valid, risk_score = scan_one(scanner, current)
+            scanner_input = (
+                scanner_input_filter(spec, current)
+                if scanner_input_filter is not None
+                else current
+            )
+            sanitized, is_valid, risk_score = scan_one(scanner, scanner_input)
         except Exception as exc:  # noqa: BLE001 - scanner errors are policy-controlled
             decision = _scanner_error_decision(
                 spec,
@@ -561,8 +678,11 @@ def _scan_text(
                 break
             continue
 
-        sanitized_changed = sanitized != current
+        scanner_input_filtered = scanner_input != current
+        sanitized_changed = sanitized != scanner_input
         metadata = _context_metadata(context)
+        if scanner_input_filtered:
+            metadata["scanner_input_filtered"] = True
         if verbose_log_injections and spec.name == "PromptInjection" and not is_valid:
             metadata.update(_confirmed_injection_metadata(current, verbose=True))
         decision = scanner_decision(
@@ -576,7 +696,7 @@ def _scan_text(
         )
         decisions.append(decision)
 
-        if decision["allowed"]:
+        if decision["allowed"] and not scanner_input_filtered:
             current = sanitized
         if not decision["allowed"] or (fail_fast and not is_valid):
             break
@@ -726,6 +846,7 @@ __all__ = [
     "ScannerFailurePolicy",
     "ScannerScanResult",
     "ScannerSpec",
+    "filter_tool_result_prompt_injection_noise",
     "prompt_injection_model_config",
     "scan_composite_input_text",
     "scan_input_text",

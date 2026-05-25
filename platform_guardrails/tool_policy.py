@@ -47,6 +47,7 @@ class ToolResultPolicy:
     allowed_result_keys: tuple[str, ...] = ()
     denied_result_keys: tuple[str, ...] = ()
     sensitive_result_keys: tuple[str, ...] = ()
+    prompt_injection_threshold: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,11 @@ def coerce_tool_result_policy(value: ToolResultPolicy | Mapping[str, Any] | None
         return value
     return ToolResultPolicy(
         scan_result=bool(value.get("scan_result", True)),
+        prompt_injection_threshold=(
+            None
+            if value.get("prompt_injection_threshold") is None
+            else float(value["prompt_injection_threshold"])
+        ),
         max_text_chars=int(value.get("max_text_chars", 12_000)),
         max_items=int(value.get("max_items", 30)),
         allowed_result_keys=_tuple(value.get("allowed_result_keys", ())),

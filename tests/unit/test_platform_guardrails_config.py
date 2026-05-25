@@ -31,6 +31,8 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
                         "scanners": {
                             "failure_policy": "fail_open",
                             "banned_topics": ["topic"],
+                            "prompt_injection_threshold": 0.65,
+                            "tool_result_prompt_injection_threshold": 0.82,
                             "url_policy": {
                                 "enabled": True,
                                 "mode": "audit",
@@ -62,6 +64,8 @@ def test_resolve_guardrail_policy_maps_policy_to_initialize_kwargs(tmp_path):
     }
     assert kwargs["guardrail_scanner_failure_policy"] == "fail_open"
     assert kwargs["guardrail_banned_topics"] == ["topic"]
+    assert kwargs["guardrail_prompt_injection_threshold"] == 0.65
+    assert kwargs["guardrail_tool_result_prompt_injection_threshold"] == 0.82
     assert isinstance(kwargs["guardrail_url_policy"], UrlPolicyConfig)
     assert kwargs["guardrail_url_policy"].mode == "audit"
     assert kwargs["guardrail_url_policy"].blocked_domains == ("bad.example",)
@@ -75,6 +79,8 @@ def test_default_guardrails_do_not_scan_system_prompt():
 
     assert kwargs["guardrail_scan_system_prompt"] is False
     assert kwargs["guardrail_verbose_logging"] is True
+    assert kwargs["guardrail_prompt_injection_threshold"] == 0.65
+    assert kwargs["guardrail_tool_result_prompt_injection_threshold"] == 0.82
 
 
 def test_resolve_guardrail_policy_rejects_unknown_policy(tmp_path):

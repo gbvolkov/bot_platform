@@ -44,7 +44,8 @@
             "extra_special_tokens": {}
           }
         },
-        "prompt_injection_threshold": 0.839796,
+        "prompt_injection_threshold": 0.65,
+        "tool_result_prompt_injection_threshold": 0.82,
         "scan_system_prompt": false,
         "url_policy": {
           "enabled": true,
@@ -105,7 +106,8 @@
             "extra_special_tokens": {}
           }
         },
-        "prompt_injection_threshold": 0.839796
+        "prompt_injection_threshold": 0.65,
+        "tool_result_prompt_injection_threshold": 0.82
       }
     }
 

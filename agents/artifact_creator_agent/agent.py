@@ -553,6 +553,7 @@ def initialize_agent(
     guardrail_prompt_injection_model: str | Mapping[str, Any] | None = None,
     guardrail_prompt_injection_model_revision: str | None = None,
     guardrail_prompt_injection_threshold: float | None = None,
+    guardrail_tool_result_prompt_injection_threshold: float | None = None,
     guardrail_url_policy: UrlPolicyConfig | Mapping[str, Any] | None = None,
     guardrail_scan_system_prompt: bool = True,
     guardrail_verbose_logging: bool = False,
@@ -650,6 +651,10 @@ def initialize_agent(
             scanner_profile_kwargs["prompt_injection_model_revision"] = guardrail_prompt_injection_model_revision
         if guardrail_prompt_injection_threshold is not None:
             scanner_profile_kwargs["prompt_injection_threshold"] = guardrail_prompt_injection_threshold
+        if guardrail_tool_result_prompt_injection_threshold is not None:
+            scanner_profile_kwargs["tool_result_prompt_injection_threshold"] = (
+                guardrail_tool_result_prompt_injection_threshold
+            )
         if guardrail_url_policy is not None:
             scanner_profile_kwargs["url_policy"] = guardrail_url_policy
         scanner_profile = LLMGuardScannerProfile.artifact_creator_default(

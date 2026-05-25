@@ -814,6 +814,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         guardrail_prompt_injection_model=prompt_model_config,
         guardrail_prompt_injection_model_revision="model-revision",
         guardrail_prompt_injection_threshold=0.5,
+        guardrail_tool_result_prompt_injection_threshold=0.82,
         guardrail_url_policy=url_policy,
         guardrail_palimpsest_run_entities=["RU_PERSON"],
         guardrail_palimpsest_entity_replacements=entity_replacements,
@@ -834,6 +835,7 @@ def test_initialize_agent_wires_guardrails_when_enabled(monkeypatch):
         "prompt_injection_model": prompt_model_config,
         "prompt_injection_model_revision": "model-revision",
         "prompt_injection_threshold": 0.5,
+        "tool_result_prompt_injection_threshold": 0.82,
         "url_policy": url_policy,
     }
     assert captured["scanner_rail_profile"] == "scanner_profile"

@@ -154,6 +154,7 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_policy(tmp_path,
             "guardrail_banned_topics": ["topic"],
             "guardrail_prompt_injection_model": prompt_model_config,
             "guardrail_prompt_injection_threshold": 0.5,
+            "guardrail_tool_result_prompt_injection_threshold": 0.82,
             "guardrail_url_policy": url_policy,
             "guardrail_scan_system_prompt": False,
             "guardrail_verbose_logging": True,
@@ -205,6 +206,7 @@ def test_load_agent_registry_settings_reads_tools_and_guardrail_policy(tmp_path,
     assert settings.guardrail_prompt_injection_model == prompt_model_config
     assert settings.guardrail_prompt_injection_model_revision is None
     assert settings.guardrail_prompt_injection_threshold == 0.5
+    assert settings.guardrail_tool_result_prompt_injection_threshold == 0.82
     assert settings.guardrail_url_policy is url_policy
     assert settings.guardrail_scan_system_prompt is False
     assert settings.guardrail_verbose_logging is True

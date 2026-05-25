@@ -52,6 +52,7 @@ class ArtifactAgentRegistrySettings:
     guardrail_prompt_injection_model: str | dict[str, Any] | None = None
     guardrail_prompt_injection_model_revision: str | None = None
     guardrail_prompt_injection_threshold: float | None = None
+    guardrail_tool_result_prompt_injection_threshold: float | None = None
     guardrail_url_policy: UrlPolicyConfig | None = None
     guardrail_scan_system_prompt: bool = True
     guardrail_verbose_logging: bool = False
@@ -204,6 +205,13 @@ def _parse_args() -> argparse.Namespace:
         help="Optional PromptInjection score threshold.",
     )
     parser.add_argument(
+        "--guardrail-tool-result-prompt-injection-threshold",
+        dest="guardrail_tool_result_prompt_injection_threshold",
+        type=float,
+        default=None,
+        help="Optional PromptInjection score threshold for tool results.",
+    )
+    parser.add_argument(
         "--guardrail-verbose-logging",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -343,6 +351,11 @@ def _load_agent_registry_settings(
     prompt_injection_threshold = guardrail_kwargs.get("guardrail_prompt_injection_threshold")
     if prompt_injection_threshold is not None:
         prompt_injection_threshold = float(prompt_injection_threshold)
+    tool_result_prompt_injection_threshold = guardrail_kwargs.get(
+        "guardrail_tool_result_prompt_injection_threshold"
+    )
+    if tool_result_prompt_injection_threshold is not None:
+        tool_result_prompt_injection_threshold = float(tool_result_prompt_injection_threshold)
     url_policy = guardrail_kwargs.get("guardrail_url_policy")
     if url_policy is not None and not isinstance(url_policy, UrlPolicyConfig):
         raise ValueError(f"Agent '{agent_id}' guardrail_url_policy must be a UrlPolicyConfig.")
@@ -389,6 +402,7 @@ def _load_agent_registry_settings(
         guardrail_prompt_injection_model=prompt_injection_model,
         guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
         guardrail_prompt_injection_threshold=prompt_injection_threshold,
+        guardrail_tool_result_prompt_injection_threshold=tool_result_prompt_injection_threshold,
         guardrail_url_policy=url_policy,
         guardrail_scan_system_prompt=scan_system_prompt,
         guardrail_verbose_logging=verbose_logging,
@@ -616,6 +630,11 @@ def main() -> int:
                     if args.guardrail_prompt_injection_threshold is not None
                     else registry_settings.guardrail_prompt_injection_threshold
                 )
+                tool_result_prompt_injection_threshold = (
+                    args.guardrail_tool_result_prompt_injection_threshold
+                    if args.guardrail_tool_result_prompt_injection_threshold is not None
+                    else registry_settings.guardrail_tool_result_prompt_injection_threshold
+                )
                 verbose_logging = (
                     args.guardrail_verbose_logging
                     if args.guardrail_verbose_logging is not None
@@ -673,6 +692,7 @@ def main() -> int:
                     guardrail_prompt_injection_model=prompt_injection_model,
                     guardrail_prompt_injection_model_revision=prompt_injection_model_revision,
                     guardrail_prompt_injection_threshold=prompt_injection_threshold,
+                    guardrail_tool_result_prompt_injection_threshold=tool_result_prompt_injection_threshold,
                     guardrail_url_policy=registry_settings.guardrail_url_policy,
                     guardrail_scan_system_prompt=registry_settings.guardrail_scan_system_prompt,
                     guardrail_verbose_logging=verbose_logging,

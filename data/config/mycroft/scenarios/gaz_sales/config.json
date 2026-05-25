@@ -1,11 +1,11 @@
 {
   "system_prompt": {
     "type": "file",
-    "path": "agents/mycroft_agent/gaz_sales_system_prompt.txt"
+    "path": "agents/mycroft_agent/scenarios/gaz_sales/gaz_sales_system_prompt.txt"
   },
   "skills": {
     "paths": [
-      "skills/mycroft"
+      "agents/mycroft_agent/scenarios/gaz_sales/skills"
     ]
   },
   "subagents": {

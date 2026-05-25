@@ -28,7 +28,11 @@ from .privacy import (
     thread_id_from_runtime,
     transform_content,
 )
-from .scanners import LLMGuardScannerRail, ScannerScanResult
+from .scanners import (
+    LLMGuardScannerRail,
+    ScannerScanResult,
+    filter_tool_result_prompt_injection_noise,
+)
 from .tool_policy import (
     ToolPolicyRail,
     ToolPrivacyTransform,
@@ -180,6 +184,14 @@ def _tool_result_prompt_injection_checked(message: BaseMessage) -> bool:
     return bool(additional_kwargs.get(_TOOL_RESULT_PROMPT_INJECTION_CHECKED_KEY))
 
 
+def _mark_prompt_injection_checked(message: BaseMessage) -> BaseMessage:
+    updated = copy(message)
+    additional_kwargs = dict(getattr(updated, "additional_kwargs", None) or {})
+    additional_kwargs[_TOOL_RESULT_PROMPT_INJECTION_CHECKED_KEY] = True
+    updated.additional_kwargs = additional_kwargs
+    return updated
+
+
 def _tool_profile_result_is_untrusted(profile: ToolSecurityProfile) -> bool:
     return (
         profile.side_effect == "external"
@@ -200,6 +212,19 @@ def _decision_is_prompt_injection_block(decision: GuardrailDecision | None) -> b
         and metadata.get("scanner") == "PromptInjection"
         and "prompt_injection" in decision.get("categories", [])
     )
+
+
+def _scanner_profile_has_prompt_injection(scanners: LLMGuardScannerRail) -> bool:
+    return any(spec.name == "PromptInjection" for spec in scanners.profile.input_scanners)
+
+
+def _tool_result_prompt_injection_threshold(
+    scanners: LLMGuardScannerRail,
+    profile: ToolSecurityProfile,
+) -> float | None:
+    if profile.result_policy.prompt_injection_threshold is not None:
+        return profile.result_policy.prompt_injection_threshold
+    return scanners.profile.tool_result_prompt_injection_threshold
 
 
 def _decision_message(decision: GuardrailDecision) -> str:
@@ -382,6 +407,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
         prompt: str = "",
         output: bool = False,
         excluded_scanner_names: Iterable[str] = (),
+        prompt_injection_text_filter: Callable[[str], str] | None = None,
+        prompt_injection_threshold: float | None = None,
     ) -> tuple[Any, GuardrailDecision | None]:
         if isinstance(content, str):
             result = (
@@ -392,6 +419,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
                     context,
                     boundary=boundary,
                     excluded_scanner_names=excluded_scanner_names,
+                    prompt_injection_text_filter=prompt_injection_text_filter,
+                    prompt_injection_threshold=prompt_injection_threshold,
                 )
             )
             self._log_scan_result(result)
@@ -408,6 +437,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
                         prompt=prompt,
                         output=output,
                         excluded_scanner_names=excluded_scanner_names,
+                        prompt_injection_text_filter=prompt_injection_text_filter,
+                        prompt_injection_threshold=prompt_injection_threshold,
                     )
                     if decision is not None:
                         return content, decision
@@ -424,6 +455,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
                                 prompt=prompt,
                                 output=output,
                                 excluded_scanner_names=excluded_scanner_names,
+                                prompt_injection_text_filter=prompt_injection_text_filter,
+                                prompt_injection_threshold=prompt_injection_threshold,
                             )
                             if decision is not None:
                                 return content, decision
@@ -460,6 +493,16 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 )
                 else ()
             )
+            prompt_injection_text_filter = (
+                filter_tool_result_prompt_injection_noise
+                if not output and _message_is_tool_result(message)
+                else None
+            )
+            prompt_injection_threshold = (
+                self._scanners.profile.tool_result_prompt_injection_threshold
+                if not output and _message_is_tool_result(message)
+                else None
+            )
             scanned_content, decision = self._scan_content(
                 getattr(message, "content", None),
                 context,
@@ -467,6 +510,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 prompt=prompt,
                 output=output,
                 excluded_scanner_names=excluded_scanner_names,
+                prompt_injection_text_filter=prompt_injection_text_filter,
+                prompt_injection_threshold=prompt_injection_threshold,
             )
             if decision is not None:
                 message_id = getattr(message, "id", None)
@@ -475,6 +520,13 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 return source_messages, decision, [], [*updated_messages, *source_messages[index + 1 :]]
             updated = copy(message)
             updated.content = scanned_content
+            if (
+                not output
+                and _message_is_tool_result(updated)
+                and "PromptInjection" not in excluded_scanner_names
+                and _scanner_profile_has_prompt_injection(self._scanners)
+            ):
+                updated = _mark_prompt_injection_checked(updated)
             updated_messages.append(updated)
         return updated_messages, None, [], None
 
@@ -531,6 +583,8 @@ class SecurityScannerMiddleware(AgentMiddleware):
                 continue
             text = _message_text(message)
             if text:
+                if role == "tool":
+                    text = filter_tool_result_prompt_injection_noise(text)
                 message_parts.append(f"[{role.upper()}]\n{text}")
         if message_parts:
             parts.append("\n\n".join(message_parts))
@@ -962,13 +1016,25 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
         if self._scanners is None or not profile.result_policy.scan_result:
             return value, None
         if isinstance(value, str):
-            result = self._scanners.scan_input_text(value, context, boundary="tool_result")
+            prompt_injection_threshold = _tool_result_prompt_injection_threshold(
+                self._scanners,
+                profile,
+            )
+            result = self._scanners.scan_input_text(
+                value,
+                context,
+                boundary="tool_result",
+                prompt_injection_text_filter=filter_tool_result_prompt_injection_noise,
+                prompt_injection_threshold=prompt_injection_threshold,
+            )
             decision = result.blocked_decision
             if _decision_is_prompt_injection_block(decision):
                 redacted = self._scanners.redact_prompt_injection_sentences(
                     value,
                     context,
                     boundary="tool_result",
+                    prompt_injection_text_filter=filter_tool_result_prompt_injection_noise,
+                    prompt_injection_threshold=prompt_injection_threshold,
                 )
                 self._log_scan_result(redacted)
                 if redacted.blocked_decision is not None:
@@ -979,6 +1045,7 @@ class ToolExecutionSafetyMiddleware(AgentMiddleware):
                         context,
                         boundary="tool_result",
                         excluded_scanner_names=("PromptInjection",),
+                        prompt_injection_text_filter=filter_tool_result_prompt_injection_noise,
                     )
                     self._log_scan_result(verified)
                     return verified.text, verified.blocked_decision

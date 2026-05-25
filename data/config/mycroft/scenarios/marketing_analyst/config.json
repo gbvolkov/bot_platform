@@ -5,7 +5,7 @@
   },
   "skills": {
     "paths": [
-      "skills/marketing_analyst"
+      "agents/mycroft_agent/scenarios/marketing_analyst/skills"
     ]
   },
   "subagents": {
