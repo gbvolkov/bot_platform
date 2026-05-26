@@ -142,6 +142,19 @@ def _attach_csvs_as_views_sqlalchemy_engine(sqlalchemy_engine, csv_paths: Sequen
                 """
             )
 
+
+def _supports_materialized_view_reflection(sqlalchemy_engine) -> bool:
+    """Return whether SQLAlchemy dialect implements materialized-view reflection."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(sqlalchemy_engine)
+    try:
+        inspector.get_materialized_view_names()
+    except NotImplementedError:
+        return False
+    return True
+
+
 def build_sql_database(
     *,
     csv_paths: Optional[Sequence[str]] = None,
@@ -157,7 +170,7 @@ def build_sql_database(
         engine = create_engine(database_url)
         db = SQLDatabase(
             engine,
-            view_support=True,
+            view_support=_supports_materialized_view_reflection(engine),
             max_string_length=max_string_length,
         )
         db.name = database_url
@@ -175,7 +188,7 @@ def build_sql_database(
     # 👈 include views in LangChain's introspection so get_table_info() isn't empty
     db = SQLDatabase(
         engine,
-        view_support=True,
+        view_support=_supports_materialized_view_reflection(engine),
         max_string_length=max_string_length,
     )
     db.name = "csv_duckdb"
