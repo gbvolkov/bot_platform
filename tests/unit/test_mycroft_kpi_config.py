@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import sqlite3
 
 from deepagents.middleware.skills import _list_skills
 
@@ -13,6 +14,7 @@ from agents.mycroft_agent.cli_config import (
     load_cli_config,
 )
 from agents.mycroft_agent.configured_agent import build_skills_backend, normalize_skill_source
+from agents.mycroft_agent.scenarios.kpi_agent.tools import KPIStaffStructureFuzzyIndex
 
 
 CONFIG_PATH = Path("data/config/mycroft/scenarios/kpi_agent/config.json")
@@ -42,7 +44,7 @@ def test_kpi_agent_config_loads_kpi_bi_stateless_subagent_only():
                 "agents.mycroft_agent.scenarios.kpi_agent.tools:"
                 "build_kpi_staff_structure_fuzzy_search_tool"
             ),
-            params={},
+            params={"database_path": "data/kpi/kpi.sqlite"},
         ),
     )
     assert config.mcp.servers == ()
@@ -428,3 +430,50 @@ def test_kpi_staff_structure_fuzzy_search_tool_matches_full_position_names():
         in candidate["full_position_name"]
         for candidate in result["candidates"]
     )
+
+
+def test_kpi_staff_structure_fuzzy_index_resolves_relative_database_path_from_cwd(
+    monkeypatch,
+    tmp_path,
+):
+    field_names = (
+        "department_1",
+        "department_2",
+        "department_3",
+        "department_4",
+        "department_5",
+        "department_6",
+        "department_7",
+        "department_8",
+        "employee_group",
+        "position",
+    )
+    database_path = tmp_path / "data" / "kpi" / "kpi.sqlite"
+    database_path.parent.mkdir(parents=True)
+    with sqlite3.connect(database_path) as connection:
+        columns = ", ".join(f"{field_name} TEXT" for field_name in field_names)
+        connection.execute(
+            f"""
+            CREATE TABLE kpi_staff_structure (
+                staff_structure_id INTEGER PRIMARY KEY,
+                {columns}
+            )
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO kpi_staff_structure (
+                staff_structure_id,
+                {", ".join(field_names)}
+            )
+            VALUES ({", ".join("?" for _ in range(len(field_names) + 1))})
+            """,
+            (1, "Sales", "", "", "", "", "", "", "", "", "Manager"),
+        )
+
+    monkeypatch.chdir(tmp_path)
+
+    index = KPIStaffStructureFuzzyIndex.from_sqlite("data/kpi/kpi.sqlite")
+
+    assert index.candidates[0].staff_structure_id == 1
+    assert index.candidates[0].full_position_name == "Sales / Manager"

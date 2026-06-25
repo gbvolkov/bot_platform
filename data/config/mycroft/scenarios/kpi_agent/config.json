@@ -16,7 +16,10 @@
   },
   "internal_tools": [
     {
-      "import": "agents.mycroft_agent.scenarios.kpi_agent.tools:build_kpi_staff_structure_fuzzy_search_tool"
+      "import": "agents.mycroft_agent.scenarios.kpi_agent.tools:build_kpi_staff_structure_fuzzy_search_tool",
+      "params": {
+        "database_path": "data/kpi/kpi.sqlite"
+      }
     }
   ],
   "deepagents": {

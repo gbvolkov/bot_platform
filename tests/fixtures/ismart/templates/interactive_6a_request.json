@@ -1,0 +1,21 @@
+{
+  "request_id": "req-interactive-6a",
+  "course_id": "python-basic-8-9",
+  "template_id": "interactive_template",
+  "interactive_code": "6A",
+  "audience": "8-9",
+  "level": "базовый",
+  "lesson_number": 4,
+  "target_task_level": "L2",
+  "target_task_number": 4,
+  "template_payload": {
+    "template_code": "6A",
+    "prompt": "Расположите этапы решения задачи сложения двух введённых чисел.",
+    "items": [
+      {"id": "i1", "text": "Считать первое число", "order": 1},
+      {"id": "i2", "text": "Считать второе число", "order": 2},
+      {"id": "i3", "text": "Сложить числа", "order": 3},
+      {"id": "i4", "text": "Вывести сумму", "order": 4}
+    ]
+  }
+}

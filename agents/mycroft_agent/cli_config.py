@@ -154,7 +154,7 @@ def build_internal_tools(
                     f"Unknown internal tool '{spec.name}'. Available tools: {available}"
                 )
 
-        built = builder(**spec.params)
+        built = builder(**_resolve_internal_tool_params(spec.params))
         if isinstance(built, (list, tuple)):
             tools.extend(built)
         else:
@@ -510,6 +510,77 @@ def _collect_env_placeholders(value: Any) -> list[str]:
             found.extend(_collect_env_placeholders(nested))
         return found
     return []
+
+
+def _resolve_internal_tool_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: _resolve_internal_tool_param_value(
+            value,
+            root=project_root(),
+            param_name=key,
+        )
+        for key, value in params.items()
+    }
+
+
+def _resolve_internal_tool_param_value(
+    value: Any,
+    *,
+    root: Path,
+    param_name: str,
+) -> Any:
+    if isinstance(value, str):
+        if _is_path_param_name(param_name):
+            return str(
+                _resolve_path(
+                    value,
+                    root=root,
+                    field_name=f"internal_tools[].params.{param_name}",
+                )
+            )
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _resolve_internal_tool_param_value(
+                nested,
+                root=root,
+                param_name=key,
+            )
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _resolve_internal_tool_param_value(
+                nested,
+                root=root,
+                param_name=_singular_path_param_name(param_name),
+            )
+            for nested in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _resolve_internal_tool_param_value(
+                nested,
+                root=root,
+                param_name=_singular_path_param_name(param_name),
+            )
+            for nested in value
+        )
+    return value
+
+
+def _is_path_param_name(param_name: str) -> bool:
+    normalized = param_name.strip().lower()
+    return normalized in {"path", "paths"} or normalized.endswith(("_path", "_paths"))
+
+
+def _singular_path_param_name(param_name: str) -> str:
+    normalized = param_name.strip().lower()
+    if normalized == "paths":
+        return "path"
+    if normalized.endswith("_paths"):
+        return f"{param_name[:-1]}"
+    return param_name
 
 
 def _expand_mcp_connection_env(value: Any, server_name: str) -> Any:

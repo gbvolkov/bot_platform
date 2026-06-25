@@ -1,0 +1,13 @@
+{
+  "request_id": "req-control-source",
+  "course_id": "python-basic-8-9",
+  "template_id": "control_question",
+  "audience": "8-9",
+  "level": "базовый",
+  "lesson_number": 4,
+  "target_task_level": "L2",
+  "target_task_number": 4,
+  "service_spec": {
+    "answer_key": "Нужно прочитать два числа, преобразовать их к int, сложить и вывести сумму."
+  }
+}

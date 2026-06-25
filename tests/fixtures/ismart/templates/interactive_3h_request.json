@@ -1,0 +1,16 @@
+{
+  "request_id": "req-interactive-3h",
+  "course_id": "python-basic-8-9",
+  "template_id": "interactive_template",
+  "interactive_code": "3H",
+  "audience": "8-9",
+  "level": "базовый",
+  "lesson_number": 5,
+  "target_task_level": "L1",
+  "target_task_number": 1,
+  "template_payload": {
+    "template_code": "3H",
+    "prompt": "Введите результат работы программы при входном числе 7.",
+    "text": "Если пользователь ввёл 7, программа должна вывести {{input-text:14}}."
+  }
+}

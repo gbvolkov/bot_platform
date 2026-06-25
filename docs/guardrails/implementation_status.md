@@ -1,6 +1,6 @@
 # Guardrails Implementation Status
 
-Current status as of 2026-05-18.
+Current status as of 2026-06-09.
 
 This document describes what is implemented in the repository now. It is
 separate from the target architecture vision, which intentionally includes later
@@ -20,7 +20,8 @@ Phase 2 should not yet be treated as fully production-complete for all
 production workloads. The platform wiring is in place. Russian and mixed
 Russian/English prompt-injection benchmarking and representative evaluation set
 creation are complete for the current workstream, and the configured
-prompt-injection threshold has been calibrated to `0.839796`. Remaining
+prompt-injection thresholds are configured as `0.65` for model input and
+`0.82` for tool-result scanning. Remaining
 production hardening is now focused on rollout monitoring, regression additions
 for newly discovered misses, and any future fine-tuning or model replacement if
 new evaluation data shows recall is insufficient.
@@ -90,6 +91,68 @@ Other agents may still use older patterns or no guardrail middleware. Migrating
 all agents to the common foundation remains rollout work, not a Phase 2 scanner
 enforcement task.
 
+### Transforming Any Agent For Phase 1 Guardrails
+
+The Phase 1 transformation makes an agent privacy-aware without changing its
+domain behavior. The required outcome is that user text, dynamic system prompts,
+and model-visible tool context are anonymized before they leave the platform,
+and model responses are de-anonymized before returning to the user when the
+agent is allowed to restore private values.
+
+For a platform-compiled migration, the agent module should expose
+`build_agent_graph(...)` returning an `AgentGraphSpec` built with
+`PlatformStateGraph`. Model nodes should be declared with `add_agent_node(...)`
+instead of constructing a LangChain agent inline, and ordinary graph nodes that
+handle user-controlled state should be declared with guardrails enabled or with
+an explicit `NodeGuardrailPolicy`. The registry entry then selects:
+
+```json
+"guardrails": {
+  "policy": "default_guardrails",
+  "mode": "platform"
+}
+```
+
+At startup, `bot_service.agent_registry` builds a
+`PlatformGuardrailRuntime.from_policy_id(...)` and `PlatformGraphCompiler`
+injects `PrivacyModelRequestMiddleware` into guarded model nodes. This is the
+preferred shape for new migrations because the agent does not need to manually
+construct Palimpsest sessions, event log paths, or model middleware ordering.
+
+For an agent-owned migration, keep the existing `initialize_agent(...)` contract
+but add the Phase 1 guardrail parameters:
+
+- `guardrails_locale`
+- `guardrail_privacy_enabled`
+- `guardrail_palimpsest_run_entities`
+- `guardrail_palimpsest_entity_replacements`
+- `guardrail_palimpsest_options`
+- `guardrail_palimpsest_session_options`
+
+The agent should create one `PrivacyRail` for the run and reuse it across model
+middleware and tool-result transforms. Dynamic prompts should be placed before
+`PrivacyModelRequestMiddleware` in the LangChain middleware list, so the prompt
+text is also anonymized before the model call. Any non-agent graph node that
+persists user-controlled prompt or context state should be wrapped with
+`guarded_node(..., privacy_middleware=...)`.
+
+The registry supports the agent-owned form through `params.guardrail_policy`.
+When present, `bot_service.agent_registry` resolves the policy from
+`data/config/guardrails/policies.json` into `guardrail_*` initialization kwargs.
+An agent must not mix `guardrail_policy` with inline `guardrail_*` params in the
+load config.
+
+Phase 1 migration is complete for an agent when:
+
+- all external model calls pass through `PrivacyModelRequestMiddleware`;
+- Palimpsest replacement configuration comes from guardrail policy rather than
+  hard-coded agent constants;
+- raw prompt/output text is absent from local guardrail traces;
+- prompt-setting or other user-controlled state-mutating nodes are protected
+  before they store data in graph state;
+- regression tests confirm private values are anonymized before the model call
+  and restored only at approved output boundaries.
+
 ## Phase 2 - Scanner Enforcement
 
 Status: mostly implemented for `artifact_creator_agent`; Russian prompt-injection
@@ -149,8 +212,9 @@ Input scanners:
   optional explicit revision, and deployment threshold. When no scanner
   threshold is supplied, LLM Guard's scanner default is used.
 - Current local policy calibration for the Russian prompt-injection model uses
-  `prompt_injection_threshold: 0.839796` in both `default_guardrails` and
-  `persons_guardrails`.
+  `prompt_injection_threshold: 0.65` and
+  `tool_result_prompt_injection_threshold: 0.82` in both `default_guardrails`
+  and `persons_guardrails`.
 - `Toxicity`: review/block when invalid.
 - `BanTopics`: review/block for configured generic topics.
 
@@ -245,6 +309,80 @@ Examples:
 | Palimpsest restores client PII in the final user-facing response | Show restored values; do not mask with LLM Guard Sensitive |
 | Scanner raises and policy is `fail_closed` | Block |
 | Scanner raises and policy is `fail_open` | Allow and audit scanner error |
+
+### Transforming Any Agent For Phase 2 Guardrails
+
+The Phase 2 transformation adds scanner enforcement around the same model and
+state boundaries protected in Phase 1. The required outcome is that unsafe input
+is blocked or sanitized before model execution, unsafe model output is blocked
+before user delivery or tool execution, and scanner decisions are logged without
+raw prompt text.
+
+For a platform-compiled migration, guarded `PlatformStateGraph` nodes receive
+`SecurityScannerMiddleware` automatically when the selected policy has
+`guardrail_scanners_enabled=True`. Agent nodes should keep dynamic prompt
+construction in the `prompt` argument to `add_agent_node(...)`; the compiler
+orders prompt construction before scanner and privacy middleware. Callable nodes
+that accept or persist user-controlled text should use the default guardrails or
+an explicit `NodeGuardrailPolicy`, for example to include human and tool
+messages in composite prompt-injection scans:
+
+```python
+NodeGuardrailPolicy(
+    composite_message_roles=("human", "tool"),
+)
+```
+
+For an agent-owned migration, add scanner parameters to `initialize_agent(...)`
+and pass them into `LLMGuardScannerProfile` / `LLMGuardScannerRail`:
+
+- `guardrail_scanners_enabled`
+- `guardrail_scanner_failure_policy`
+- `guardrail_banned_topics`
+- `guardrail_prompt_injection_model`
+- `guardrail_prompt_injection_model_revision`
+- `guardrail_prompt_injection_threshold`
+- `guardrail_tool_result_prompt_injection_threshold`
+- `guardrail_url_policy`
+- `guardrail_scan_system_prompt`
+- `guardrail_verbose_logging`
+- `guardrail_composite_input_scanners`
+- `guardrail_composite_recent_message_limit`
+
+The model middleware order should be:
+
+```text
+dynamic prompt builder
+SecurityScannerMiddleware
+PrivacyModelRequestMiddleware
+tool-execution middleware, when enabled
+```
+
+Non-model nodes that store a user-supplied system prompt, routing instruction,
+retrieval query, or other privileged state should be wrapped with
+`guarded_node(...)` and configured to scan relevant state keys before mutation.
+Blocked id-less message sets must be removed from state with
+`REMOVE_ALL_MESSAGES` replacement semantics, matching the existing middleware
+behavior.
+
+URL policy should come from `data/config/guardrails/policies.json`, not from
+agent code. In audit mode, deterministic URL decisions should be logged before
+LLM Guard URL scanning but should not change user-visible behavior. In enforce
+mode, deterministic violations block before `MaliciousURLs` runs.
+
+Phase 2 migration is complete for an agent when:
+
+- model input, model output, model-generated tool calls, and model-visible
+  untrusted tool results are scanned at the correct boundaries;
+- scanner failure policy is explicit and defaults to fail-closed for guarded
+  production agents;
+- dynamic system prompt text is included or excluded according to
+  `guardrail_scan_system_prompt`;
+- source URLs are remembered only by guardrail context scope and generated URL
+  violations still block when policy requires it;
+- tests cover prompt-injection block, secrets redaction, token-limit block,
+  URL-policy audit/enforce behavior, scanner failure behavior, and redacted
+  event logging.
 
 ## Phase 3A - Tool Execution Safety
 
@@ -381,6 +519,61 @@ instead of crashing.
 
 `final_print_node` and `ready_node` handle missing `final_artifact_url` by using
 the artifact storage error message instead of raising `KeyError`.
+
+### Transforming Any Agent For Phase 3A Guardrails
+
+The Phase 3A transformation moves tool execution from "tools are merely passed
+to the agent" to "every runtime tool has an explicit security and privacy
+profile". The required outcome is that unprofiled or disallowed tools fail
+closed, external access is controlled by runtime context, and tool results are
+marked as trusted or untrusted before they re-enter model context.
+
+For a platform-compiled migration, tools should be declared in the registry
+`tools` block and the agent graph should use `add_agent_node(...,
+tools_source="platform")`. When the policy has
+`guardrail_tool_execution_enabled=True`, `bot_service.agent_registry` asks
+`build_agent_tool_bundle(..., require_guardrail_profiles=True)` to resolve both
+tool objects and runtime-name profiles. `PlatformGraphCompiler` then injects
+`ToolExecutionSafetyMiddleware` into guarded agent nodes using the same
+`PlatformGuardrailRuntime` that owns scanner and privacy rails.
+
+For an agent-owned migration, keep accepting `tools` in `initialize_agent(...)`
+and add:
+
+- `guardrail_tool_execution_enabled`
+- `guardrail_tool_profiles`
+- `guardrail_unprofiled_tools`
+
+The agent should build a `GuardedToolRegistry`, register the concrete runtime
+tool objects with the resolved profiles, and add the returned
+`ToolExecutionSafetyMiddleware` to the LangChain middleware list. A tool profile
+that scans results requires scanner guardrails to be enabled; a profile that
+anonymizes results requires privacy guardrails to be enabled. Startup should
+raise rather than silently weakening those dependencies.
+
+Tool profiles should live in `platform_tools/tools.json`. Internal tools use
+`guardrail_profile`; MCP server templates use `guardrail_profiles` keyed by the
+runtime tool name, with unprefixed MCP tool names accepted when applicable.
+Profile `category` is the external-access control point: tools with
+`category: "external_access"` require runtime
+`allow_external_tool_access=True`. File export, sensitive-data, approval, and
+role policies should be represented in the profile rather than in ad hoc agent
+conditionals.
+
+Phase 3A migration is complete for an agent when:
+
+- every configured runtime tool resolves a valid guardrail profile when tool
+  execution guardrails are enabled;
+- unprofiled tools are blocked unless the agent explicitly accepts the
+  `allow_read_only` fallback policy;
+- external tools are blocked unless the runtime context allows external access;
+- tool arguments are de-anonymized before execution only through the shared
+  `PrivacyRail`;
+- untrusted tool results are scanned or anonymized according to the tool
+  profile before becoming model-visible;
+- tests cover profile resolution, unprofiled-tool behavior, external-access
+  gating, sensitive/file-export permissions, result anonymization, result
+  scanning, and MCP startup failure handling.
 
 ## Verified Test Coverage
 

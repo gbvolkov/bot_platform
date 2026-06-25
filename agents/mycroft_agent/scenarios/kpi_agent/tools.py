@@ -11,7 +11,6 @@ from typing import Any
 from langchain.tools import tool
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
 _FIELD_NAMES = (
     "department_1",
     "department_2",
@@ -28,11 +27,11 @@ _FULL_POSITION_FIELD = "full_position_name"
 _TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
 
 
-def _resolve_repo_path(raw_path: str | Path) -> Path:
-    path = Path(raw_path)
+def _resolve_runtime_path(raw_path: str | Path) -> Path:
+    path = Path(raw_path).expanduser()
     if path.is_absolute():
-        return path
-    return (_REPO_ROOT / path).resolve()
+        return path.resolve()
+    return (Path.cwd() / path).resolve()
 
 
 def _normalize_text(value: object) -> str:
@@ -102,7 +101,7 @@ class KPIStaffStructureFuzzyIndex:
 
     @classmethod
     def from_sqlite(cls, database_path: str | Path) -> "KPIStaffStructureFuzzyIndex":
-        path = _resolve_repo_path(database_path)
+        path = _resolve_runtime_path(database_path)
         if not path.is_file():
             raise FileNotFoundError(f"KPI database not found: {path}")
 

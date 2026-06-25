@@ -1,0 +1,20 @@
+{
+  "request_id": "req-interactive-6g",
+  "course_id": "python-basic-8-9",
+  "template_id": "interactive_template",
+  "interactive_code": "6G",
+  "audience": "8-9",
+  "level": "базовый",
+  "lesson_number": 4,
+  "target_task_level": "L2",
+  "target_task_number": 4,
+  "template_payload": {
+    "template_code": "6G",
+    "prompt": "Соотнесите действие и фрагмент Python-кода.",
+    "pairs": [
+      {"left": "Считать целое число", "right": "int(input())"},
+      {"left": "Вывести результат", "right": "print(...)"},
+      {"left": "Сложить два значения", "right": "a + b"}
+    ]
+  }
+}

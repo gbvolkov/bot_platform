@@ -34,6 +34,7 @@ uv.lock
 *.db-wal
 .tmp_sysadmin_mcp_kit/
 pytest-cache*
+outputs/
 
 .python-version
 bi_bot.pid

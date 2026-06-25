@@ -424,6 +424,41 @@ def test_build_internal_tools_loads_importable_bundle(monkeypatch):
     assert [tool.name for tool in tools] == ["imported_a", "imported_b"]
 
 
+def test_build_internal_tools_resolves_relative_path_params_from_project_root(
+    monkeypatch,
+    tmp_path,
+):
+    captured: dict[str, str] = {}
+
+    def build_tools(database_path: str, locale: str):
+        captured["database_path"] = database_path
+        captured["locale"] = locale
+        return SimpleNamespace(name="database_tool")
+
+    fake_module = SimpleNamespace(build_tools=build_tools)
+    monkeypatch.setitem(sys.modules, "fake_path_tools", fake_module)
+    monkeypatch.delenv("MYCROFT_PROJECT_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    tools = build_internal_tools(
+        (
+            InternalToolSpec(
+                import_path="fake_path_tools:build_tools",
+                params={
+                    "database_path": "data/kpi/kpi.sqlite",
+                    "locale": "ru",
+                },
+            ),
+        )
+    )
+
+    assert [tool.name for tool in tools] == ["database_tool"]
+    assert captured["database_path"] == str(
+        (tmp_path / "data" / "kpi" / "kpi.sqlite").resolve()
+    )
+    assert captured["locale"] == "ru"
+
+
 def test_load_cli_config_reads_skills_and_importable_tool_bundle(tmp_path):
     config_path = tmp_path / "mycroft.json"
     config_path.write_text(
