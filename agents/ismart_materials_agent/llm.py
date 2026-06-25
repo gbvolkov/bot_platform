@@ -28,6 +28,21 @@ class OpenAICompatibleJsonClient:
             raise RuntimeError("OPENAI_API_KEY is required for api.openai.com")
 
     def complete_json(self, *, system: str, user: str) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for json_mode in (True, False):
+            try:
+                return self._complete_json(system=system, user=user, json_mode=json_mode)
+            except RuntimeError as exc:
+                last_error = exc
+                message = str(exc).lower()
+                if json_mode and "response_format" in message:
+                    continue
+                if json_mode and "json_object" in message:
+                    continue
+                raise
+        raise RuntimeError(f"LLM request failed: {last_error}")
+
+    def _complete_json(self, *, system: str, user: str, json_mode: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -35,8 +50,9 @@ class OpenAICompatibleJsonClient:
                 {"role": "user", "content": user},
             ],
             "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -53,12 +69,29 @@ class OpenAICompatibleJsonClient:
                 content = data["choices"][0]["message"]["content"]
                 parsed = parse_json_object(content)
                 return parsed
-            except (urllib.error.URLError, urllib.error.HTTPError, KeyError, json.JSONDecodeError, ValueError) as exc:
+            except urllib.error.HTTPError as exc:
+                body = _read_http_error_body(exc)
+                last_error = RuntimeError(f"HTTP Error {exc.code}: {exc.reason}; body={body}")
+                if exc.code == 400:
+                    break
+                if attempt < self.retries:
+                    time.sleep(2**attempt)
+                    continue
+            except (urllib.error.URLError, KeyError, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
                 if attempt < self.retries:
                     time.sleep(2**attempt)
                     continue
-        raise RuntimeError(f"LLM request failed: {last_error}")
+        mode = "with response_format" if json_mode else "without response_format"
+        raise RuntimeError(f"LLM request failed {mode}: {last_error}")
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - error body is best effort.
+        return "<unreadable>"
+    return body[:2000] or "<empty>"
 
 
 def parse_json_object(text: str) -> dict[str, Any]:

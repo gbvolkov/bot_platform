@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True, help="Output root directory.")
     parser.add_argument("--task-id")
     parser.add_argument("--lesson-number")
-    parser.add_argument("--model", default=os.getenv("UMK_LLM_MODEL", "gpt-4o-mini"))
+    parser.add_argument("--model", default=os.getenv("UMK_LLM_MODEL", "gpt-5.2"))
     parser.add_argument("--base-url", default=os.getenv("UMK_LLM_BASE_URL", "https://api.openai.com/v1"))
     parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY"))
     parser.add_argument("--max-generation-iterations", type=int, default=3)
