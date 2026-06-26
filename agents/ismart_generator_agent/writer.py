@@ -87,6 +87,8 @@ def write_task_output(
                 "approved": validation.approved,
                 "issues": validation.issues,
                 "fix_instructions": validation.fix_instructions,
+                "issues_by_block": validation.issues_by_block,
+                "passed_blocks": validation.passed_blocks,
             },
         )
 

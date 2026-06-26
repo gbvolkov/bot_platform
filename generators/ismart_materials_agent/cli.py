@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-reference-chars", type=int, default=0)
     parser.add_argument("--no-llm-validator", action="store_true")
     parser.add_argument("--generation-target")
+    parser.add_argument("--verbose", action="store_true", help="Print every deterministic generation step to stdout.")
     return parser
 
 
@@ -85,14 +86,20 @@ def run_tasks(
     output_root = config.output_root
     if len(tasks) == 1:
         run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_identity(tasks[0])[0])}"
+        if config.verbose:
+            print(f"[ismart-materials] cli.single_task.start {json.dumps({'run_dir': str(run_dir)}, ensure_ascii=False)}", flush=True)
         return [run_ismart_task(tasks[0], config, client=client, run_dir=run_dir)]
 
     batch_dir = output_root / f"batch_{_timestamp()}"
     batch_dir.mkdir(parents=True, exist_ok=True)
+    if config.verbose:
+        print(f"[ismart-materials] cli.batch.start {json.dumps({'batch_dir': str(batch_dir), 'task_count': len(tasks)}, ensure_ascii=False)}", flush=True)
     results: list[IsmartGenerationResult] = []
     module_summaries: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for task in tasks:
         task_id, lesson_number, _ = task_identity(task)
+        if config.verbose:
+            print(f"[ismart-materials] cli.batch.task.start {json.dumps({'task_id': task_id, 'lesson_number': lesson_number}, ensure_ascii=False)}", flush=True)
         module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
         summaries = module_summaries.setdefault(module_key, {})
         run_dir = batch_dir / safe_slug(f"{lesson_number}-{task_id}")
@@ -104,8 +111,12 @@ def run_tasks(
             module_material_summaries=summaries,
         )
         results.append(result)
+        if config.verbose:
+            print(f"[ismart-materials] cli.batch.task.done {json.dumps({'task_id': task_id, 'status': result.status, 'output_dir': result.output_dir}, ensure_ascii=False)}", flush=True)
         summaries[lesson_number] = [material_result_summary(material) for material in result.materials]
     write_batch_manifest(batch_dir, results)
+    if config.verbose:
+        print(f"[ismart-materials] cli.batch.done {json.dumps({'batch_dir': str(batch_dir)}, ensure_ascii=False)}", flush=True)
     return results
 
 
@@ -113,12 +124,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.verbose:
+            print("[ismart-materials] cli.start {}", flush=True)
         payload = load_payload_from_url(args.input_url) if args.input_url else load_payload_from_path(args.input)
+        if args.verbose:
+            source = args.input_url or args.input
+            print(f"[ismart-materials] cli.input_loaded {json.dumps({'source': source}, ensure_ascii=False)}", flush=True)
         tasks = filter_tasks(
             tasks_from_payload(payload),
             task_id=args.task_id,
             lesson_number=args.lesson_number,
         )
+        if args.verbose:
+            print(f"[ismart-materials] cli.tasks_selected {json.dumps({'count': len(tasks)}, ensure_ascii=False)}", flush=True)
         config = IsmartGenerationConfig(
             output_root=Path(args.output),
             model=args.model,
@@ -129,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             max_reference_chars=args.max_reference_chars,
             use_llm_validator=not args.no_llm_validator,
             generation_target=args.generation_target,
+            verbose=args.verbose,
         )
         results = run_tasks(tasks, config=config)
     except Exception as exc:  # noqa: BLE001 - CLI should print concise failures.

@@ -7,6 +7,7 @@ from typing import Any
 
 from .contracts import IsmartGenerationConfig, ReferenceBundle, ReferenceDocument, repo_root
 from .registry import REFERENCE_FIELDS
+from .trace import TraceLogger
 
 
 def compact_json(value: Any) -> str:
@@ -35,18 +36,21 @@ def reference_summary(bundle: ReferenceBundle) -> dict[str, list[dict[str, Any]]
 
 
 class ReferenceLoader:
-    def __init__(self, config: IsmartGenerationConfig) -> None:
+    def __init__(self, config: IsmartGenerationConfig, trace: TraceLogger | None = None) -> None:
         self.config = config
+        self.trace = trace or TraceLogger()
 
     def load(self, task: dict[str, Any]) -> ReferenceBundle:
         lesson = task.get("lesson") or {}
         materials_md = lesson.get("materials_md") or {}
         bundle: ReferenceBundle = {field: [] for field in REFERENCE_FIELDS}
         seen: set[Path] = set()
+        self.trace.log("references.load.start", fields=list(REFERENCE_FIELDS))
         for field in REFERENCE_FIELDS:
             for raw_path in materials_md.get(field) or []:
                 resolved = self._resolve_reference_path(str(raw_path), task)
                 if resolved in seen:
+                    self.trace.log("references.load.skip_duplicate", field=field, path=str(raw_path))
                     continue
                 seen.add(resolved)
                 content = resolved.read_text(encoding="utf-8")
@@ -54,16 +58,31 @@ class ReferenceLoader:
                 if self.config.max_reference_chars and len(content) > self.config.max_reference_chars:
                     content = content[: self.config.max_reference_chars]
                     truncated = True
+                sha = stable_sha(content)
                 bundle[field].append(
                     ReferenceDocument(
                         field=field,
                         path=str(raw_path),
                         resolved_path=str(resolved),
-                        sha=stable_sha(content),
+                        sha=sha,
                         truncated=truncated,
                         content=content,
                     )
                 )
+                self.trace.log(
+                    "references.load.file",
+                    field=field,
+                    path=str(raw_path),
+                    resolved_path=str(resolved),
+                    sha=sha,
+                    chars=len(content),
+                    truncated=truncated,
+                )
+        self.trace.log(
+            "references.load.done",
+            total=sum(len(items) for items in bundle.values()),
+            counts={field: len(items) for field, items in bundle.items()},
+        )
         return bundle
 
     def _resolve_reference_path(self, raw_path: str, task: dict[str, Any]) -> Path:

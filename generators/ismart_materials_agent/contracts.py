@@ -42,7 +42,10 @@ class IsmartGenerationConfig:
     max_package_repair_iterations: int = 2
     max_reference_chars: int = 0
     use_llm_validator: bool = True
+    use_validation_controller: bool = True
+    validation_controller_accept_score: float = 3.0
     generation_target: str | None = None
+    verbose: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,8 @@ class ValidationResult:
     approved: bool
     issues: list[str] = field(default_factory=list)
     fix_instructions: list[str] = field(default_factory=list)
+    issues_by_block: list[dict[str, Any]] = field(default_factory=list)
+    passed_blocks: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def ok(cls) -> "ValidationResult":
@@ -104,6 +109,8 @@ class ValidationResult:
             approved=self.approved and other.approved,
             issues=list(dict.fromkeys(issues)),
             fix_instructions=list(dict.fromkeys(fixes)),
+            issues_by_block=[*self.issues_by_block, *other.issues_by_block],
+            passed_blocks=[*self.passed_blocks, *other.passed_blocks],
         )
 
 
@@ -117,7 +124,11 @@ class MaterialResult:
     content: str
     prompt_files: tuple[str, ...]
     validation_issues: list[str] = field(default_factory=list)
+    validation_issues_by_block: list[dict[str, Any]] = field(default_factory=list)
+    validation_passed_blocks: list[dict[str, Any]] = field(default_factory=list)
     agent_notes: list[str] = field(default_factory=list)
+    controller_called: bool = False
+    controller_decision: dict[str, Any] = field(default_factory=dict)
 
     def to_public_json(self, *, include_content: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -128,8 +139,13 @@ class MaterialResult:
             "iterations": self.iterations,
             "prompt_files": list(self.prompt_files),
             "validation_issues": list(self.validation_issues),
+            "validation_issues_by_block": list(self.validation_issues_by_block),
+            "validation_passed_blocks": list(self.validation_passed_blocks),
             "agent_notes": list(self.agent_notes),
+            "controller_called": self.controller_called,
         }
+        if self.controller_decision:
+            data["controller_decision"] = self.controller_decision
         if include_content:
             data["content"] = self.content
         return data
