@@ -75,6 +75,71 @@ class AttemptArtifactStore:
             },
         )
 
+    def write_practice_generation_artifacts(
+        self,
+        *,
+        attempt: int,
+        templates: dict[str, Any] | None,
+        instances: dict[str, Any] | None,
+        duplicate_check: dict[str, Any] | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.root is None:
+            return
+        attempt_dir = self.root / "practice"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{attempt_timestamp()}__attempt_{attempt:02d}__practice"
+        common = {"attempt": attempt, "metadata": metadata or {}}
+        write_json(attempt_dir / f"{prefix}.practice_templates.json", {**common, "practice_templates": templates or {}})
+        write_json(attempt_dir / f"{prefix}.practice_instances.json", {**common, "practice_instances": instances or {}})
+        write_json(
+            attempt_dir / f"{prefix}.practice_duplicate_check.json",
+            {**common, "practice_duplicate_check": duplicate_check or {}},
+        )
+
+    def write_self_work_generation_artifacts(
+        self,
+        *,
+        attempt: int,
+        autocheck: dict[str, Any] | None,
+        structural_check: dict[str, Any] | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.root is None:
+            return
+        attempt_dir = self.root / "self-work"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{attempt_timestamp()}__attempt_{attempt:02d}__self-work"
+        common = {"attempt": attempt, "metadata": metadata or {}}
+        write_json(attempt_dir / f"{prefix}.self_work_autocheck.json", {**common, "self_work_autocheck": autocheck or {}})
+        write_json(
+            attempt_dir / f"{prefix}.self_work_autocheck_check.json",
+            {**common, "self_work_autocheck_check": structural_check or {}},
+        )
+
+    def write_intermediate_assessment_artifacts(
+        self,
+        *,
+        attempt: int,
+        artifact: dict[str, Any] | None,
+        structural_check: dict[str, Any] | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.root is None:
+            return
+        attempt_dir = self.root / "intermediate"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{attempt_timestamp()}__attempt_{attempt:02d}__intermediate"
+        common = {"attempt": attempt, "metadata": metadata or {}}
+        write_json(
+            attempt_dir / f"{prefix}.intermediate_assessment.json",
+            {**common, "intermediate_assessment": artifact or {}},
+        )
+        write_json(
+            attempt_dir / f"{prefix}.intermediate_assessment_check.json",
+            {**common, "intermediate_assessment_check": structural_check or {}},
+        )
+
     def write_material_controller_review(
         self,
         *,

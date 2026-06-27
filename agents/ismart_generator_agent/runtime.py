@@ -293,7 +293,15 @@ class IsmartGeneratorRuntime:
         return "approved"
 
     def _agents_called(self, materials: list[MaterialResult], *, package_validator_called: bool) -> list[str]:
-        agents = [item.agent_type for item in materials]
+        agents: list[str] = []
+        for item in materials:
+            if item.kind == "practice" and item.generation_artifacts:
+                agents.extend(["PracticeTaskTemplateAgent", "PracticeTaskVariantAgent"])
+            if item.kind == "self_work" and item.generation_artifacts:
+                agents.append("SelfWorkAutocheckAgent")
+            if item.kind == "intermediate" and item.generation_artifacts:
+                agents.append("IntermediateAssessmentArtifactAgent")
+            agents.append(item.agent_type)
         if self.config.use_llm_validator and materials:
             agents.append("MaterialValidatorAgent")
         if any(item.controller_called for item in materials):

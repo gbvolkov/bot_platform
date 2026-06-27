@@ -127,6 +127,7 @@ class MaterialResult:
     agent_notes: list[str] = field(default_factory=list)
     controller_called: bool = False
     controller_decision: dict[str, Any] = field(default_factory=dict)
+    generation_artifacts: dict[str, Any] = field(default_factory=dict)
 
     def to_public_json(self, *, include_content: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -144,6 +145,8 @@ class MaterialResult:
         }
         if self.controller_decision:
             data["controller_decision"] = self.controller_decision
+        if self.generation_artifacts:
+            data["generation_artifacts"] = self.generation_artifacts
         if include_content:
             data["content"] = self.content
         return data
@@ -179,4 +182,3 @@ class IsmartGenerationResult:
             },
             "references": self.reference_summary,
         }
-

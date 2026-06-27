@@ -9,8 +9,12 @@ from pydantic import BaseModel
 
 from .schemas import (
     GeneratedMaterial,
+    IntermediateAssessmentArtifact,
     MaterialValidationDecision,
     PackageValidationDecision,
+    PracticeTaskInstanceSet,
+    PracticeTaskTemplateSet,
+    SelfWorkAutocheckSet,
     ValidationControllerDecision,
 )
 
@@ -32,7 +36,26 @@ VALIDATION_AGENT_TYPES: tuple[str, ...] = (
     "PackageValidatorAgent",
 )
 
-ALL_SUBAGENT_TYPES: tuple[str, ...] = (*CONTENT_AGENT_TYPES, *VALIDATION_AGENT_TYPES)
+PRACTICE_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
+    "PracticeTaskTemplateAgent",
+    "PracticeTaskVariantAgent",
+)
+
+SELF_WORK_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
+    "SelfWorkAutocheckAgent",
+)
+
+INTERMEDIATE_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
+    "IntermediateAssessmentArtifactAgent",
+)
+
+ALL_SUBAGENT_TYPES: tuple[str, ...] = (
+    *CONTENT_AGENT_TYPES,
+    *PRACTICE_PIPELINE_AGENT_TYPES,
+    *SELF_WORK_PIPELINE_AGENT_TYPES,
+    *INTERMEDIATE_PIPELINE_AGENT_TYPES,
+    *VALIDATION_AGENT_TYPES,
+)
 
 
 class StructuredSubagentState(TypedDict, total=False):
@@ -47,7 +70,10 @@ def _build_structured_subagent(
     model: BaseChatModel,
     schema: type[BaseModel],
 ):
-    structured_model = model.with_structured_output(schema)
+    try:
+        structured_model = model.with_structured_output(schema, method="function_calling")
+    except TypeError:
+        structured_model = model.with_structured_output(schema)
 
     def invoke_model(state: StructuredSubagentState) -> dict[str, Any]:
         messages = []
@@ -74,6 +100,27 @@ def build_subagent_registry(model: BaseChatModel) -> Mapping[str, Any]:
             model=model,
             schema=GeneratedMaterial,
         )
+
+    registry["PracticeTaskTemplateAgent"] = _build_structured_subagent(
+        name="PracticeTaskTemplateAgent",
+        model=model,
+        schema=PracticeTaskTemplateSet,
+    )
+    registry["PracticeTaskVariantAgent"] = _build_structured_subagent(
+        name="PracticeTaskVariantAgent",
+        model=model,
+        schema=PracticeTaskInstanceSet,
+    )
+    registry["SelfWorkAutocheckAgent"] = _build_structured_subagent(
+        name="SelfWorkAutocheckAgent",
+        model=model,
+        schema=SelfWorkAutocheckSet,
+    )
+    registry["IntermediateAssessmentArtifactAgent"] = _build_structured_subagent(
+        name="IntermediateAssessmentArtifactAgent",
+        model=model,
+        schema=IntermediateAssessmentArtifact,
+    )
 
     registry["MaterialValidatorAgent"] = _build_structured_subagent(
         name="MaterialValidatorAgent",

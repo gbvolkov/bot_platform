@@ -66,17 +66,28 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         reference_fields=("requirements", "reference_examples", "goals_and_tasks", "donor_materials"),
         json_field_labels=("course", "module", "lesson.practice_tasks", "lesson.difficulty", "lesson.content", "lesson.hours.practice"),
         prompt_addendum=(
-            "Создай ученическую практику строго по SOURCE CONTRACT FROM JSON. Используй ровно те задания, "
-            "которые перечислены в lesson.practice_tasks/source_contract.tasks, в том же порядке и с теми же P id. "
-            "Для каждого задания явно покажи уровень L1/L2/L3, исходное условие из JSON, условие для ученика, входные данные, "
-            "требование к выводу и тесты. Не придумывай конкретные значения, имена переменных, входные данные, ожидаемый вывод "
-            "или общий запрет на input(), если этого нет в JSON или Markdown references. Ожидаемый вывод не считается "
-            "придуманным, если он детерминированно следует из явных литералов, присваиваний и точных команд print(...) "
-            "в исходном условии по стандартной семантике Python. Если исходное условие не задаёт "
+            "Создай ученическую практику строго из GENERATION ARTIFACTS FOR THIS MATERIAL.practice_instances. "
+            "lesson.practice_tasks/source_contract.tasks задают авторитетный P id, уровень, тип и паттерн задания; "
+            "конкретная ученическая формулировка, сценарий, значения, имена переменных, входы/выходы и код берутся "
+            "из PracticeTaskInstanceSet и должны быть новым вариантом, а не копией теории или reference_examples. "
+            "Используй ровно те P id, которые перечислены в source_contract.tasks, в том же порядке. "
+            "Для каждого задания явно покажи поля «Уровень», «Условие», «Код в редакторе» при наличии starter_code, "
+            "«Входные данные», «Требование к выводу», «Как проверить» и «Тесты». Не показывай source_text, "
+            "«исходный паттерн из JSON», внутренний source contract, generation artifacts или любые ссылки на JSON/pipeline. "
+            "Не добавляй в learner-facing текст собственные подсказки о том, "
+            "какую именно правку нужно сделать: не пиши «добавить кавычку», «заменить X на Y», «неверно написано имя функции» "
+            "и аналогичные подсказки-ключи, если они находятся только в hidden_solution/teacher_explanation или source hint. "
+            "Не показывай hidden_solution, teacher_explanation, corrected code, ответы или ключи. Если task instance не задаёт "
             "достаточно данных для точного stdout-теста, явно напиши, что эталон автопроверки требует уточнения источника, "
             "и не подставляй вымышленные значения; при этом сохрани для такого задания поля «Как проверить» и «Тесты» "
             "со статусом «не заданы/не применимы до уточнения». Для такого задания не делай таблицу или строку "
-            "«вход → ожидаемый вывод» и не ставь заглушки в колонку ожидаемого вывода. Исправленный код, ответы и ключи не показывай."
+            "«вход → ожидаемый вывод» и не ставь заглушки в колонку ожидаемого вывода. Если runtime_tests заданы, выводи их как "
+            "точные пары stdin→stdout: поле input как stdin, поле expected_output как stdout. Поле tests является legacy alias "
+            "для runtime_tests. Если manual_checks заданы, покажи их отдельным learner-facing чек-листом ручной/статической "
+            "проверки; для задач на рефакторинг такой чек-лист обязателен для требований, которые stdout не доказывает "
+            "(имена переменных, комментарии, устранение повторов, именованные константы). В HTML не печатай символы "
+            "backslash+n как текст; если expected_output заканчивается \\n, покажи содержимое stdout в <pre><code> с реальным "
+            "переводом строки перед </code></pre>, а рядом можно текстом указать «stdout завершается переводом строки»."
         ),
     ),
     "mr_theory": MaterialSpec(
@@ -110,6 +121,8 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         prompt_addendum=(
             "Создай МР-практику для учителя. Включи раздел «Ключи и пояснения» только к задачам из "
             "SOURCE CONTRACT FROM JSON.authoritative_task_ids, в том же порядке и с теми же P id. "
+            "Если dependency practice содержит generation_artifacts.practice_instances, используй эти instances, "
+            "их tests, hidden_solution и teacher_explanation как источник правды; не реконструируй задачи заново. "
             "Не добавляй задачи, которых нет в authoritative_task_ids, даже если валидатор или reference_examples "
             "упоминают другие номера. "
             "Для детерминированных задач дай минимальный эталонный Python-код и ожидаемый вывод или "
@@ -133,7 +146,16 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "Создай самостоятельную работу. Содержательно покрой тему, цели и задачи, порядок выполнения, "
             "самоконтроль, требования к результату и источники. Названия разделов выбирай по смыслу "
             "и по reference_examples. Раздел краткой теории запрещён. "
-            "Нужны ровно 8 практических задач и ровно 10 вопросов самоконтроля с ключами для автопроверки."
+            "В разделе источников не показывай внутренние пути, имена Markdown-файлов, docs/ismart, "
+            "референсы, рабочую область агента или любые локаторы исходных материалов. Если источник нужен, "
+            "пиши нейтрально: «материалы курса», «учебные требования курса», «содержание занятия». "
+            "Нужны ровно 8 практических задач и ровно 10 вопросов самоконтроля. Не показывай ученику ключи, "
+            "правильные варианты, готовые ответы, блоки «Ключ для автопроверки», {%answer%} и заполненные "
+            "{{input-text:...}} с ответами. Если автопроверке нужны ключи, считай их внутренним слоем платформы, "
+            "не отображаемым в HTML. Рендери ученический HTML на основе GENERATION ARTIFACTS FOR THIS MATERIAL.self_work_autocheck: "
+            "используй student_task_title, checked_skill, student_prompt, options и template_code как источник состава заданий, "
+            "но не показывай correct_answer, correct_answers, runtime_tests, autocheck_config или internal_explanation. "
+            "Не пиши, что ключи отсутствуют; они находятся во внутреннем artifact-слое и доступны валидатору/QA."
         ),
     ),
     "current_control": MaterialSpec(
@@ -159,7 +181,12 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         json_field_labels=("course", "module.lessons", "module.hours/l1/l2/totals", "attestation lesson"),
         prompt_addendum=(
             "Создай промежуточную аттестацию уровня модуля: 4 комплекта. В каждом комплекте "
-            "16 закрытых заданий, 4 открытых задания и 3 практико-ориентированные задачи на код."
+            "16 закрытых заданий, 4 открытых задания и 3 практико-ориентированные задачи на код. "
+            "Рендери ученический HTML на основе GENERATION ARTIFACTS FOR THIS MATERIAL.intermediate_assessment: "
+            "используй visible поля student_prompt, options, student_condition, starter_code, input_requirements "
+            "и output_requirements. Не показывай correct_answers, reference_answer, rubric с эталонами, "
+            "hidden_solution, teacher_explanation, internal_explanation или autocheck_config. "
+            "Ключи, эталоны, рубрики и тесты должны оставаться во внутреннем artifact-слое для валидатора/QA."
         ),
     ),
     "mr_intermediate": MaterialSpec(
@@ -171,7 +198,16 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         dependency_kinds=("intermediate",),
         reference_fields=("requirements", "template_descriptions", "goals_and_tasks"),
         json_field_labels=("module", "attestation lesson"),
-        prompt_addendum="Создай методические указания к готовой промежуточной аттестации.",
+        prompt_addendum=(
+            "Создай методические указания к готовой промежуточной аттестации. Если dependency intermediate "
+            "содержит generation_artifacts.intermediate_assessment, используй этот artifact как источник ключей, "
+            "эталонов, рубрик, тестов и решений; не реконструируй комплекты заново. "
+            "HTML МР должен быть publishable методическим документом: цель/задачи, подготовка, сценарий 45+45 минут, "
+            "общая методика проверки закрытых, открытых и кодовых заданий, шкала оценивания, типичные ошибки и реакция учителя. "
+            "Не печатай полный банк ключей V1–V4, эталонные ответы по каждому открытому вопросу, эталонный код, "
+            "stdin/stdout тесты, hidden solutions или autocheck_config. Разрешено указать, что конкретные ключи/эталоны/тесты "
+            "используются из внутреннего QA/artifact-слоя intermediate_assessment и не выдаются ученикам."
+        ),
     ),
     "specification_qa": MaterialSpec(
         kind="specification_qa",
@@ -179,12 +215,36 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         agent_type="SpecificationQAAgent",
         prompt_files=_files(),
         validator_kind="qa",
+        dependency_kinds=(
+            "theory",
+            "practice",
+            "mr_theory",
+            "mr_practice",
+            "self_work",
+            "current_control",
+            "intermediate",
+            "mr_intermediate",
+            "final_project",
+        ),
         reference_fields=REFERENCE_FIELDS,
         json_field_labels=("full task JSON", "all MaterialResult", "validation reports"),
         prompt_addendum=(
             "Создай Спецификацию+QA. Содержательно покрой паспорт, источники, ключи и тесты, "
             "faulty code и патчи, критерии QA, рубрику и результат валидации. "
-            "QA-ID и SHA разрешены только здесь."
+            "QA-ID и SHA разрешены только здесь. Для практических задач используй SOURCE CONTRACT FROM JSON: "
+            "не добавляй задачи вне authoritative_task_ids и не выдумывай конкретные значения, имена переменных, "
+            "stdin/stdout или обязательный формат вывода, если их нет в source_text или approved dependencies. "
+            "Если dependency practice содержит generation_artifacts.practice_instances, используй эти instances, "
+            "их tests, hidden_solution и teacher_explanation как источник правды для QA; не реконструируй "
+            "практические задания заново. "
+            "Если dependency self_work содержит generation_artifacts.self_work_autocheck, используй этот artifact "
+            "как источник внутренних ключей, correct_answers, runtime_tests и autocheck_config для самостоятельной работы; "
+            "не требуй, чтобы эти ключи были показаны в ученическом HTML. "
+            "Если dependency intermediate содержит generation_artifacts.intermediate_assessment, используй этот artifact "
+            "как источник ключей, эталонов, rubrics, runtime_tests, hidden_solution и autocheck_config для промежуточной аттестации; "
+            "не требуй, чтобы эти ключи были показаны в ученическом HTML. "
+            "Если задача недоопределена для детерминированной автопроверки, явно пометь её как требующую "
+            "уточнения источника или ручной проверки; не превращай пример в обязательный ключ/тест."
         ),
     ),
     "final_project": MaterialSpec(
