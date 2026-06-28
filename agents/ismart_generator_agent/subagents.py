@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from .schemas import (
+    CurrentControlAutocheckSet,
     GeneratedMaterial,
     IntermediateAssessmentArtifact,
     MaterialValidationDecision,
@@ -45,6 +46,10 @@ SELF_WORK_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
     "SelfWorkAutocheckAgent",
 )
 
+CURRENT_CONTROL_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
+    "CurrentControlAutocheckAgent",
+)
+
 INTERMEDIATE_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
     "IntermediateAssessmentArtifactAgent",
 )
@@ -53,6 +58,7 @@ ALL_SUBAGENT_TYPES: tuple[str, ...] = (
     *CONTENT_AGENT_TYPES,
     *PRACTICE_PIPELINE_AGENT_TYPES,
     *SELF_WORK_PIPELINE_AGENT_TYPES,
+    *CURRENT_CONTROL_PIPELINE_AGENT_TYPES,
     *INTERMEDIATE_PIPELINE_AGENT_TYPES,
     *VALIDATION_AGENT_TYPES,
 )
@@ -115,6 +121,11 @@ def build_subagent_registry(model: BaseChatModel) -> Mapping[str, Any]:
         name="SelfWorkAutocheckAgent",
         model=model,
         schema=SelfWorkAutocheckSet,
+    )
+    registry["CurrentControlAutocheckAgent"] = _build_structured_subagent(
+        name="CurrentControlAutocheckAgent",
+        model=model,
+        schema=CurrentControlAutocheckSet,
     )
     registry["IntermediateAssessmentArtifactAgent"] = _build_structured_subagent(
         name="IntermediateAssessmentArtifactAgent",

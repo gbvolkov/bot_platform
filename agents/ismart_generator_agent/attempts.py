@@ -81,7 +81,6 @@ class AttemptArtifactStore:
         attempt: int,
         templates: dict[str, Any] | None,
         instances: dict[str, Any] | None,
-        duplicate_check: dict[str, Any] | None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         if self.root is None:
@@ -92,10 +91,6 @@ class AttemptArtifactStore:
         common = {"attempt": attempt, "metadata": metadata or {}}
         write_json(attempt_dir / f"{prefix}.practice_templates.json", {**common, "practice_templates": templates or {}})
         write_json(attempt_dir / f"{prefix}.practice_instances.json", {**common, "practice_instances": instances or {}})
-        write_json(
-            attempt_dir / f"{prefix}.practice_duplicate_check.json",
-            {**common, "practice_duplicate_check": duplicate_check or {}},
-        )
 
     def write_self_work_generation_artifacts(
         self,
@@ -115,6 +110,29 @@ class AttemptArtifactStore:
         write_json(
             attempt_dir / f"{prefix}.self_work_autocheck_check.json",
             {**common, "self_work_autocheck_check": structural_check or {}},
+        )
+
+    def write_current_control_generation_artifacts(
+        self,
+        *,
+        attempt: int,
+        autocheck: dict[str, Any] | None,
+        structural_check: dict[str, Any] | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if self.root is None:
+            return
+        attempt_dir = self.root / "current-control"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{attempt_timestamp()}__attempt_{attempt:02d}__current-control"
+        common = {"attempt": attempt, "metadata": metadata or {}}
+        write_json(
+            attempt_dir / f"{prefix}.current_control_autocheck.json",
+            {**common, "current_control_autocheck": autocheck or {}},
+        )
+        write_json(
+            attempt_dir / f"{prefix}.current_control_autocheck_check.json",
+            {**common, "current_control_autocheck_check": structural_check or {}},
         )
 
     def write_intermediate_assessment_artifacts(

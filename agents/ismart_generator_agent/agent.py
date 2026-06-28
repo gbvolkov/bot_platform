@@ -39,6 +39,7 @@ def initialize_agent(
     locale: str = "ru",
     checkpoint_saver=None,
     *,
+    model_mode: str = "base",
     streaming: bool = True,
     **_kwargs: Any,
 ):
@@ -53,7 +54,7 @@ def initialize_agent(
         callback_handlers += [CallbackHandler()]
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model="base", provider=provider.value, temperature=0.2, streaming=streaming)
+    llm = get_llm(model=model_mode, provider=provider.value, temperature=0.2, streaming=streaming)
     subagents = build_subagent_registry(llm)
 
     builder = StateGraph(IsmartGeneratorAgentState)

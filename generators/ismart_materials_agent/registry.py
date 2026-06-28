@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .contracts import MaterialSpec
 
 
@@ -49,7 +51,10 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         prompt_addendum=(
             "Создай ученический материал теории. Содержательно покрой цель занятия, задачи, "
             "ключевые понятия, объяснение темы, примеры для разбора, типичные ошибки, "
-            "самопроверку и итоговые выводы. Названия разделов выбирай по смыслу и по "
+            "важные моменты, итоговые выводы и мостик к практике. Не добавляй learner-facing "
+            "самопроверку, вопросы для обсуждения, предсказание вывода или задания ученику. "
+            "Все примеры должны быть полностью разобранными демонстрациями, а не упражнениями. "
+            "Названия разделов выбирай по смыслу и по "
             "reference_examples. Не добавляй ключи практики, QA-ID или SHA. Если в JSON есть "
             "lesson.practice_tasks, используй их только как границы темы: не превращай их в "
             "готовые решённые примеры с полным кодом и выводом. Для демонстраций бери другие "
@@ -66,13 +71,12 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         reference_fields=("requirements", "reference_examples", "goals_and_tasks", "donor_materials"),
         json_field_labels=("course", "module", "lesson.practice_tasks", "lesson.difficulty", "lesson.content", "lesson.hours.practice"),
         prompt_addendum=(
-            "Создай ученическую практику строго по SOURCE CONTRACT FROM JSON. Используй ровно те задания, "
-            "которые перечислены в lesson.practice_tasks/source_contract.tasks, в том же порядке и с теми же P id. "
-            "Для каждого задания явно покажи уровень L1/L2/L3, исходное условие из JSON, условие для ученика, входные данные, "
-            "требование к выводу и тесты. Не придумывай конкретные значения, имена переменных, входные данные, ожидаемый вывод "
-            "или общий запрет на input(), если этого нет в JSON или Markdown references. Ожидаемый вывод не считается "
-            "придуманным, если он детерминированно следует из явных литералов, присваиваний и точных команд print(...) "
-            "в исходном условии по стандартной семантике Python. Если исходное условие не задаёт "
+            "Создай ученическую практику строго по SOURCE CONTRACT FROM JSON. lesson.practice_tasks/source_contract.tasks "
+            "задают авторитетный P id, уровень, тип и паттерн задания, но не обязательно финальный текст. "
+            "Для каждого задания явно покажи уровень L1/L2/L3, условие для ученика, входные данные, "
+            "требование к выводу и тесты. Не показывай source_text/source contract/JSON wording. Конкретный сценарий, "
+            "значения, имена переменных, входы/выходы и код должны быть новым вариантом того же паттерна. "
+            "Если deterministic runtime tests source-supported, дай минимум 3 пары stdin→stdout. Если исходное условие не задаёт "
             "достаточно данных для точного stdout-теста, явно напиши, что эталон автопроверки требует уточнения источника, "
             "и не подставляй вымышленные значения; при этом сохрани для такого задания поля «Как проверить» и «Тесты» "
             "со статусом «не заданы/не применимы до уточнения». Для такого задания не делай таблицу или строку "
@@ -122,7 +126,8 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "Создай самостоятельную работу. Содержательно покрой тему, цели и задачи, порядок выполнения, "
             "самоконтроль, требования к результату и источники. Названия разделов выбирай по смыслу "
             "и по reference_examples. Раздел краткой теории запрещён. "
-            "Нужны ровно 8 практических задач и ровно 10 вопросов самоконтроля с ключами для автопроверки."
+            "Нужны ровно 8 практических задач и ровно 10 вопросов самоконтроля. Ключи и настройки "
+            "автопроверки должны быть internal/QA data, а не видимыми learner-facing ответами."
         ),
     ),
     "current_control": MaterialSpec(
@@ -134,8 +139,12 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         reference_fields=("template_descriptions", "requirements", "reference_examples"),
         json_field_labels=("lesson.content", "lesson.difficulty", "lesson.hours.raw"),
         prompt_addendum=(
-            "Создай отдельный текущий контроль: ровно 3 вопроса, разные шаблоны из template_descriptions. "
-            "Внутри файла должны быть ключи для автопроверки. Не добавляй QA-ID/SHA."
+            "Render a separate learner-facing current_control material from "
+            "GENERATION ARTIFACTS FOR THIS MATERIAL.current_control_autocheck when that artifact is available. "
+            "Use exactly the 3 structured questions from the artifact, preserve their ids/order, "
+            "and show only student_prompt, options, template/question type, and answer-format guidance. "
+            "Do not show correct_answers, answer flags, autocheck_config, internal_explanation, QA-ID, SHA, "
+            "or any source/service locator. Internal keys for autocheck remain only in the generation artifact."
         ),
     ),
     "intermediate": MaterialSpec(
@@ -147,8 +156,9 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         reference_fields=("requirements", "template_descriptions", "goals_and_tasks"),
         json_field_labels=("course", "module.lessons", "module.hours/l1/l2/totals", "attestation lesson"),
         prompt_addendum=(
-            "Создай промежуточную аттестацию уровня модуля: 4 комплекта. В каждом комплекте "
-            "16 закрытых заданий, 4 открытых задания и 3 практико-ориентированные задачи на код."
+            "Создай промежуточную аттестацию уровня модуля по v34: 4 комплекта. В каждом комплекте "
+            "5 тестовых вопросов, 5 открытых-код вопросов и 5 практико-ориентированных задач на код. "
+            "Открытые-код вопросы засчитываются только если ученик пишет исполняемый код с проверяемым результатом."
         ),
     ),
     "mr_intermediate": MaterialSpec(
@@ -190,6 +200,19 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         ),
     ),
 }
+
+
+MATERIAL_SPEC_REGISTRY["current_control"] = replace(
+    MATERIAL_SPEC_REGISTRY["current_control"],
+    prompt_addendum=(
+        "Render a separate learner-facing current_control material from "
+        "GENERATION ARTIFACTS FOR THIS MATERIAL.current_control_autocheck when that artifact is available. "
+        "Use exactly the 3 structured questions from the artifact, preserve their ids/order, "
+        "and show only student_prompt, options, template/question type, and answer-format guidance. "
+        "Do not show correct_answers, answer flags, autocheck_config, internal_explanation, QA-ID, SHA, "
+        "or any source/service locator. Internal keys for autocheck remain only in the generation artifact."
+    ),
+)
 
 
 def get_material_spec(kind: str) -> MaterialSpec:

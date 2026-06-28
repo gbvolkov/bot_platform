@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-package-repair-iterations", type=int, default=2)
     parser.add_argument("--max-reference-chars", type=int, default=0)
     parser.add_argument("--provider", default=ModelType.GPT.value, help="Model provider value or enum name.")
+    parser.add_argument("--model-mode", choices=("base", "mini", "nano"), default="base")
     parser.add_argument("--verbose", action="store_true", help="Print deterministic generation trace to stdout.")
     return parser
 
@@ -34,7 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         provider = _parse_provider(args.provider)
-        graph = initialize_agent(provider=provider, use_platform_store=False, streaming=False)
+        graph = initialize_agent(
+            provider=provider,
+            use_platform_store=False,
+            streaming=False,
+            model_mode=args.model_mode,
+        )
         configurable = _build_configurable(args)
         state = graph.invoke(
             {"messages": [HumanMessage(content="Run iSMART material generation from CLI.")]},

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import html
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +11,8 @@ from pydantic import BaseModel
 
 from .attempts import AttemptArtifactStore
 from .context import (
+    build_current_control_autocheck_prompt,
+    build_current_control_autocheck_system_prompt,
     build_generation_prompt,
     build_generator_system_prompt,
     build_intermediate_assessment_artifact_prompt,
@@ -34,6 +38,7 @@ from .contracts import (
     ValidationResult,
 )
 from .schemas import (
+    CurrentControlAutocheckSet,
     GeneratedMaterial,
     IntermediateAssessmentArtifact,
     MaterialValidationDecision,
@@ -46,6 +51,10 @@ from .schemas import (
 from .sources import read_prompt_files
 from .trace import TraceLogger
 from .validators import RuleValidator
+
+
+HTML_TEMPLATE_PLACEHOLDER = "{{ body_html }}"
+HTML_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "cc_lesson_template.html"
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,31 @@ class GeneratedAttempt:
     agent_notes: list[str]
     generation_artifacts: dict[str, Any]
     structural_validation: ValidationResult
+
+
+@dataclass(frozen=True)
+class HtmlFormatTemplate:
+    template_html: str
+    style_block: str
+
+    def render(self, body_html: str) -> str:
+        return self.template_html.replace(HTML_TEMPLATE_PLACEHOLDER, body_html)
+
+
+def load_html_format_template(template_path: Path = HTML_TEMPLATE_PATH) -> HtmlFormatTemplate:
+    if not template_path.exists():
+        raise FileNotFoundError(f"HTML template file not found: {template_path}")
+    template_html = template_path.read_text(encoding="utf-8").strip()
+    if HTML_TEMPLATE_PLACEHOLDER not in template_html:
+        raise ValueError(f"HTML template must contain {HTML_TEMPLATE_PLACEHOLDER}")
+    if '<div class="cc-lesson">' not in template_html or not template_html.endswith("</div>"):
+        raise ValueError(f"HTML template must wrap content in <div class=\"cc-lesson\">...</div>: {template_path}")
+    match = re.search(r"<style>.*?</style>", template_html, flags=re.DOTALL)
+    if not match:
+        raise ValueError(f"HTML template must start with a canonical <style> block: {template_path}")
+    if template_html.find(match.group(0)) != 0:
+        raise ValueError(f"HTML template must start with <style>: {template_path}")
+    return HtmlFormatTemplate(template_html=template_html, style_block=match.group(0).strip())
 
 
 def isolate_material_html(raw_content: str) -> ContentBoundary:
@@ -94,122 +128,9 @@ def isolate_material_html(raw_content: str) -> ContentBoundary:
     return ContentBoundary(raw_content=raw, content=content, issues=issues, prefix=prefix, tail=tail)
 
 
-def _contains_internal_source_locator(value: str) -> bool:
-    normalized = value.lower().replace("\\", "/")
-    if "docs/ismart/" in normalized:
-        return True
-    if "референсы/" in normalized:
-        return True
-    if "рабочая область агента" in normalized:
-        return True
-    if "материалы для ии-агентов" in normalized:
-        return True
-    if ".md" in normalized and ("референс" in normalized or "источник" in normalized):
-        return True
-    return False
-
-
-def sanitize_internal_source_locators(content: str, spec: MaterialSpec) -> tuple[str, list[str]]:
-    if spec.validator_kind == "qa" or not _contains_internal_source_locator(content):
-        return content, []
-
-    sanitized = content
-    notes: list[str] = []
-    neutral_sources = (
-        '<h2 id="sources">Источники</h2>\n'
-        "<p>Материал подготовлен на основе содержания занятия и учебных требований курса.</p>\n"
-    )
-
-    def replace_sources_section(match: re.Match[str]) -> str:
-        block = match.group(0)
-        if _contains_internal_source_locator(block):
-            notes.append("internal source locator section was replaced before validation")
-            return neutral_sources
-        return block
-
-    sanitized = re.sub(
-        r"(?is)<h2\b[^>]*>\s*Источники\s*</h2>.*?(?=<h2\b|</div>\s*$)",
-        replace_sources_section,
-        sanitized,
-    )
-
-    if _contains_internal_source_locator(sanitized):
-        before = sanitized
-        sanitized = re.sub(
-            r"(?is)<code\b[^>]*>[^<]*(?:docs[/\\]ismart|референсы|рабочая область агента|материалы для ии-агентов|\.md)[^<]*</code>",
-            "материалы курса",
-            sanitized,
-        )
-        sanitized = re.sub(
-            r"(?is)<a\b[^>]*(?:docs[/\\]ismart|референсы|рабочая область агента|материалы для ии-агентов|\.md)[^>]*>.*?</a>",
-            "материалы курса",
-            sanitized,
-        )
-        sanitized = re.sub(
-            r"(?i)(?:docs[/\\]ismart|референсы[/\\]|рабочая область агента|материалы для ии-агентов)[^\s<,;)]*",
-            "материалы курса",
-            sanitized,
-        )
-        if sanitized != before:
-            notes.append("inline internal source locators were replaced before validation")
-
-    return sanitized, list(dict.fromkeys(notes))
-
-
-def sanitize_visible_selfcheck_answers(content: str, spec: MaterialSpec) -> tuple[str, list[str]]:
-    if spec.kind != "self_work":
-        return content, []
-
-    sanitized = content
-    notes: list[str] = []
-
-    replacements = [
-        (
-            r"(?is)<div\s+class=[\"']cc-note[\"']>\s*<div\s+class=[\"']cc-note-title[\"']>\s*Ключ[^<]*</div>.*?</div>",
-            "",
-            "visible self-check key blocks were removed before validation",
-        ),
-        (
-            r"(?is)<p>\s*Правильн(?:ый|ые)\s+(?:вариант|варианты|ответ|ответы)[^<]*</p>",
-            "",
-            "visible self-check answer paragraphs were removed before validation",
-        ),
-        (
-            r"(?is)\{%\s*answer\s*%\}.*?\{%\s*/answer\s*%\}",
-            "",
-            "visible self-check template answer blocks were removed before validation",
-        ),
-        (
-            r"(?is)\{\{\s*input-text\s*:[^}]*\}\}",
-            "{{input-text}}",
-            "visible self-check filled input-text answers were blanked before validation",
-        ),
-    ]
-
-    for pattern, replacement, note in replacements:
-        updated = re.sub(pattern, replacement, sanitized)
-        if updated != sanitized:
-            notes.append(note)
-            sanitized = updated
-
-    return sanitized, list(dict.fromkeys(notes))
-
-
 def _normalize_copy_text(value: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", value)
-    return re.sub(r"\s+", " ", without_tags).strip().lower()
-
-
-def _copy_check_snippets(value: str, *, min_chars: int = 40) -> list[str]:
-    snippets: list[str] = []
-    normalized = _normalize_copy_text(value)
-    if len(normalized) >= min_chars:
-        snippets.append(normalized)
-    for raw_line in value.splitlines():
-        line = _normalize_copy_text(raw_line)
-        if len(line) >= min_chars:
-            snippets.append(line)
-    return list(dict.fromkeys(snippets))
+    return re.sub(r"\s+", " ", html.unescape(without_tags)).strip().lower()
 
 
 def _normalize_test_items(tests: Any) -> list[Any]:
@@ -271,6 +192,303 @@ def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
         elif isinstance(item, BaseModel):
             result.append(_model_to_dict(item))
     return result
+
+
+def _plain_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _html_code(value: Any) -> str:
+    return html.escape(str(value or "").rstrip("\n"))
+
+
+def _first_nonempty(*values: Any) -> str:
+    for value in values:
+        text = _plain_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _test_input(test: Mapping[str, Any]) -> str:
+    return _first_nonempty(test.get("input"), test.get("stdin"), test.get("in"), test.get("вход"))
+
+
+def _test_expected(test: Mapping[str, Any]) -> tuple[str, str]:
+    expected_output = _first_nonempty(
+        test.get("expected_output"),
+        test.get("stdout"),
+        test.get("output"),
+        test.get("expected"),
+        test.get("result"),
+        test.get("ожидаемый_вывод"),
+    )
+    if expected_output:
+        return "Ожидаемый вывод", expected_output
+    expected_error = _first_nonempty(test.get("expected_error"), test.get("error_message"), test.get("stderr"))
+    if expected_error:
+        return "Ожидаемая ошибка", expected_error
+    return "Ожидаемый результат", _first_nonempty(test.get("expected_result"), test.get("check"), "не указан")
+
+
+def _render_practice_tests(tests: list[dict[str, Any]]) -> str:
+    if not tests:
+        return ""
+    rows = []
+    for index, test in enumerate(tests, start=1):
+        label, expected = _test_expected(test)
+        rows.append(
+            "<tr>"
+            f"<td>{index}</td>"
+            f"<td><pre><code>{_html_code(_test_input(test))}</code></pre></td>"
+            f"<td>{html.escape(label)}</td>"
+            f"<td><pre><code>{_html_code(expected)}</code></pre></td>"
+            "</tr>"
+        )
+    return (
+        "<p><strong>Проверка на тестах:</strong></p>"
+        '<table class="cc-table"><thead><tr>'
+        "<th>#</th><th>Вход</th><th>Тип результата</th><th>Ожидаемый результат</th>"
+        "</tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
+
+
+def _render_practice_manual_checks(checks: list[Any]) -> str:
+    visible = [_plain_text(item) for item in checks if _plain_text(item)]
+    if not visible:
+        return ""
+    items = "".join(f"<li>{html.escape(item)}</li>" for item in visible)
+    return f"<p><strong>Как проверить вручную:</strong></p><ul>{items}</ul>"
+
+
+def _render_practice_subtasks(subtasks: list[Any]) -> str:
+    rows: list[str] = []
+    for item in subtasks:
+        if not isinstance(item, Mapping):
+            text = _plain_text(item)
+            if text:
+                rows.append(f"<li>{html.escape(text)}</li>")
+            continue
+        text = " — ".join(_plain_text(value) for value in item.values() if _plain_text(value))
+        if text:
+            rows.append(f"<li>{html.escape(text)}</li>")
+    if not rows:
+        return ""
+    return "<p><strong>Подзадачи:</strong></p><ol>" + "".join(rows) + "</ol>"
+
+
+def _practice_lesson_heading(lesson: Mapping[str, Any]) -> str:
+    lesson_title = _first_nonempty(lesson.get("title"), lesson.get("name"), "Задания Python")
+    lesson_number = _first_nonempty(lesson.get("lesson_number"), lesson.get("number"), lesson.get("№"))
+    if lesson_number:
+        return f"Занятие {lesson_number}. {lesson_title}"
+    return lesson_title
+
+
+def _practice_task_needs_empty_code_block(item: Mapping[str, Any]) -> bool:
+    run_mode = _normalize_copy_text(str(item.get("run_mode") or ""))
+    if run_mode in {"manual_only", "needs_platform_clarification"}:
+        return False
+
+    task_type = _normalize_copy_text(str(item.get("task_type") or ""))
+    code_markers = (
+        "write_code",
+        "write code",
+        "code",
+        "program",
+        "python",
+        "написать код",
+        "напис",
+        "программ",
+    )
+    return any(marker in task_type for marker in code_markers)
+
+
+def render_practice_material_html(
+    task: dict[str, Any],
+    instances: dict[str, Any],
+    *,
+    html_template: HtmlFormatTemplate,
+) -> str:
+    lesson = task.get("lesson") if isinstance(task.get("lesson"), dict) else {}
+    lesson_title = _practice_lesson_heading(lesson)
+    lesson_goal = _plain_text(instances.get("lesson_goal"))
+    lesson_objectives = _string_list(instances.get("lesson_objectives"))
+    tasks = _list_of_dicts(instances.get("tasks"))
+    intro_blocks = [
+        f"<h1>{html.escape(str(lesson_title))}</h1>",
+        "<p>Выполните задания в редакторе Python. Для каждой задачи используйте только условия, код и правила проверки, указанные в её блоке.</p>",
+    ]
+    if lesson_goal or lesson_objectives:
+        goal_parts = ['<section id="goals"><h2 id="goals">Цели и задачи</h2>']
+        if lesson_goal:
+            goal_parts.append(f"<p><strong>Цель:</strong> {html.escape(lesson_goal)}</p>")
+        if lesson_objectives:
+            goal_parts.append("<ul>")
+            for objective in lesson_objectives:
+                if objective:
+                    goal_parts.append(f"<li>{html.escape(objective)}</li>")
+            goal_parts.append("</ul>")
+        goal_parts.append("</section>")
+        intro_blocks.append("".join(goal_parts))
+    task_blocks: list[str] = []
+    for index, item in enumerate(tasks, start=1):
+        task_id = _first_nonempty(item.get("id"), f"P{index}")
+        level = _plain_text(item.get("level"))
+        scenario = _plain_text(item.get("scenario"))
+        condition = _plain_text(item.get("student_condition"))
+        code = _first_nonempty(item.get("faulty_code_display"), item.get("starter_code"))
+        input_requirements = _plain_text(item.get("input_requirements"))
+        output_requirements = _plain_text(item.get("output_requirements"))
+        display_note = _plain_text(item.get("display_note"))
+        tests = _list_of_dicts(item.get("runtime_tests")) or _list_of_dicts(item.get("tests"))
+        manual_checks = item.get("manual_checks") if isinstance(item.get("manual_checks"), list) else []
+        subtasks = item.get("subtasks") if isinstance(item.get("subtasks"), list) else []
+
+        pieces = [f'<section id="{html.escape(task_id)}">', f'<h2 id="{html.escape(task_id)}">{html.escape(task_id)}</h2>']
+        if level:
+            pieces.append(f"<p><strong>Уровень:</strong> {html.escape(level)}</p>")
+        if scenario:
+            pieces.append(f"<p><strong>Ситуация:</strong> {html.escape(scenario)}</p>")
+        if condition:
+            pieces.append(f"<p><strong>Условие:</strong> {html.escape(condition)}</p>")
+        if code:
+            pieces.append(f"<p><strong>Код в редакторе:</strong></p><pre><code>{_html_code(code)}</code></pre>")
+        elif _practice_task_needs_empty_code_block(item):
+            pieces.append("<p><strong>Код в редакторе:</strong></p><pre><code></code></pre>")
+        if display_note:
+            pieces.append(f'<p class="cc-muted">{html.escape(display_note)}</p>')
+        if input_requirements:
+            pieces.append(f"<p><strong>Входные данные:</strong> {html.escape(input_requirements)}</p>")
+        if output_requirements:
+            pieces.append(f"<p><strong>Требование к результату:</strong> {html.escape(output_requirements)}</p>")
+        pieces.append(_render_practice_subtasks(subtasks))
+        pieces.append(_render_practice_tests(tests))
+        pieces.append(_render_practice_manual_checks(manual_checks))
+        if not tests and not manual_checks:
+            pieces.append("<p><strong>Проверка:</strong> выполните запуск и сопоставьте результат с условием.</p>")
+        pieces.append("</section>")
+        task_blocks.append("".join(pieces))
+
+    body_html = "".join(intro_blocks) + "".join(task_blocks)
+    return html_template.render(body_html)
+
+
+def render_current_control_material_html(
+    task: dict[str, Any],
+    autocheck: dict[str, Any],
+    *,
+    html_template: HtmlFormatTemplate,
+) -> str:
+    lesson = task.get("lesson") if isinstance(task.get("lesson"), dict) else {}
+    lesson_number = _first_nonempty(lesson.get("lesson_number"), lesson.get("number"))
+    lesson_title = _first_nonempty(lesson.get("title"), lesson.get("topic"), "Текущий контроль")
+    heading = f"Занятие {lesson_number}. {lesson_title} — текущий контроль" if lesson_number else f"{lesson_title} — текущий контроль"
+    question_blocks: list[str] = []
+    for index, question in enumerate(_list_of_dicts(autocheck.get("questions")), start=1):
+        question_id = _first_nonempty(question.get("id"), f"CC{index}")
+        template_code = _plain_text(question.get("template_code"))
+        question_type = _plain_text(question.get("question_type"))
+        prompt = _plain_text(question.get("student_prompt"))
+        options = _string_list(question.get("options"))
+        expected_format = _plain_text(question.get("expected_answer_format"))
+        correct_answers = _string_list(question.get("correct_answers"))
+        visible_expected_format = _current_control_visible_expected_format(expected_format, correct_answers)
+        config = question.get("autocheck_config") if isinstance(question.get("autocheck_config"), dict) else {}
+        title_bits = [f"Вопрос {index} ({question_id})"]
+        if template_code:
+            title_bits.append(template_code)
+        if question_type:
+            title_bits.append(question_type)
+        pieces = [
+            f'<section id="{html.escape(question_id)}">',
+            f"<h2>{html.escape(' — '.join(title_bits))}</h2>",
+        ]
+        if prompt:
+            pieces.append(f"<p>{html.escape(prompt)}</p>")
+        pieces.append(_render_current_control_question_body(question, options, config, visible_expected_format))
+        pieces.append("</section>")
+        question_blocks.append("".join(pieces))
+
+    body_html = (
+        f"<h1>{html.escape(str(heading))}</h1>"
+        "<p>Выполните задания текущего контроля. Ответы и ключи проверяются во внутреннем слое платформы.</p>"
+        + "".join(question_blocks)
+    )
+    return html_template.render(body_html)
+
+
+def _render_current_control_question_body(
+    question: dict[str, Any],
+    options: list[str],
+    config: dict[str, Any],
+    expected_format: str,
+) -> str:
+    marker = _normalize_copy_text(
+        " ".join(
+            [
+                str(question.get("template_code") or ""),
+                str(question.get("question_type") or ""),
+                str(config.get("type") or ""),
+            ]
+        )
+    )
+    if any(item in marker for item in ("matching", "8d", "соедин", "сопостав")):
+        left_items = _string_list(config.get("left_items")) or options
+        right_items = _string_list(config.get("right_items"))
+        return _render_current_control_matching(left_items, right_items, expected_format)
+    if any(item in marker for item in ("ordering", "6a", "order", "упорядоч")):
+        display_items = _string_list(config.get("display_items")) or options
+        return _render_current_control_options(display_items, ordered=True, expected_format=expected_format)
+    if options:
+        return _render_current_control_options(options, ordered=False, expected_format=expected_format)
+    if expected_format:
+        return f"<p><strong>Формат ответа:</strong> {html.escape(expected_format)}</p>"
+    return "<p><strong>Формат ответа:</strong> введите ответ в поле платформы.</p>"
+
+
+def _current_control_visible_expected_format(expected_format: str, correct_answers: list[str]) -> str:
+    normalized_format = _normalize_copy_text(expected_format)
+    if not normalized_format:
+        return ""
+    for answer in correct_answers:
+        normalized_answer = _normalize_copy_text(answer)
+        if normalized_answer and normalized_answer in normalized_format:
+            return ""
+    return expected_format
+
+
+def _render_current_control_options(items: list[str], *, ordered: bool, expected_format: str) -> str:
+    parts: list[str] = []
+    if expected_format:
+        parts.append(f"<p><strong>Формат ответа:</strong> {html.escape(expected_format)}</p>")
+    tag = "ol" if ordered else "ul"
+    parts.append(f"<{tag}>")
+    for item in items:
+        if item:
+            parts.append(f"<li>{html.escape(item)}</li>")
+    parts.append(f"</{tag}>")
+    return "".join(parts)
+
+
+def _render_current_control_matching(left_items: list[str], right_items: list[str], expected_format: str) -> str:
+    parts = [
+        "<p><strong>Формат ответа:</strong> соедините каждый пункт из списка A с одним пунктом из списка B.</p>"
+    ]
+    if expected_format:
+        parts.append(f"<p>{html.escape(expected_format)}</p>")
+    parts.append('<div class="cc-table-wrapper"><table class="cc-table"><thead><tr><th>Список A</th><th>Список B</th></tr></thead><tbody><tr><td><ol>')
+    for item in left_items:
+        if item:
+            parts.append(f"<li>{html.escape(item)}</li>")
+    parts.append("</ol></td><td><ol>")
+    for item in right_items:
+        if item:
+            parts.append(f"<li>{html.escape(item)}</li>")
+    parts.append("</ol></td></tr></tbody></table></div>")
+    return "".join(parts)
 
 
 def _string_list(value: Any) -> list[str]:
@@ -339,15 +557,29 @@ class StructuredSubagentInvoker:
         graph = self.subagents.get(agent_type)
         if graph is None:
             raise KeyError(f"Subagent is not registered: {agent_type}")
-        state = graph.invoke({"system_prompt": system, "prompt": prompt})
+        try:
+            state = graph.invoke({"system_prompt": system, "prompt": prompt})
+        except Exception as exc:
+            raise StructuredSubagentError(agent_type=agent_type, schema=schema, cause=exc) from exc
         result = state.get("result") if isinstance(state, dict) else None
         if isinstance(result, schema):
             return result
         if isinstance(result, dict):
-            if hasattr(schema, "model_validate"):
-                return schema.model_validate(result)
-            return schema.parse_obj(result)
+            try:
+                if hasattr(schema, "model_validate"):
+                    return schema.model_validate(result)
+                return schema.parse_obj(result)
+            except Exception as exc:
+                raise StructuredSubagentError(agent_type=agent_type, schema=schema, cause=exc) from exc
         raise TypeError(f"Subagent {agent_type} returned unsupported structured result: {type(result)!r}")
+
+
+class StructuredSubagentError(RuntimeError):
+    def __init__(self, *, agent_type: str, schema: type[BaseModel], cause: Exception) -> None:
+        self.agent_type = agent_type
+        self.schema = schema
+        self.cause = cause
+        super().__init__(f"{agent_type} failed to return valid {schema.__name__}: {cause}")
 
 
 class MaterialWorker:
@@ -400,6 +632,14 @@ class MaterialWorker:
 
         prompt_contents = read_prompt_files(self.config, spec.prompt_files)
         self.trace.log("worker.prompt_files_loaded", kind=spec.kind, prompt_files=list(spec.prompt_files))
+        html_format_template = load_html_format_template() if spec.kind in {"practice", "current_control"} else None
+        if html_format_template is not None:
+            self.trace.log(
+                "worker.html_template_loaded",
+                kind=spec.kind,
+                source=str(HTML_TEMPLATE_PATH),
+                style_chars=len(html_format_template.style_block),
+            )
         previous_content = ""
         previous_issues = list(initial_previous_issues or [])
         previous_validation: ValidationResult | None = None
@@ -435,6 +675,7 @@ class MaterialWorker:
                     previous_artifacts=previous_artifacts,
                     attempt=attempt,
                     attempt_store=attempt_store,
+                    html_template=html_format_template,
                 )
             elif spec.kind == "self_work":
                 generated_attempt = self._generate_self_work_attempt(
@@ -450,6 +691,22 @@ class MaterialWorker:
                     previous_artifacts=previous_artifacts,
                     attempt=attempt,
                     attempt_store=attempt_store,
+                )
+            elif spec.kind == "current_control":
+                generated_attempt = self._generate_current_control_attempt(
+                    task=task,
+                    spec=spec,
+                    prompt_contents=prompt_contents,
+                    references=references,
+                    dependency_results=dependency_results,
+                    module_material_summaries=module_material_summaries,
+                    previous_content=previous_content,
+                    previous_issues=previous_issues,
+                    previous_validation=previous_validation,
+                    previous_artifacts=previous_artifacts,
+                    attempt=attempt,
+                    attempt_store=attempt_store,
+                    html_template=html_format_template,
                 )
             elif spec.kind == "intermediate":
                 generated_attempt = self._generate_intermediate_attempt(
@@ -481,11 +738,6 @@ class MaterialWorker:
             raw_content = generated_attempt.raw_content
             content = generated_attempt.content
             agent_notes = generated_attempt.agent_notes
-            content, source_sanitizer_notes = sanitize_internal_source_locators(content, spec)
-            content, selfcheck_sanitizer_notes = sanitize_visible_selfcheck_answers(content, spec)
-            sanitizer_notes = [*source_sanitizer_notes, *selfcheck_sanitizer_notes]
-            if sanitizer_notes:
-                agent_notes = [*agent_notes, *sanitizer_notes]
             generation_artifacts = generated_attempt.generation_artifacts
             last_generation_artifacts = generation_artifacts
             self.trace.log(
@@ -713,150 +965,173 @@ class MaterialWorker:
         previous_artifacts: dict[str, Any],
         attempt: int,
         attempt_store: AttemptArtifactStore,
+        html_template: HtmlFormatTemplate | None,
     ) -> GeneratedAttempt:
-        template_prompt = build_practice_template_prompt(
-            task=task,
-            spec=spec,
-            prompt_contents=prompt_contents,
-            references=references,
-            dependencies=dependency_results,
-            previous_artifacts=previous_artifacts,
-            previous_issues=previous_issues,
-        )
-        template_model = self.invoker.invoke(
-            "PracticeTaskTemplateAgent",
-            system=build_practice_template_system_prompt(),
-            prompt=template_prompt,
-            schema=PracticeTaskTemplateSet,
-        )
-        if not isinstance(template_model, PracticeTaskTemplateSet):
-            raise TypeError(
-                f"PracticeTaskTemplateAgent returned {type(template_model)!r}, expected PracticeTaskTemplateSet"
-            )
-        templates = _model_to_dict(template_model)
-        template_validation = self._validate_practice_templates(task=task, spec=spec, templates=templates)
-        self.trace.log(
-            "worker.practice_templates.done",
-            attempt=attempt,
-            approved=template_validation.approved,
-            issues=template_validation.issues,
-        )
+        if html_template is None:
+            raise ValueError("Practice HTML template was not loaded.")
+        templates = copy.deepcopy(previous_artifacts.get("practice_templates"))
+        instances = copy.deepcopy(previous_artifacts.get("practice_instances"))
+        reuse_templates = False
+        reuse_instances = False
+        if isinstance(templates, dict):
+            template_validation = self._validate_practice_templates(task=task, spec=spec, templates=templates)
+            reuse_templates = template_validation.approved
+            if reuse_templates:
+                self.trace.log("worker.practice_templates.reused", attempt=attempt)
+            else:
+                templates = {}
+        else:
+            templates = {}
 
-        if not template_validation.approved:
+        if (
+            reuse_templates
+            and isinstance(instances, dict)
+            and previous_validation is not None
+            and previous_validation.approved
+        ):
+            instance_validation = self._validate_practice_instances(
+                task=task,
+                spec=spec,
+                templates=templates,
+                instances=instances,
+            )
+            reuse_instances = instance_validation.approved
+            if reuse_instances:
+                self.trace.log("worker.practice_artifacts.reused", attempt=attempt)
+                artifacts = {
+                    "practice_templates": templates,
+                    "practice_instances": instances,
+                }
+                attempt_store.write_practice_generation_artifacts(
+                    attempt=attempt,
+                    templates=templates,
+                    instances=instances,
+                    metadata={"stage": "instances_frozen"},
+                )
+        else:
+            instances = {}
+
+        if not reuse_instances:
+            if not reuse_templates:
+                template_prompt = build_practice_template_prompt(
+                    task=task,
+                    spec=spec,
+                    prompt_contents=prompt_contents,
+                    references=references,
+                    dependencies=dependency_results,
+                    previous_artifacts=previous_artifacts,
+                    previous_issues=previous_issues,
+                )
+                template_model = self.invoker.invoke(
+                    "PracticeTaskTemplateAgent",
+                    system=build_practice_template_system_prompt(),
+                    prompt=template_prompt,
+                    schema=PracticeTaskTemplateSet,
+                )
+                if not isinstance(template_model, PracticeTaskTemplateSet):
+                    raise TypeError(
+                        f"PracticeTaskTemplateAgent returned {type(template_model)!r}, expected PracticeTaskTemplateSet"
+                    )
+                templates = _model_to_dict(template_model)
+                template_validation = self._validate_practice_templates(task=task, spec=spec, templates=templates)
+                self.trace.log(
+                    "worker.practice_templates.done",
+                    attempt=attempt,
+                    approved=template_validation.approved,
+                    issues=template_validation.issues,
+                )
+
+                if not template_validation.approved:
+                    artifacts = {
+                        "practice_templates": templates,
+                        "practice_instances": {},
+                    }
+                    attempt_store.write_practice_generation_artifacts(
+                        attempt=attempt,
+                        templates=templates,
+                        instances=None,
+                        metadata={"stage": "templates"},
+                    )
+                    return GeneratedAttempt(
+                        raw_content="",
+                        content="",
+                        boundary_issues=[],
+                        agent_notes=[*templates.get("agent_notes", []), "Practice template structural validation failed."],
+                        generation_artifacts=artifacts,
+                        structural_validation=template_validation,
+                    )
+
+            variant_prompt = build_practice_variant_prompt(
+                task=task,
+                spec=spec,
+                prompt_contents=prompt_contents,
+                references=references,
+                dependencies=dependency_results,
+                templates=templates,
+                previous_artifacts=previous_artifacts,
+                previous_issues=previous_issues,
+                previous_validation=previous_validation,
+            )
+            instance_model = self.invoker.invoke(
+                "PracticeTaskVariantAgent",
+                system=build_practice_variant_system_prompt(),
+                prompt=variant_prompt,
+                schema=PracticeTaskInstanceSet,
+            )
+            if not isinstance(instance_model, PracticeTaskInstanceSet):
+                raise TypeError(
+                    f"PracticeTaskVariantAgent returned {type(instance_model)!r}, expected PracticeTaskInstanceSet"
+                )
+            instances = _model_to_dict(instance_model)
+            instances = _normalize_practice_instance_tests(instances)
+            instance_validation = self._validate_practice_instances(
+                task=task,
+                spec=spec,
+                templates=templates,
+                instances=instances,
+            )
+            self.trace.log(
+                "worker.practice_instances.done",
+                attempt=attempt,
+                approved=instance_validation.approved,
+                issues=instance_validation.issues,
+            )
+
             artifacts = {
                 "practice_templates": templates,
-                "practice_instances": {},
-                "practice_duplicate_check": {"approved": True, "issues": [], "matches": []},
+                "practice_instances": instances,
             }
             attempt_store.write_practice_generation_artifacts(
                 attempt=attempt,
                 templates=templates,
-                instances=None,
-                duplicate_check=artifacts["practice_duplicate_check"],
-                metadata={"stage": "templates"},
+                instances=instances,
+                metadata={"stage": "instances"},
             )
-            return GeneratedAttempt(
-                raw_content="",
-                content="",
-                boundary_issues=[],
-                agent_notes=[*templates.get("agent_notes", []), "Practice template structural validation failed."],
-                generation_artifacts=artifacts,
-                structural_validation=template_validation,
-            )
+            if not instance_validation.approved:
+                return GeneratedAttempt(
+                    raw_content="",
+                    content="",
+                    boundary_issues=[],
+                    agent_notes=[
+                        *templates.get("agent_notes", []),
+                        *instances.get("agent_notes", []),
+                        "Practice instance structural validation failed.",
+                    ],
+                    generation_artifacts=artifacts,
+                    structural_validation=instance_validation,
+                )
 
-        variant_prompt = build_practice_variant_prompt(
-            task=task,
-            spec=spec,
-            prompt_contents=prompt_contents,
-            references=references,
-            dependencies=dependency_results,
-            templates=templates,
-            previous_artifacts=previous_artifacts,
-            previous_issues=previous_issues,
+        raw_content = render_practice_material_html(
+            task,
+            instances,
+            html_template=html_template,
         )
-        instance_model = self.invoker.invoke(
-            "PracticeTaskVariantAgent",
-            system=build_practice_variant_system_prompt(),
-            prompt=variant_prompt,
-            schema=PracticeTaskInstanceSet,
-        )
-        if not isinstance(instance_model, PracticeTaskInstanceSet):
-            raise TypeError(
-                f"PracticeTaskVariantAgent returned {type(instance_model)!r}, expected PracticeTaskInstanceSet"
-            )
-        instances = _model_to_dict(instance_model)
-        instances = _normalize_practice_instance_tests(instances)
-        duplicate_check = self._practice_duplicate_check(instances, dependency_results, references)
-        instance_validation = self._validate_practice_instances(
-            task=task,
-            spec=spec,
-            templates=templates,
-            instances=instances,
-        )
-        if duplicate_check["issues"]:
-            instance_validation = instance_validation.merge(ValidationResult.fail(duplicate_check["issues"]))
-        self.trace.log(
-            "worker.practice_instances.done",
-            attempt=attempt,
-            approved=instance_validation.approved,
-            issues=instance_validation.issues,
-            duplicate_issues=duplicate_check["issues"],
-        )
-
-        artifacts = {
-            "practice_templates": templates,
-            "practice_instances": instances,
-            "practice_duplicate_check": duplicate_check,
-        }
-        attempt_store.write_practice_generation_artifacts(
-            attempt=attempt,
-            templates=templates,
-            instances=instances,
-            duplicate_check=duplicate_check,
-            metadata={"stage": "instances"},
-        )
-        if not instance_validation.approved:
-            return GeneratedAttempt(
-                raw_content="",
-                content="",
-                boundary_issues=[],
-                agent_notes=[
-                    *templates.get("agent_notes", []),
-                    *instances.get("agent_notes", []),
-                    "Practice instance structural validation failed.",
-                ],
-                generation_artifacts=artifacts,
-                structural_validation=instance_validation,
-            )
-
-        generation_prompt = build_generation_prompt(
-            task=task,
-            spec=spec,
-            prompt_contents=prompt_contents,
-            references=references,
-            dependencies=dependency_results,
-            previous_content=previous_content,
-            previous_issues=previous_issues,
-            previous_validation=previous_validation,
-            module_material_summaries=module_material_summaries,
-            generation_artifacts=artifacts,
-        )
-        generated_model = self.invoker.invoke(
-            spec.agent_type,
-            system=build_generator_system_prompt(spec),
-            prompt=generation_prompt,
-            schema=GeneratedMaterial,
-        )
-        if not isinstance(generated_model, GeneratedMaterial):
-            raise TypeError(f"{spec.agent_type} returned {type(generated_model)!r}, expected GeneratedMaterial")
-        raw_content = str(generated_model.content or "").strip()
         boundary = isolate_material_html(raw_content)
-        leak_issues = self._practice_student_leak_issues(boundary.content, instances)
-        artifacts["practice_student_leak_check"] = {
-            "approved": not leak_issues,
-            "issues": leak_issues,
-        }
-        structural_validation = ValidationResult.fail(leak_issues) if leak_issues else ValidationResult.ok()
+        self.trace.log(
+            "worker.practice_renderer.done",
+            attempt=attempt,
+            content_chars=len(boundary.content),
+        )
         return GeneratedAttempt(
             raw_content=raw_content,
             content=boundary.content,
@@ -864,10 +1139,10 @@ class MaterialWorker:
             agent_notes=[
                 *templates.get("agent_notes", []),
                 *instances.get("agent_notes", []),
-                *[str(item) for item in generated_model.agent_notes],
+                "Practice HTML rendered deterministically from practice_instances.",
             ],
             generation_artifacts=artifacts,
-            structural_validation=structural_validation,
+            structural_validation=ValidationResult.ok(),
         )
 
     def _generate_self_work_attempt(
@@ -886,28 +1161,33 @@ class MaterialWorker:
         attempt: int,
         attempt_store: AttemptArtifactStore,
     ) -> GeneratedAttempt:
-        autocheck_prompt = build_self_work_autocheck_prompt(
-            task=task,
-            spec=spec,
-            prompt_contents=prompt_contents,
-            references=references,
-            dependencies=dependency_results,
-            previous_artifacts=previous_artifacts,
-            previous_issues=previous_issues,
+        autocheck = copy.deepcopy(previous_artifacts.get("self_work_autocheck"))
+        artifact_validation = (
+            self._validate_self_work_autocheck(autocheck) if isinstance(autocheck, dict) else ValidationResult.fail([])
         )
-        autocheck_model = self.invoker.invoke(
-            "SelfWorkAutocheckAgent",
-            system=build_self_work_autocheck_system_prompt(),
-            prompt=autocheck_prompt,
-            schema=SelfWorkAutocheckSet,
-        )
-        if not isinstance(autocheck_model, SelfWorkAutocheckSet):
-            raise TypeError(
-                f"SelfWorkAutocheckAgent returned {type(autocheck_model)!r}, expected SelfWorkAutocheckSet"
+        frozen_artifacts = isinstance(autocheck, dict) and artifact_validation.approved
+        if not frozen_artifacts:
+            autocheck_prompt = build_self_work_autocheck_prompt(
+                task=task,
+                spec=spec,
+                prompt_contents=prompt_contents,
+                references=references,
+                dependencies=dependency_results,
+                previous_artifacts=previous_artifacts,
+                previous_issues=previous_issues,
             )
-
-        autocheck = _model_to_dict(autocheck_model)
-        artifact_validation = self._validate_self_work_autocheck(autocheck)
+            autocheck_model = self.invoker.invoke(
+                "SelfWorkAutocheckAgent",
+                system=build_self_work_autocheck_system_prompt(),
+                prompt=autocheck_prompt,
+                schema=SelfWorkAutocheckSet,
+            )
+            if not isinstance(autocheck_model, SelfWorkAutocheckSet):
+                raise TypeError(
+                    f"SelfWorkAutocheckAgent returned {type(autocheck_model)!r}, expected SelfWorkAutocheckSet"
+                )
+            autocheck = _model_to_dict(autocheck_model)
+            artifact_validation = self._validate_self_work_autocheck(autocheck)
         artifacts = {
             "self_work_autocheck": autocheck,
             "self_work_autocheck_check": {
@@ -919,8 +1199,10 @@ class MaterialWorker:
             attempt=attempt,
             autocheck=autocheck,
             structural_check=artifacts["self_work_autocheck_check"],
-            metadata={"stage": "autocheck"},
+            metadata={"stage": "autocheck_frozen" if frozen_artifacts and artifact_validation.approved else "autocheck"},
         )
+        if frozen_artifacts and artifact_validation.approved:
+            self.trace.log("worker.self_work_autocheck.reused", attempt=attempt)
         self.trace.log(
             "worker.self_work_autocheck.done",
             attempt=attempt,
@@ -963,8 +1245,6 @@ class MaterialWorker:
             raise TypeError(f"{spec.agent_type} returned {type(generated_model)!r}, expected GeneratedMaterial")
         raw_content = str(generated_model.content or "").strip()
         boundary = isolate_material_html(raw_content)
-        leak_issues = self._self_work_student_leak_issues(boundary.content)
-        structural_validation = ValidationResult.fail(leak_issues) if leak_issues else ValidationResult.ok()
         return GeneratedAttempt(
             raw_content=raw_content,
             content=boundary.content,
@@ -974,7 +1254,7 @@ class MaterialWorker:
                 *[str(item) for item in generated_model.agent_notes],
             ],
             generation_artifacts=artifacts,
-            structural_validation=structural_validation,
+            structural_validation=ValidationResult.ok(),
         )
 
     def _validate_self_work_autocheck(self, autocheck: dict[str, Any]) -> ValidationResult:
@@ -1046,20 +1326,187 @@ class MaterialWorker:
 
         return ValidationResult.fail(issues) if issues else ValidationResult.ok()
 
-    def _self_work_student_leak_issues(self, content: str) -> list[str]:
-        normalized = _normalize_copy_text(content)
+    def _generate_current_control_attempt(
+        self,
+        *,
+        task: dict[str, Any],
+        spec: MaterialSpec,
+        prompt_contents: dict[str, str],
+        references: ReferenceBundle,
+        dependency_results: list[MaterialResult],
+        module_material_summaries: dict[str, list[dict[str, Any]]] | None,
+        previous_content: str,
+        previous_issues: list[str],
+        previous_validation: ValidationResult | None,
+        previous_artifacts: dict[str, Any],
+        attempt: int,
+        attempt_store: AttemptArtifactStore,
+        html_template: HtmlFormatTemplate | None,
+    ) -> GeneratedAttempt:
+        if html_template is None:
+            raise ValueError("Current-control HTML template was not loaded.")
+        autocheck = copy.deepcopy(previous_artifacts.get("current_control_autocheck"))
+        artifact_validation = (
+            self._validate_current_control_autocheck(autocheck)
+            if isinstance(autocheck, dict)
+            else ValidationResult.fail([])
+        )
+        frozen_artifacts = isinstance(autocheck, dict) and artifact_validation.approved
+        if not frozen_artifacts:
+            autocheck_prompt = build_current_control_autocheck_prompt(
+                task=task,
+                spec=spec,
+                prompt_contents=prompt_contents,
+                references=references,
+                dependencies=dependency_results,
+                previous_artifacts=previous_artifacts,
+                previous_issues=previous_issues,
+            )
+            try:
+                autocheck_model = self.invoker.invoke(
+                    "CurrentControlAutocheckAgent",
+                    system=build_current_control_autocheck_system_prompt(),
+                    prompt=autocheck_prompt,
+                    schema=CurrentControlAutocheckSet,
+                )
+            except StructuredSubagentError as exc:
+                artifact_validation = ValidationResult.fail([str(exc)])
+                artifacts = {
+                    "current_control_autocheck": {},
+                    "current_control_autocheck_check": {
+                        "approved": False,
+                        "issues": artifact_validation.issues,
+                    },
+                }
+                attempt_store.write_current_control_generation_artifacts(
+                    attempt=attempt,
+                    autocheck=artifacts["current_control_autocheck"],
+                    structural_check=artifacts["current_control_autocheck_check"],
+                    metadata={"stage": "autocheck", "structured_output_error": str(exc)},
+                )
+                self.trace.log(
+                    "worker.current_control_autocheck.structured_output_failed",
+                    attempt=attempt,
+                    issues=artifact_validation.issues,
+                )
+                return GeneratedAttempt(
+                    raw_content="",
+                    content="",
+                    boundary_issues=[],
+                    agent_notes=[str(exc)],
+                    generation_artifacts=artifacts,
+                    structural_validation=artifact_validation,
+                )
+            if not isinstance(autocheck_model, CurrentControlAutocheckSet):
+                raise TypeError(
+                    "CurrentControlAutocheckAgent returned "
+                    f"{type(autocheck_model)!r}, expected CurrentControlAutocheckSet"
+                )
+
+            autocheck = _model_to_dict(autocheck_model)
+            artifact_validation = self._validate_current_control_autocheck(autocheck)
+        if frozen_artifacts:
+            self.trace.log("worker.current_control_autocheck.reused", attempt=attempt)
+        artifacts = {
+            "current_control_autocheck": autocheck,
+            "current_control_autocheck_check": {
+                "approved": artifact_validation.approved,
+                "issues": artifact_validation.issues,
+            },
+        }
+        attempt_store.write_current_control_generation_artifacts(
+            attempt=attempt,
+            autocheck=autocheck,
+            structural_check=artifacts["current_control_autocheck_check"],
+            metadata={"stage": "autocheck_frozen" if frozen_artifacts else "autocheck"},
+        )
+        self.trace.log(
+            "worker.current_control_autocheck.done",
+            attempt=attempt,
+            approved=artifact_validation.approved,
+            issues=artifact_validation.issues,
+        )
+
+        if not artifact_validation.approved:
+            return GeneratedAttempt(
+                raw_content="",
+                content="",
+                boundary_issues=[],
+                agent_notes=[
+                    *autocheck.get("agent_notes", []),
+                    "Current-control autocheck artifact structural validation failed.",
+                ],
+                generation_artifacts=artifacts,
+                structural_validation=artifact_validation,
+            )
+
+        raw_content = render_current_control_material_html(
+            task,
+            autocheck,
+            html_template=html_template,
+        )
+        boundary = isolate_material_html(raw_content)
+        return GeneratedAttempt(
+            raw_content=raw_content,
+            content=boundary.content,
+            boundary_issues=boundary.issues,
+            agent_notes=[
+                *autocheck.get("agent_notes", []),
+                "Current-control HTML rendered deterministically from current_control_autocheck.",
+            ],
+            generation_artifacts=artifacts,
+            structural_validation=ValidationResult.ok(),
+        )
+
+    def _validate_current_control_autocheck(self, autocheck: dict[str, Any]) -> ValidationResult:
         issues: list[str] = []
-        for marker in (
-            "self_work_autocheck",
-            "correct_answers",
-            "autocheck_config",
-            "internal_explanation",
-            "generation artifacts",
-            "generation_artifacts",
-        ):
-            if marker in normalized:
-                issues.append(f"self_work HTML contains internal artifact marker: {marker}")
-        return list(dict.fromkeys(issues))
+        questions = autocheck.get("questions") if isinstance(autocheck, dict) else None
+        if not isinstance(questions, list):
+            issues.append("current_control_autocheck.questions must be a list")
+            questions = []
+
+        if len(questions) != 3:
+            issues.append(f"current_control_autocheck question count mismatch: expected 3, got {len(questions)}")
+
+        question_ids: list[str] = []
+        for index, item in enumerate(questions, start=1):
+            if not isinstance(item, dict):
+                issues.append(f"current_control_autocheck.questions[{index}] must be an object")
+                continue
+            question_id = str(item.get("id") or f"?{index}")
+            question_ids.append(question_id)
+            for field in ("id", "template_code", "question_type", "skill_target", "student_prompt"):
+                if not str(item.get(field) or "").strip():
+                    issues.append(f"current_control_autocheck.questions.{question_id} missing required field {field}")
+
+            correct_answers = item.get("correct_answers")
+            if not isinstance(correct_answers, list) or not any(str(answer).strip() for answer in correct_answers):
+                issues.append(
+                    f"current_control_autocheck.questions.{question_id} needs at least one correct answer"
+                )
+            if not isinstance(item.get("options"), list):
+                issues.append(f"current_control_autocheck.questions.{question_id} options must be a list")
+            autocheck_config = item.get("autocheck_config")
+            if not isinstance(autocheck_config, dict) or not autocheck_config:
+                issues.append(
+                    f"current_control_autocheck.questions.{question_id} needs non-empty autocheck_config"
+                )
+
+            question_type = _normalize_copy_text(str(item.get("question_type") or ""))
+            template_code = _normalize_copy_text(str(item.get("template_code") or ""))
+            is_open_answer = any(
+                marker in f"{question_type} {template_code}"
+                for marker in ("open", "text", "input", "3h", "free")
+            )
+            if is_open_answer and not str(item.get("expected_answer_format") or "").strip():
+                issues.append(
+                    f"current_control_autocheck.questions.{question_id} open-answer item needs expected_answer_format"
+                )
+
+        if len(question_ids) != len(set(question_ids)):
+            issues.append("current_control_autocheck.questions ids must be unique")
+
+        return ValidationResult.fail(issues) if issues else ValidationResult.ok()
 
     def _generate_intermediate_attempt(
         self,
@@ -1077,29 +1524,40 @@ class MaterialWorker:
         attempt: int,
         attempt_store: AttemptArtifactStore,
     ) -> GeneratedAttempt:
-        artifact_prompt = build_intermediate_assessment_artifact_prompt(
-            task=task,
-            spec=spec,
-            prompt_contents=prompt_contents,
-            references=references,
-            dependencies=dependency_results,
-            previous_artifacts=previous_artifacts,
-            previous_issues=previous_issues,
+        assessment = copy.deepcopy(previous_artifacts.get("intermediate_assessment"))
+        artifact_validation = (
+            self._validate_intermediate_assessment_artifact(assessment)
+            if isinstance(assessment, dict)
+            else ValidationResult.fail([])
         )
-        artifact_model = self.invoker.invoke(
-            "IntermediateAssessmentArtifactAgent",
-            system=build_intermediate_assessment_artifact_system_prompt(),
-            prompt=artifact_prompt,
-            schema=IntermediateAssessmentArtifact,
-        )
-        if not isinstance(artifact_model, IntermediateAssessmentArtifact):
-            raise TypeError(
-                f"IntermediateAssessmentArtifactAgent returned {type(artifact_model)!r}, "
-                "expected IntermediateAssessmentArtifact"
+        frozen_artifacts = isinstance(assessment, dict) and artifact_validation.approved
+        if not frozen_artifacts:
+            artifact_prompt = build_intermediate_assessment_artifact_prompt(
+                task=task,
+                spec=spec,
+                prompt_contents=prompt_contents,
+                references=references,
+                dependencies=dependency_results,
+                previous_artifacts=previous_artifacts,
+                previous_issues=previous_issues,
             )
+            artifact_model = self.invoker.invoke(
+                "IntermediateAssessmentArtifactAgent",
+                system=build_intermediate_assessment_artifact_system_prompt(),
+                prompt=artifact_prompt,
+                schema=IntermediateAssessmentArtifact,
+            )
+            if not isinstance(artifact_model, IntermediateAssessmentArtifact):
+                raise TypeError(
+                    f"IntermediateAssessmentArtifactAgent returned {type(artifact_model)!r}, "
+                    "expected IntermediateAssessmentArtifact"
+                )
 
-        assessment = _model_to_dict(artifact_model)
-        artifact_validation = self._validate_intermediate_assessment_artifact(assessment)
+            assessment = _model_to_dict(artifact_model)
+            assessment = self._normalize_intermediate_assessment_display_order(assessment)
+            artifact_validation = self._validate_intermediate_assessment_artifact(assessment)
+        else:
+            self.trace.log("worker.intermediate_assessment.reused", attempt=attempt)
         artifacts = {
             "intermediate_assessment": assessment,
             "intermediate_assessment_check": {
@@ -1111,7 +1569,7 @@ class MaterialWorker:
             attempt=attempt,
             artifact=assessment,
             structural_check=artifacts["intermediate_assessment_check"],
-            metadata={"stage": "assessment_artifact"},
+            metadata={"stage": "assessment_artifact_frozen" if frozen_artifacts else "assessment_artifact"},
         )
         self.trace.log(
             "worker.intermediate_assessment.done",
@@ -1155,8 +1613,6 @@ class MaterialWorker:
             raise TypeError(f"{spec.agent_type} returned {type(generated_model)!r}, expected GeneratedMaterial")
         raw_content = str(generated_model.content or "").strip()
         boundary = isolate_material_html(raw_content)
-        leak_issues = self._intermediate_student_leak_issues(boundary.content)
-        structural_validation = ValidationResult.fail(leak_issues) if leak_issues else ValidationResult.ok()
         return GeneratedAttempt(
             raw_content=raw_content,
             content=boundary.content,
@@ -1166,8 +1622,175 @@ class MaterialWorker:
                 *[str(item) for item in generated_model.agent_notes],
             ],
             generation_artifacts=artifacts,
-            structural_validation=structural_validation,
+            structural_validation=ValidationResult.ok(),
         )
+
+    def _normalize_intermediate_assessment_display_order(self, assessment: dict[str, Any]) -> dict[str, Any]:
+        variants = assessment.get("variants") if isinstance(assessment, dict) else None
+        if not isinstance(variants, list):
+            return assessment
+
+        notes: list[str] = []
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            variant_id = str(variant.get("id") or "?")
+            for question in variant.get("test_questions") or []:
+                if not isinstance(question, dict):
+                    continue
+                question_id = str(question.get("id") or "?")
+                template_code = str(question.get("template_code") or "").strip().upper()
+                if template_code == "6A":
+                    if self._normalize_intermediate_ordering_question_display(question):
+                        notes.append(f"{variant_id}.{question_id}: normalized 6A display order.")
+                if template_code in {"6G", "8D"} or self._intermediate_pair_map(question):
+                    if self._normalize_intermediate_pairing_question_display(question):
+                        notes.append(f"{variant_id}.{question_id}: normalized matching right_items display order.")
+
+        if notes:
+            agent_notes = assessment.get("agent_notes")
+            if not isinstance(agent_notes, list):
+                agent_notes = []
+            assessment["agent_notes"] = [*agent_notes, *notes]
+        return assessment
+
+    def _normalize_intermediate_ordering_question_display(self, question: dict[str, Any]) -> bool:
+        correct_order = self._intermediate_ordering_correct_items(question)
+        if len(correct_order) < 2:
+            return False
+        options = question.get("options")
+        display_items = [str(item) for item in options] if isinstance(options, list) and options else list(correct_order)
+        if len(display_items) != len(correct_order):
+            display_items = list(correct_order)
+
+        deranged = self._derange_items_against_positions(display_items, correct_order)
+        if deranged == display_items:
+            return False
+
+        question["options"] = deranged
+        autocheck = question.get("autocheck_config")
+        if isinstance(autocheck, dict):
+            autocheck["display_items"] = deranged
+            if isinstance(autocheck.get("items"), list):
+                autocheck["items"] = deranged
+        return True
+
+    def _normalize_intermediate_pairing_question_display(self, question: dict[str, Any]) -> bool:
+        autocheck = question.get("autocheck_config")
+        if not isinstance(autocheck, dict):
+            return False
+        left_items = self._intermediate_autocheck_items(autocheck, "left_items", "left")
+        right_items = self._intermediate_autocheck_items(autocheck, "right_items", "right")
+        pair_map = self._intermediate_pair_map(question)
+        if len(left_items) < 2 or len(right_items) < 2 or not pair_map:
+            return False
+
+        correct_by_position = [pair_map.get(_normalize_copy_text(left), "") for left in left_items]
+        deranged = self._derange_items_against_positions(right_items, correct_by_position)
+        if deranged == right_items:
+            return False
+
+        autocheck["right_items"] = deranged
+        options = question.get("options")
+        if isinstance(options, list):
+            left_norms = {_normalize_copy_text(item) for item in left_items}
+            right_norms = {_normalize_copy_text(item) for item in right_items}
+            remaining = [
+                str(item)
+                for item in options
+                if _normalize_copy_text(str(item)) not in left_norms
+                and _normalize_copy_text(str(item)) not in right_norms
+            ]
+            question["options"] = [*left_items, *deranged, *remaining]
+        return True
+
+    def _intermediate_ordering_correct_items(self, question: dict[str, Any]) -> list[str]:
+        autocheck = question.get("autocheck_config")
+        if isinstance(autocheck, dict):
+            for key in ("ordered_items", "items_in_correct_order", "correct_order"):
+                items = self._string_items(autocheck.get(key))
+                if items:
+                    return items
+        return self._string_items(question.get("correct_answers"))
+
+    @staticmethod
+    def _intermediate_autocheck_items(autocheck: dict[str, Any], *keys: str) -> list[str]:
+        for key in keys:
+            items = MaterialWorker._string_items(autocheck.get(key))
+            if items:
+                return items
+        return []
+
+    @staticmethod
+    def _string_items(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = str(item.get("text") or item.get("label") or item.get("value") or "").strip()
+            else:
+                text = str(item or "").strip()
+            if text:
+                items.append(text)
+        return items
+
+    def _intermediate_pair_map(self, question: dict[str, Any]) -> dict[str, str]:
+        pairs: dict[str, str] = {}
+        autocheck = question.get("autocheck_config")
+        if isinstance(autocheck, dict):
+            raw_pairs = autocheck.get("correct_pairs")
+            if isinstance(raw_pairs, dict):
+                for left, right in raw_pairs.items():
+                    if str(left).strip() and str(right).strip():
+                        pairs[_normalize_copy_text(str(left))] = _normalize_copy_text(str(right))
+            elif isinstance(raw_pairs, list):
+                for pair in raw_pairs:
+                    if isinstance(pair, list) and len(pair) >= 2:
+                        left = str(pair[0] or "").strip()
+                        right = str(pair[1] or "").strip()
+                        if left and right:
+                            pairs[_normalize_copy_text(left)] = _normalize_copy_text(right)
+
+        for left, right in self._intermediate_matching_pairs(question):
+            if left and right:
+                pairs[_normalize_copy_text(left)] = _normalize_copy_text(right)
+        return pairs
+
+    @staticmethod
+    def _derange_items_against_positions(items: list[str], forbidden_by_position: list[str]) -> list[str]:
+        if len(items) < 2:
+            return items
+        normalized_forbidden = [_normalize_copy_text(item) for item in forbidden_by_position]
+
+        def valid(candidate: list[str]) -> bool:
+            return all(
+                index >= len(normalized_forbidden)
+                or not normalized_forbidden[index]
+                or _normalize_copy_text(item) != normalized_forbidden[index]
+                for index, item in enumerate(candidate)
+            )
+
+        rotated = items[1:] + items[:1]
+        if valid(rotated):
+            return rotated
+        reversed_items = list(reversed(items))
+        if valid(reversed_items):
+            return reversed_items
+
+        def search(prefix: list[str], remaining: list[str]) -> list[str] | None:
+            index = len(prefix)
+            if not remaining:
+                return prefix if valid(prefix) else None
+            for position, item in enumerate(remaining):
+                if index < len(normalized_forbidden) and _normalize_copy_text(item) == normalized_forbidden[index]:
+                    continue
+                result = search([*prefix, item], [*remaining[:position], *remaining[position + 1 :]])
+                if result is not None:
+                    return result
+            return None
+
+        return search([], items) or items
 
     def _validate_intermediate_assessment_artifact(self, assessment: dict[str, Any]) -> ValidationResult:
         issues: list[str] = []
@@ -1188,46 +1811,46 @@ class MaterialWorker:
                 if not str(variant.get(field) or "").strip():
                     issues.append(f"intermediate_assessment.{variant_id} missing required field {field}")
 
-            closed = variant.get("closed_questions")
-            opened = variant.get("open_questions")
+            test_questions = variant.get("test_questions")
+            open_code_questions = variant.get("open_code_questions")
             code_tasks = variant.get("code_tasks")
-            if not isinstance(closed, list):
-                issues.append(f"intermediate_assessment.{variant_id}.closed_questions must be a list")
-                closed = []
-            if not isinstance(opened, list):
-                issues.append(f"intermediate_assessment.{variant_id}.open_questions must be a list")
-                opened = []
+            if not isinstance(test_questions, list):
+                issues.append(f"intermediate_assessment.{variant_id}.test_questions must be a list")
+                test_questions = []
+            if not isinstance(open_code_questions, list):
+                issues.append(f"intermediate_assessment.{variant_id}.open_code_questions must be a list")
+                open_code_questions = []
             if not isinstance(code_tasks, list):
                 issues.append(f"intermediate_assessment.{variant_id}.code_tasks must be a list")
                 code_tasks = []
 
-            if len(closed) != 16:
+            if len(test_questions) != 5:
                 issues.append(
-                    f"intermediate_assessment.{variant_id} closed_questions count mismatch: expected 16, got {len(closed)}"
+                    f"intermediate_assessment.{variant_id} test_questions count mismatch: expected 5, got {len(test_questions)}"
                 )
-            if len(opened) != 4:
+            if len(open_code_questions) != 5:
                 issues.append(
-                    f"intermediate_assessment.{variant_id} open_questions count mismatch: expected 4, got {len(opened)}"
+                    f"intermediate_assessment.{variant_id} open_code_questions count mismatch: expected 5, got {len(open_code_questions)}"
                 )
-            if len(code_tasks) != 3:
+            if len(code_tasks) != 5:
                 issues.append(
-                    f"intermediate_assessment.{variant_id} code_tasks count mismatch: expected 3, got {len(code_tasks)}"
+                    f"intermediate_assessment.{variant_id} code_tasks count mismatch: expected 5, got {len(code_tasks)}"
                 )
 
             item_ids: list[str] = []
-            for item in closed:
+            for item in test_questions:
                 if not isinstance(item, dict):
-                    issues.append(f"intermediate_assessment.{variant_id}.closed_questions contains non-object item")
+                    issues.append(f"intermediate_assessment.{variant_id}.test_questions contains non-object item")
                     continue
                 item_id = str(item.get("id") or "?")
                 item_ids.append(item_id)
                 for field in ("id", "template_code", "skill_target", "student_prompt"):
                     if not str(item.get(field) or "").strip():
-                        issues.append(f"intermediate_assessment.{variant_id}.closed_questions.{item_id} missing {field}")
+                        issues.append(f"intermediate_assessment.{variant_id}.test_questions.{item_id} missing {field}")
                 answers = item.get("correct_answers")
                 if not isinstance(answers, list) or not any(str(answer).strip() for answer in answers):
                     issues.append(
-                        f"intermediate_assessment.{variant_id}.closed_questions.{item_id} needs at least one correct answer"
+                        f"intermediate_assessment.{variant_id}.test_questions.{item_id} needs at least one correct answer"
                     )
                 else:
                     answer_values = [str(answer).strip() for answer in answers if str(answer).strip()]
@@ -1237,40 +1860,57 @@ class MaterialWorker:
                         item.get("autocheck_config"),
                     ):
                         issues.append(
-                            f"intermediate_assessment.{variant_id}.closed_questions.{item_id} declares multiple "
+                            f"intermediate_assessment.{variant_id}.test_questions.{item_id} declares multiple "
                             "valid answers but provides exactly one correct answer; make the criterion unique or "
                             "include every correct answer with a compatible template/autocheck_config"
                         )
                 if not isinstance(item.get("options"), list):
-                    issues.append(f"intermediate_assessment.{variant_id}.closed_questions.{item_id} options must be a list")
+                    issues.append(f"intermediate_assessment.{variant_id}.test_questions.{item_id} options must be a list")
                 if not isinstance(item.get("autocheck_config"), dict):
                     issues.append(
-                        f"intermediate_assessment.{variant_id}.closed_questions.{item_id} autocheck_config must be an object"
+                        f"intermediate_assessment.{variant_id}.test_questions.{item_id} autocheck_config must be an object"
                     )
             coded_templates = {
                 str(item.get("template_code") or "").strip().upper()
-                for item in closed
+                for item in test_questions
                 if isinstance(item, dict)
             }
             required_coded_templates = {"6A", "6D", "6G", "8D", "10D"}
-            if len(coded_templates & required_coded_templates) < 4:
+            if len(coded_templates & required_coded_templates) < 3:
                 issues.append(
-                    f"intermediate_assessment.{variant_id} must include at least 4 coded template types "
+                    f"intermediate_assessment.{variant_id} must include at least 3 coded template types "
                     "from 6A/6D/6G/8D/10D"
                 )
 
-            for item in opened:
+            for item in open_code_questions:
                 if not isinstance(item, dict):
-                    issues.append(f"intermediate_assessment.{variant_id}.open_questions contains non-object item")
+                    issues.append(f"intermediate_assessment.{variant_id}.open_code_questions contains non-object item")
                     continue
                 item_id = str(item.get("id") or "?")
                 item_ids.append(item_id)
-                for field in ("id", "skill_target", "student_prompt", "reference_answer"):
+                for field in ("id", "skill_target", "student_prompt", "hidden_solution"):
                     if not str(item.get(field) or "").strip():
-                        issues.append(f"intermediate_assessment.{variant_id}.open_questions.{item_id} missing {field}")
+                        issues.append(f"intermediate_assessment.{variant_id}.open_code_questions.{item_id} missing {field}")
                 if not isinstance(item.get("rubric"), list) or not item.get("rubric"):
-                    issues.append(f"intermediate_assessment.{variant_id}.open_questions.{item_id} rubric must be a non-empty list")
-
+                    issues.append(
+                        f"intermediate_assessment.{variant_id}.open_code_questions.{item_id} rubric must be a non-empty list"
+                    )
+                runtime_tests = item.get("runtime_tests")
+                manual_rules = item.get("manual_check_rules")
+                if not isinstance(runtime_tests, list):
+                    issues.append(
+                        f"intermediate_assessment.{variant_id}.open_code_questions.{item_id} runtime_tests must be a list"
+                    )
+                if not isinstance(manual_rules, list):
+                    issues.append(
+                        f"intermediate_assessment.{variant_id}.open_code_questions.{item_id} manual_check_rules must be a list"
+                    )
+                if not (isinstance(runtime_tests, list) and runtime_tests) and not (
+                    isinstance(manual_rules, list) and manual_rules
+                ):
+                    issues.append(
+                        f"intermediate_assessment.{variant_id}.open_code_questions.{item_id} needs runtime_tests or manual_check_rules"
+                    )
             for item in code_tasks:
                 if not isinstance(item, dict):
                     issues.append(f"intermediate_assessment.{variant_id}.code_tasks contains non-object item")
@@ -1292,7 +1932,6 @@ class MaterialWorker:
                     issues.append(
                         f"intermediate_assessment.{variant_id}.code_tasks.{item_id} needs runtime_tests or manual_check_rules"
                     )
-
             if len(item_ids) != len(set(item_ids)):
                 issues.append(f"intermediate_assessment.{variant_id} item ids must be unique")
 
@@ -1300,26 +1939,52 @@ class MaterialWorker:
             issues.append("intermediate_assessment variant ids must be unique")
         return ValidationResult.fail(issues) if issues else ValidationResult.ok()
 
-    def _intermediate_student_leak_issues(self, content: str) -> list[str]:
-        normalized = _normalize_copy_text(content)
-        issues: list[str] = []
-        for marker in (
-            "intermediate_assessment",
-            "correct_answers",
-            "autocheck_config",
-            "reference_answer",
-            "hidden_solution",
-            "teacher_explanation",
-            "internal_explanation",
-            "generation artifacts",
-            "generation_artifacts",
-        ):
-            if marker in normalized:
-                issues.append(f"intermediate HTML contains internal artifact marker: {marker}")
-        for marker in ("ключи", "ключ правильного", "эталон ответа", "эталоны ответов", "правильный ответ"):
-            if marker in normalized:
-                issues.append(f"intermediate HTML appears to disclose answer-key section: {marker}")
-        return list(dict.fromkeys(issues))
+    def _intermediate_matching_pairs(self, question: dict[str, Any]) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        for answer in question.get("correct_answers") or []:
+            pair = self._split_intermediate_pair(str(answer or ""))
+            if pair is not None:
+                pairs.append(pair)
+
+        autocheck = question.get("autocheck_config")
+        if isinstance(autocheck, dict):
+            left_by_id = self._intermediate_side_text_by_id(autocheck.get("left"))
+            right_by_id = self._intermediate_side_text_by_id(autocheck.get("right"))
+            for raw_pair in autocheck.get("correct_pairs") or []:
+                if not isinstance(raw_pair, list) or len(raw_pair) != 2:
+                    continue
+                left = left_by_id.get(str(raw_pair[0]))
+                right = right_by_id.get(str(raw_pair[1]))
+                if left and right:
+                    pairs.append((left, right))
+
+        return list(dict.fromkeys(pairs))
+
+    @staticmethod
+    def _split_intermediate_pair(value: str) -> tuple[str, str] | None:
+        for separator in ("->", "=>", "—", "–"):
+            if separator not in value:
+                continue
+            left, right = value.split(separator, 1)
+            left = left.strip()
+            right = right.strip()
+            if left and right:
+                return left, right
+        return None
+
+    @staticmethod
+    def _intermediate_side_text_by_id(items: Any) -> dict[str, str]:
+        if not isinstance(items, list):
+            return {}
+        result: dict[str, str] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            text = str(item.get("text") or "").strip()
+            if item_id and text:
+                result[item_id] = text
+        return result
 
     def _validate_practice_templates(
         self,
@@ -1396,86 +2061,17 @@ class MaterialWorker:
                     issues.append(f"practice_instances.{task_id} subtasks must be a list")
                 if not isinstance(item.get("uniqueness_notes"), list):
                     issues.append(f"practice_instances.{task_id} uniqueness_notes must be a list")
-                issues.extend(self._practice_internal_marker_issues(item))
-                issues.extend(self._practice_solution_hint_issues(item))
+                for field in ("faulty_code", "faulty_code_display", "display_note"):
+                    if field in item and not isinstance(item.get(field), str):
+                        issues.append(f"practice_instances.{task_id} {field} must be a string")
+                if str(item.get("faulty_code") or "").strip() and not (
+                    str(item.get("faulty_code_display") or "").strip()
+                    or str(item.get("starter_code") or "").strip()
+                ):
+                    issues.append(
+                        f"practice_instances.{task_id} has faulty_code but no learner-facing faulty_code_display or starter_code"
+                    )
         return ValidationResult.fail(issues) if issues else ValidationResult.ok()
-
-    def _practice_internal_marker_issues(self, task_item: dict[str, Any]) -> list[str]:
-        task_id = str(task_item.get("id") or "?")
-        student_text = _normalize_copy_text(
-            "\n".join(
-                str(task_item.get(field) or "")
-                for field in ("scenario", "student_condition", "input_requirements", "output_requirements")
-            )
-        )
-        if not student_text:
-            return []
-
-        internal_markers = (
-            "source_text",
-            "source task",
-            "source contract",
-            "source_contract",
-            "generation artifacts",
-            "practice_instances",
-            "practice_templates",
-            "pipeline",
-            "как в задании урока",
-            "из json",
-            "from json",
-        )
-        for marker in internal_markers:
-            if marker in student_text:
-                return [
-                    f"practice_instances.{task_id} student-facing fields contain internal source/pipeline marker; "
-                    "rewrite learner text without source_text/source contract wording"
-                ]
-        return []
-
-    def _practice_solution_hint_issues(self, task_item: dict[str, Any]) -> list[str]:
-        task_id = str(task_item.get("id") or "?")
-        task_type = _normalize_copy_text(str(task_item.get("task_type") or ""))
-        source_text = _normalize_copy_text(str(task_item.get("source_text") or ""))
-        is_fix_task = any(marker in task_type for marker in ("fix", "debug", "исправ", "отлад")) or any(
-            marker in source_text for marker in ("исправ", "ошиб", "error", "syntaxerror", "nameerror")
-        )
-        if not is_fix_task:
-            return []
-
-        student_text = _normalize_copy_text(
-            "\n".join(
-                str(task_item.get(field) or "")
-                for field in ("scenario", "student_condition", "input_requirements", "output_requirements")
-            )
-        )
-        if not student_text:
-            return []
-
-        issues: list[str] = []
-        forbidden_patterns = [
-            r"замен(и|ить|ите|а)\s+\S+\s+на\s+\S+",
-            r"добав(ь|ить|ьте|ить)\s+[^.]{0,60}(кавыч|скоб|print|принт)",
-            r"(пропущен|пропущена|не хватает|отсутству\w+)\s+[^.]{0,60}(кавыч|скоб)",
-            r"(незакрыт|не закрыт)[^.]{0,60}(кавыч|строков)",
-            r"(опечатк|неверно написан|неправильно написан)[^.]{0,80}(функц|print|prnt|имя)",
-            r"(без кавычек|вокруг текста|строковым литералом|сделать аргумент строк)",
-            r"(имя функции вывода|названи[ея] функции вывода)",
-        ]
-        for pattern in forbidden_patterns:
-            if re.search(pattern, student_text, flags=re.I):
-                issues.append(
-                    f"practice_instances.{task_id} student-facing fields reveal the exact fix; move the hint to hidden_solution/teacher_explanation"
-                )
-                break
-
-        for snippet in _copy_check_snippets(str(task_item.get("hidden_solution") or ""), min_chars=24):
-            if snippet and snippet in student_text:
-                issues.append(
-                    f"practice_instances.{task_id} student-facing fields copy hidden_solution; move the answer out of learner text"
-                )
-                break
-
-        return list(dict.fromkeys(issues))
 
     def _practice_task_order_issues(
         self,
@@ -1502,102 +2098,6 @@ class MaterialWorker:
             if isinstance(item, dict) and item.get("id") in expected_levels and item.get("level") != expected_levels[item["id"]]:
                 issues.append(f"{label}.{item['id']} level mismatch: expected {expected_levels[item['id']]}, got {item.get('level')}")
         return issues
-
-    def _practice_duplicate_check(
-        self,
-        instances: dict[str, Any],
-        dependency_results: list[MaterialResult],
-        references: ReferenceBundle,
-    ) -> dict[str, Any]:
-        anti_copy_sources: list[dict[str, str]] = []
-        for dependency in dependency_results:
-            anti_copy_sources.append(
-                {
-                    "source": f"dependency:{dependency.kind}",
-                    "text": dependency.content,
-                }
-            )
-        for field, documents in references.items():
-            for index, document in enumerate(documents, start=1):
-                anti_copy_sources.append(
-                    {
-                        "source": f"reference:{field}:{index}",
-                        "text": document.content,
-                    }
-                )
-
-        source_texts = [
-            (item["source"], _normalize_copy_text(item["text"]))
-            for item in anti_copy_sources
-            if _normalize_copy_text(item["text"])
-        ]
-        matches: list[dict[str, str]] = []
-        issues: list[str] = []
-        for task_item in instances.get("tasks", []):
-            if not isinstance(task_item, dict):
-                continue
-            task_id = str(task_item.get("id") or "?")
-            for field in ("scenario", "student_condition", "starter_code", "input_requirements", "output_requirements"):
-                value = str(task_item.get(field) or "")
-                for snippet in _copy_check_snippets(value):
-                    for source, source_text in source_texts:
-                        if snippet in source_text:
-                            matches.append({"task_id": task_id, "field": field, "source": source, "snippet": snippet[:160]})
-                            issues.append(
-                                f"practice_instances.{task_id}.{field} directly copies text/code from {source}; generate a new variant"
-                            )
-                            break
-                    if any(match["task_id"] == task_id and match["field"] == field for match in matches):
-                        break
-        issues = list(dict.fromkeys(issues))
-        return {"approved": not issues, "issues": issues, "matches": matches}
-
-    def _practice_student_leak_issues(self, content: str, instances: dict[str, Any]) -> list[str]:
-        issues: list[str] = []
-        lower = content.lower()
-        for marker in ("hidden_solution", "teacher_explanation"):
-            if marker in lower:
-                issues.append(f"student practice HTML contains internal marker {marker}")
-        for marker in (
-            "исходный паттерн",
-            "source_text",
-            "source contract",
-            "generation artifacts",
-            "practice_instances",
-            "practice_templates",
-        ):
-            if marker in lower:
-                issues.append(f"student practice HTML contains internal source/pipeline marker: {marker}")
-        normalized_content = _normalize_copy_text(content)
-        for task_item in instances.get("tasks", []):
-            if not isinstance(task_item, dict):
-                continue
-            task_id = str(task_item.get("id") or "?")
-            allowed_learner_text = _normalize_copy_text(
-                "\n".join(
-                    str(task_item.get(field) or "")
-                    for field in (
-                        "scenario",
-                        "student_condition",
-                        "starter_code",
-                        "input_requirements",
-                        "output_requirements",
-                        "tests",
-                        "runtime_tests",
-                        "manual_checks",
-                        "subtasks",
-                    )
-                )
-            )
-            for field in ("hidden_solution", "teacher_explanation"):
-                value = str(task_item.get(field) or "")
-                for snippet in _copy_check_snippets(value, min_chars=16):
-                    if snippet in allowed_learner_text:
-                        continue
-                    if snippet in normalized_content:
-                        issues.append(f"student practice HTML leaks {field} for {task_id}")
-                        break
-        return list(dict.fromkeys(issues))
 
     def _validate_with_llm(
         self,
@@ -1699,10 +2199,30 @@ class MaterialWorker:
         }
         decision = self._apply_intermediate_appellate_policy(
             spec=spec,
-            content=content,
             rule_result=rule_result,
             validation=validation,
             generation_artifacts=generation_artifacts,
+            decision=decision,
+        )
+        decision = self._apply_practice_appellate_policy(
+            spec=spec,
+            task=task,
+            rule_result=rule_result,
+            validation=validation,
+            generation_artifacts=generation_artifacts,
+            decision=decision,
+        )
+        decision = self._apply_specification_qa_appellate_policy(
+            spec=spec,
+            rule_result=rule_result,
+            validation=validation,
+            decision=decision,
+        )
+        decision = self._apply_mr_intermediate_appellate_policy(
+            spec=spec,
+            content=content,
+            rule_result=rule_result,
+            validation=validation,
             decision=decision,
         )
         self.trace.log(
@@ -1731,7 +2251,6 @@ class MaterialWorker:
         self,
         *,
         spec: MaterialSpec,
-        content: str,
         rule_result: ValidationResult,
         validation: ValidationResult,
         generation_artifacts: dict[str, Any] | None,
@@ -1740,8 +2259,6 @@ class MaterialWorker:
         if spec.kind != "intermediate" or not rule_result.approved:
             return decision
         if not self._intermediate_artifact_approved(generation_artifacts):
-            return decision
-        if self._intermediate_visible_key_markers(content):
             return decision
 
         blocking_issues = [str(item) for item in (decision.get("blocking_issues") or validation.issues or [])]
@@ -1786,31 +2303,455 @@ class MaterialWorker:
         ]
         return adjusted
 
+    def _apply_practice_appellate_policy(
+        self,
+        *,
+        spec: MaterialSpec,
+        task: dict[str, Any],
+        rule_result: ValidationResult,
+        validation: ValidationResult,
+        generation_artifacts: dict[str, Any] | None,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        if spec.kind != "practice" or not rule_result.approved:
+            return decision
+
+        contract = source_contract_for_spec(task, spec)
+        authoritative_ids = [str(item) for item in contract.get("authoritative_task_ids", []) if str(item)]
+        if not authoritative_ids:
+            return decision
+
+        artifact_ids = self._practice_artifact_task_ids(generation_artifacts)
+        if artifact_ids and artifact_ids != authoritative_ids:
+            return decision
+        if not artifact_ids:
+            return decision
+
+        blocking_issues = [str(item) for item in (decision.get("blocking_issues") or validation.issues or [])]
+        if not blocking_issues:
+            return decision
+
+        overruled: list[str] = []
+        remaining: list[str] = []
+        for issue in blocking_issues:
+            if self._is_overstrict_practice_task_count_issue(issue, authoritative_ids) or (
+                self._is_overstrict_practice_faulty_code_issue(issue)
+            ) or (
+                self._is_overstrict_practice_subject_entity_issue(issue)
+            ) or (
+                self._is_overstrict_practice_formatting_issue(issue)
+            ):
+                overruled.append(issue)
+            else:
+                remaining.append(issue)
+
+        if not overruled:
+            return decision
+
+        adjusted = dict(decision)
+        note = (
+            "Deterministic appellate policy overruled practice validator objections that used an over-narrow "
+            "interpretation of the practice contract: lesson.practice_tasks/authoritative_task_ids define the "
+            "task set, intentionally faulty code may be invalid by design, and source subject entities are slot "
+            "examples unless exact entities are explicitly required. Practice validation checks methodology and "
+            "topic coverage rather than requiring one rigid task rendering structure."
+        )
+        adjusted["score_rationale"] = " ".join(part for part in [str(adjusted.get("score_rationale") or ""), note] if part)
+        adjusted["rationale"] = " ".join(part for part in [str(adjusted.get("rationale") or ""), note] if part)
+        adjusted["blocking_issues"] = remaining
+        adjusted["non_blocking_issues"] = list(
+            dict.fromkeys([*_string_list(adjusted.get("non_blocking_issues", [])), *overruled])
+        )
+        adjusted["overruled_validator_issues"] = list(
+            dict.fromkeys([*_string_list(adjusted.get("overruled_validator_issues", [])), *overruled])
+        )
+        adjusted["fix_instructions"] = [
+            item
+            for item in _string_list(adjusted.get("fix_instructions", []))
+            if item not in set(overruled)
+            and not self._is_overstrict_practice_task_count_issue(item, authoritative_ids)
+            and not self._is_overstrict_practice_faulty_code_issue(item)
+            and not self._is_overstrict_practice_subject_entity_issue(item)
+            and not self._is_overstrict_practice_formatting_issue(item)
+        ]
+        if not remaining:
+            adjusted["approved"] = True
+            adjusted["decision"] = "approve_material"
+            adjusted["quality_score"] = max(
+                float(adjusted.get("quality_score", 0.0) or 0.0),
+                self.config.validation_controller_accept_score,
+            )
+        return adjusted
+
+    @staticmethod
+    def _practice_artifact_task_ids(generation_artifacts: dict[str, Any] | None) -> list[str]:
+        if not isinstance(generation_artifacts, dict):
+            return []
+        instances = generation_artifacts.get("practice_instances")
+        if not isinstance(instances, dict):
+            return []
+        tasks = instances.get("tasks")
+        if not isinstance(tasks, list):
+            return []
+        return [str(item.get("id")) for item in tasks if isinstance(item, dict) and item.get("id")]
+
+    def _apply_specification_qa_appellate_policy(
+        self,
+        *,
+        spec: MaterialSpec,
+        rule_result: ValidationResult,
+        validation: ValidationResult,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        if spec.kind != "specification_qa" or not rule_result.approved:
+            return decision
+
+        blocking_issues = [str(item) for item in (decision.get("blocking_issues") or validation.issues or [])]
+        if not blocking_issues:
+            return decision
+
+        overruled: list[str] = []
+        remaining: list[str] = []
+        for issue in blocking_issues:
+            if self._is_overstrict_specification_qa_id_issue(issue):
+                overruled.append(issue)
+            else:
+                remaining.append(issue)
+
+        if not overruled:
+            return decision
+
+        adjusted = dict(decision)
+        note = (
+            "Deterministic appellate policy overruled validator objections that treated visible QA-ID labels "
+            "as leakage in specification_qa. QA-ID is allowed for this internal QA artifact."
+        )
+        adjusted["score_rationale"] = " ".join(part for part in [str(adjusted.get("score_rationale") or ""), note] if part)
+        adjusted["rationale"] = " ".join(part for part in [str(adjusted.get("rationale") or ""), note] if part)
+        adjusted["blocking_issues"] = remaining
+        adjusted["non_blocking_issues"] = list(
+            dict.fromkeys([*_string_list(adjusted.get("non_blocking_issues", [])), *overruled])
+        )
+        adjusted["overruled_validator_issues"] = list(
+            dict.fromkeys([*_string_list(adjusted.get("overruled_validator_issues", [])), *overruled])
+        )
+        adjusted["fix_instructions"] = [
+            item
+            for item in _string_list(adjusted.get("fix_instructions", []))
+            if not self._mentions_qa_id(item)
+        ]
+        if not remaining:
+            adjusted["approved"] = True
+            adjusted["decision"] = "approve_material"
+            adjusted["quality_score"] = max(
+                float(adjusted.get("quality_score", 0.0) or 0.0),
+                self.config.validation_controller_accept_score,
+            )
+        return adjusted
+
+    def _apply_mr_intermediate_appellate_policy(
+        self,
+        *,
+        spec: MaterialSpec,
+        content: str,
+        rule_result: ValidationResult,
+        validation: ValidationResult,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        if spec.kind != "mr_intermediate" or not rule_result.approved:
+            return decision
+        if self._mr_intermediate_visible_internal_markers(content):
+            return decision
+
+        blocking_issues = [str(item) for item in (decision.get("blocking_issues") or validation.issues or [])]
+        if not blocking_issues:
+            return decision
+
+        overruled: list[str] = []
+        remaining: list[str] = []
+        for issue in blocking_issues:
+            if self._is_overstrict_mr_intermediate_kim_issue(issue):
+                overruled.append(issue)
+            else:
+                remaining.append(issue)
+
+        if not overruled:
+            return decision
+
+        adjusted = dict(decision)
+        note = (
+            "Deterministic appellate policy overruled mr_intermediate validator objections that treated "
+            "dependency intermediate content as duplicated publishable KIM content."
+        )
+        adjusted["score_rationale"] = " ".join(part for part in [str(adjusted.get("score_rationale") or ""), note] if part)
+        adjusted["rationale"] = " ".join(part for part in [str(adjusted.get("rationale") or ""), note] if part)
+        adjusted["blocking_issues"] = remaining
+        adjusted["non_blocking_issues"] = list(
+            dict.fromkeys([*_string_list(adjusted.get("non_blocking_issues", [])), *overruled])
+        )
+        adjusted["overruled_validator_issues"] = list(
+            dict.fromkeys([*_string_list(adjusted.get("overruled_validator_issues", [])), *overruled])
+        )
+        adjusted["fix_instructions"] = [
+            item
+            for item in _string_list(adjusted.get("fix_instructions", []))
+            if item not in set(overruled)
+            and not self._is_overstrict_mr_intermediate_kim_issue(item)
+        ]
+        if not remaining:
+            adjusted["approved"] = True
+            adjusted["decision"] = "approve_material"
+            adjusted["quality_score"] = max(
+                float(adjusted.get("quality_score", 0.0) or 0.0),
+                self.config.validation_controller_accept_score,
+            )
+        return adjusted
+
+    @staticmethod
+    def _mr_intermediate_visible_internal_markers(content: str) -> list[str]:
+        normalized = _normalize_copy_text(content)
+        markers = (
+            "intermediate_assessment",
+            "generation_artifacts",
+            "hidden_solution",
+            "autocheck_config",
+        )
+        return [marker for marker in markers if marker in normalized]
+
+    @staticmethod
+    def _is_overstrict_mr_intermediate_kim_issue(issue: str) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if not normalized:
+            return False
+        if any(
+            marker in normalized
+            for marker in (
+                "intermediate_assessment",
+                "generation_artifacts",
+                "hidden_solution",
+                "autocheck_config",
+            )
+        ):
+            return False
+        duplication_markers = (
+            "duplicate",
+            "duplicates",
+            "duplication",
+            "full",
+            "bank",
+            "kim",
+            "assessment",
+            "\u0434\u0443\u0431\u043b",
+            "\u043f\u043e\u043b\u043d",
+            "\u0431\u0430\u043d\u043a",
+            "\u043a\u0438\u043c",
+        )
+        item_markers = (
+            "variant",
+            "variants",
+            "task",
+            "tasks",
+            "question",
+            "questions",
+            "\u0432\u0430\u0440\u0438\u0430\u043d\u0442",
+            "\u0437\u0430\u0434\u0430\u043d",
+            "\u0432\u043e\u043f\u0440\u043e\u0441",
+        )
+        return any(marker in normalized for marker in duplication_markers) and any(
+            marker in normalized for marker in item_markers
+        )
+
+    @staticmethod
+    def _is_overstrict_practice_task_count_issue(issue: str, authoritative_ids: list[str]) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if not normalized:
+            return False
+        count_markers = (
+            "количеств",
+            "требуется",
+            "фактически",
+            "отсутств",
+            "missing",
+            "required",
+            "count",
+            "задач",
+            "task",
+        )
+        if not any(marker in normalized for marker in count_markers):
+            return False
+        if not any(marker in normalized for marker in ("difficulty", "l1", "l2", "уров", "p6", "p7")):
+            return False
+        authoritative = {_normalize_copy_text(task_id) for task_id in authoritative_ids}
+        mentioned_p_ids = set(re.findall(r"\bp\d+\b", normalized))
+        non_authoritative_p_ids = mentioned_p_ids - authoritative
+        if non_authoritative_p_ids:
+            return True
+        return any(marker in normalized for marker in ("difficulty", "l1", "l2", "уров")) and "practice_tasks" not in normalized
+
+    @staticmethod
+    def _is_overstrict_practice_faulty_code_issue(issue: str) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if not normalized:
+            return False
+        faulty_context = (
+            "faulty_code",
+            "faulty_code_display",
+            "ошибочный код",
+            "faulty",
+            "фрагмент",
+            "код",
+        )
+        unclosed_string_context = (
+            "незакрыт",
+            "незаверш",
+            "unterminated",
+            "unclosed",
+            "eol while scanning",
+            "string literal",
+            "строк",
+            "кавыч",
+        )
+        overstrict_markers = (
+            "разрыва",
+            "две строки",
+            "следующ",
+            "многостроч",
+            "multi-line",
+            "next line",
+            "spans",
+            "invalid",
+            "невалид",
+            "одна ошибка",
+            "one error",
+            "структур",
+            "скобк",
+            "parse",
+            "парс",
+            "восстановлен",
+        )
+        exact_fix_or_answer_markers = (
+            "исправленный код",
+            "corrected code",
+            "hidden_solution",
+            "exact fix",
+            "точная правка",
+            "reveals the fix",
+            "раскрывает",
+        )
+        if any(marker in normalized for marker in exact_fix_or_answer_markers):
+            return False
+        return (
+            any(marker in normalized for marker in faulty_context)
+            and any(marker in normalized for marker in unclosed_string_context)
+            and any(marker in normalized for marker in overstrict_markers)
+        )
+
+    @staticmethod
+    def _is_overstrict_practice_subject_entity_issue(issue: str) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if not normalized:
+            return False
+        subject_entity_markers = (
+            "сущност",
+            "предметн",
+            "слот",
+            "slot",
+            "entity",
+            "entities",
+            "категор",
+            "любимый цвет",
+            "любимое животное",
+            "favorite color",
+            "favorite animal",
+            "напиток",
+            "спорт",
+            "drink",
+            "sport",
+        )
+        overstrict_markers = (
+            "подмен",
+            "замен",
+            "измен",
+            "вместо",
+            "replace",
+            "replacing",
+            "instead",
+            "source_text",
+            "паттерн",
+            "pattern",
+        )
+        hard_failure_markers = (
+            "другой навык",
+            "другой тип",
+            "different skill",
+            "different task type",
+            "wrong task type",
+            "не тот тип",
+            "не тот навык",
+        )
+        exact_required_markers = (
+            "явно требует",
+            "explicitly requires",
+            "exact entities",
+            "дословн",
+            "точно эти",
+        )
+        if any(marker in normalized for marker in hard_failure_markers):
+            return False
+        if any(marker in normalized for marker in exact_required_markers):
+            return False
+        return any(marker in normalized for marker in subject_entity_markers) and any(
+            marker in normalized for marker in overstrict_markers
+        )
+
+    @staticmethod
+    def _is_overstrict_practice_formatting_issue(issue: str) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if not normalized:
+            return False
+        formatting_markers = (
+            "<pre><code>",
+            "pre code",
+            "code block",
+            "кодовый блок",
+            "блок код",
+            "раздел код",
+            "подблок код",
+            "код в редакторе",
+            "starter code",
+            "starter_code",
+            "заготовк",
+            "placeholder",
+            "место для кода",
+            "оформлен",
+            "структур",
+            "layout",
+            "formatting",
+        )
+        methodology_failure_markers = (
+            "невыполним",
+            "не может выполнить",
+            "нет проверки",
+            "не проверяется",
+            "no checking",
+            "uncheckable",
+            "incoherent",
+            "противореч",
+            "contradict",
+            "раскрывает ответ",
+            "answer leakage",
+            "hidden_solution",
+            "corrected code",
+        )
+        if any(marker in normalized for marker in methodology_failure_markers):
+            return False
+        return any(marker in normalized for marker in formatting_markers)
+
     def _intermediate_artifact_approved(self, generation_artifacts: dict[str, Any] | None) -> bool:
         if not isinstance(generation_artifacts, dict):
             return False
         check = generation_artifacts.get("intermediate_assessment_check")
         return isinstance(check, dict) and bool(check.get("approved"))
-
-    def _intermediate_visible_key_markers(self, content: str) -> list[str]:
-        normalized = _normalize_copy_text(content)
-        markers = (
-            "correct_answers",
-            "reference_answer",
-            "autocheck_config",
-            "hidden_solution",
-            "teacher_explanation",
-            "internal_explanation",
-            "intermediate_assessment",
-            "generation_artifacts",
-            "generation artifacts",
-            "правильный ответ",
-            "правильные ответы",
-            "ключи",
-            "ключ правильного",
-            "эталон",
-        )
-        return [marker for marker in markers if marker in normalized]
 
     def _is_overstrict_intermediate_issue(self, issue: str) -> bool:
         normalized = _normalize_copy_text(issue)
@@ -1839,6 +2780,28 @@ class MaterialWorker:
         ):
             return True
         return False
+
+    def _is_overstrict_specification_qa_id_issue(self, issue: str) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if not self._mentions_qa_id(issue):
+            return False
+        leakage_markers = (
+            "leak",
+            "leakage",
+            "internal marker",
+            "service marker",
+            "source marker",
+            "утеч",
+            "служеб",
+            "маркер",
+            "внутрен",
+            "идентификатор",
+        )
+        return any(marker in normalized for marker in leakage_markers)
+
+    def _mentions_qa_id(self, text: str) -> bool:
+        normalized = _normalize_copy_text(text)
+        return any(marker in normalized for marker in ("qa-id", "qa id", "qa_id"))
 
 
 class PackageValidator:

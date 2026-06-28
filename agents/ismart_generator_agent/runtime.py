@@ -299,6 +299,8 @@ class IsmartGeneratorRuntime:
                 agents.extend(["PracticeTaskTemplateAgent", "PracticeTaskVariantAgent"])
             if item.kind == "self_work" and item.generation_artifacts:
                 agents.append("SelfWorkAutocheckAgent")
+            if item.kind == "current_control" and item.generation_artifacts:
+                agents.append("CurrentControlAutocheckAgent")
             if item.kind == "intermediate" and item.generation_artifacts:
                 agents.append("IntermediateAssessmentArtifactAgent")
             agents.append(item.agent_type)

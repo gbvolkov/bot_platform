@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -7,26 +8,30 @@ from langchain_core.messages import AIMessage
 
 from agents.ismart_generator_agent import cli
 from agents.ismart_generator_agent.context import (
+    build_intermediate_assessment_artifact_prompt,
     build_generation_prompt,
     build_package_validation_prompt,
+    build_practice_variant_prompt,
     build_validation_prompt,
     build_validation_controller_prompt,
     channel_key_visibility_policy_for_spec,
-    sanitize_generation_artifacts_for_validation,
+    generation_artifacts_for_validation,
     source_contract_for_spec,
     validation_policy_for_spec,
 )
-from agents.ismart_generator_agent.contracts import IsmartGenerationConfig, MaterialResult, MaterialSpec
+from agents.ismart_generator_agent.contracts import IsmartGenerationConfig, MaterialResult, MaterialSpec, ReferenceDocument
 from agents.ismart_generator_agent.contracts import ValidationResult
 from agents.ismart_generator_agent.runtime import IsmartGeneratorRuntime
-from agents.ismart_generator_agent.registry import get_material_spec
+from agents.ismart_generator_agent.registry import FORMAT_PROMPT, get_material_spec
 from agents.ismart_generator_agent.schemas import (
+    CurrentControlAutocheckQuestion,
+    CurrentControlAutocheckSet,
     GeneratedMaterial,
     IntermediateAssessmentArtifact,
     IntermediateAssessmentVariant,
-    IntermediateClosedQuestion,
     IntermediateCodeTask,
-    IntermediateOpenQuestion,
+    IntermediateOpenCodeQuestion,
+    IntermediateTestQuestion,
     MaterialValidationDecision,
     ValidationControllerDecision,
     PackageValidationDecision,
@@ -43,14 +48,39 @@ from agents.ismart_generator_agent.subagents import (
     build_subagent_registry,
 )
 from agents.ismart_generator_agent.workers import (
+    HTML_TEMPLATE_PATH,
     MaterialWorker,
     PackageValidator,
-    sanitize_internal_source_locators,
-    sanitize_visible_selfcheck_answers,
+    _normalize_practice_instance_tests,
+    load_html_format_template,
+    render_current_control_material_html,
+    render_practice_material_html,
 )
 
 
 VALID_HTML = '<style>.x{}</style><div class="cc-lesson"><h2 id="concepts">Concepts</h2><p>ok</p></div>'
+
+
+def _canonical_style_from_prompt_text(prompt: str) -> str:
+    canonical_start = prompt.find("КАНОНИЧЕСКИЙ БЛОК")
+    assert canonical_start >= 0
+    content_start = prompt.find("\n", canonical_start)
+    assert content_start >= 0
+    match = re.search(r"\\<style\\>.*?\\</style\\>", prompt[content_start:], flags=re.DOTALL)
+    assert match is not None
+    return re.sub(r"\\([<>#*])", r"\1", match.group(0)).strip()
+
+
+def test_saved_cc_lesson_template_matches_format_prompt_style() -> None:
+    prompt_path = IsmartGenerationConfig().prompts_dir / FORMAT_PROMPT
+    prompt_style = _canonical_style_from_prompt_text(prompt_path.read_text(encoding="utf-8"))
+    template = load_html_format_template()
+
+    assert HTML_TEMPLATE_PATH.exists()
+    assert template.style_block == prompt_style
+    assert "{{ body_html }}" in template.template_html
+    assert template.template_html.startswith("<style>")
+    assert template.template_html.endswith("</div>")
 
 
 class FakeStructuredModel:
@@ -111,6 +141,7 @@ def test_subagent_registry_builds_explicit_compiled_graphs() -> None:
     assert PracticeTaskTemplateSet in model.schemas
     assert PracticeTaskInstanceSet in model.schemas
     assert SelfWorkAutocheckSet in model.schemas
+    assert CurrentControlAutocheckSet in model.schemas
     assert IntermediateAssessmentArtifact in model.schemas
     assert MaterialValidationDecision in model.schemas
     assert ValidationControllerDecision in model.schemas
@@ -230,53 +261,7 @@ def test_worker_retries_with_previous_content_and_controller_score_accepts(tmp_p
     assert "issues_by_block" in generator.calls[1]["prompt"]
 
 
-def test_source_locator_sanitizer_replaces_learner_sources_section() -> None:
-    spec = MaterialSpec(
-        kind="self_work",
-        material_type="Self Work",
-        agent_type="SelfStudyAgent",
-        prompt_files=(),
-        validator_kind="self_study",
-    )
-    content = (
-        '<style>.x{}</style><div class="cc-lesson">'
-        "<h2>Задания</h2><p>Работа.</p>"
-        '<h2 id="sources">Источники</h2>'
-        "<ul><li>Материалы: <code>docs/ismart/Материалы для ИИ-агентов/"
-        "рабочая область агента/референсы/Шаблоны.md</code></li></ul>"
-        "<h2>Итоги</h2><p>Готово.</p></div>"
-    )
-
-    sanitized, notes = sanitize_internal_source_locators(content, spec)
-
-    assert notes
-    assert "docs/ismart" not in sanitized
-    assert ".md" not in sanitized
-    assert "рабочая область агента" not in sanitized
-    assert "Материал подготовлен на основе содержания занятия" in sanitized
-    assert "<h2>Итоги</h2>" in sanitized
-
-
-def test_source_locator_sanitizer_preserves_qa_paths() -> None:
-    spec = MaterialSpec(
-        kind="specification_qa",
-        material_type="QA",
-        agent_type="SpecificationQAAgent",
-        prompt_files=(),
-        validator_kind="qa",
-    )
-    content = (
-        '<style>.x{}</style><div class="cc-lesson">'
-        "<p><code>docs/ismart/референсы/Шаблоны.md</code></p></div>"
-    )
-
-    sanitized, notes = sanitize_internal_source_locators(content, spec)
-
-    assert sanitized == content
-    assert notes == []
-
-
-def test_worker_sanitizes_self_work_source_locators_before_validation(tmp_path: Path) -> None:
+def test_self_work_structured_validation_does_not_receive_rendered_source_paths(tmp_path: Path) -> None:
     generated = (
         '<style>.x{}</style><div class="cc-lesson">'
         "<h2>Задания</h2><p>Работа.</p>"
@@ -313,60 +298,14 @@ def test_worker_sanitizes_self_work_source_locators_before_validation(tmp_path: 
     )
 
     assert result.status == "approved"
-    assert "docs/ismart" not in result.content
-    assert ".md" not in result.content
-    assert "internal source locator section was replaced before validation" in result.agent_notes
+    assert "docs/ismart" in result.content
+    assert ".md" in result.content
     assert "docs/ismart" not in validator.calls[0]["prompt"]
+    assert "VALIDATION TARGET MODE:\nstructured_artifacts" in validator.calls[0]["prompt"]
+    assert "RENDERED HTML IS NOT INCLUDED" in validator.calls[0]["prompt"]
 
 
-def test_selfcheck_answer_sanitizer_removes_visible_keys() -> None:
-    spec = MaterialSpec(
-        kind="self_work",
-        material_type="Self Work",
-        agent_type="SelfStudyAgent",
-        prompt_files=(),
-        validator_kind="self_study",
-    )
-    content = (
-        '<style>.x{}</style><div class="cc-lesson">'
-        '<h2 id="selfcheck">Самоконтроль</h2>'
-        "<h3>Вопрос 1</h3><p>Что верно?</p>"
-        '<div class="cc-note"><div class="cc-note-title">Ключ для автопроверки</div>'
-        "<p>Правильный вариант: B</p></div>"
-        "<pre><code>{%6A%} {{item:Шаг 1}} {%answer%} {{order:1}} {%/answer%} {%/6A%}</code></pre>"
-        "<pre><code>{%3H%} {{input-text:x = x + 2:x+=2}} {%/3H%}</code></pre>"
-        "</div>"
-    )
-
-    sanitized, notes = sanitize_visible_selfcheck_answers(content, spec)
-
-    assert notes
-    assert "Ключ для автопроверки" not in sanitized
-    assert "Правильный вариант" not in sanitized
-    assert "{%answer%}" not in sanitized
-    assert "x = x + 2" not in sanitized
-    assert "x+=2" not in sanitized
-    assert "{{input-text}}" in sanitized
-    assert "Что верно?" in sanitized
-
-
-def test_selfcheck_answer_sanitizer_preserves_non_self_work() -> None:
-    spec = MaterialSpec(
-        kind="specification_qa",
-        material_type="QA",
-        agent_type="SpecificationQAAgent",
-        prompt_files=(),
-        validator_kind="qa",
-    )
-    content = '<style>.x{}</style><div class="cc-lesson"><p>{%answer%} {{order:1}} {%/answer%}</p></div>'
-
-    sanitized, notes = sanitize_visible_selfcheck_answers(content, spec)
-
-    assert sanitized == content
-    assert notes == []
-
-
-def test_worker_sanitizes_self_work_visible_selfcheck_answers_before_validation(tmp_path: Path) -> None:
+def test_self_work_structured_validation_does_not_receive_rendered_answer_keys(tmp_path: Path) -> None:
     generated = (
         '<style>.x{}</style><div class="cc-lesson">'
         '<h2 id="selfcheck">Самоконтроль</h2>'
@@ -404,12 +343,14 @@ def test_worker_sanitizes_self_work_visible_selfcheck_answers_before_validation(
     )
 
     assert result.status == "approved"
-    assert "Ключ для автопроверки" not in result.content
-    assert "{%answer%}" not in result.content
-    assert "pair:a // b=3" not in result.content
-    assert "visible self-check key blocks were removed before validation" in result.agent_notes
+    assert "Ключ для автопроверки" in result.content
+    assert "{%answer%}" in result.content
+    assert "pair:a // b=3" in result.content
+    assert "visible self-check key blocks were removed before validation" not in result.agent_notes
     assert "Ключ для автопроверки" not in validator.calls[0]["prompt"]
     assert "{{pair:a // b=3}}" not in validator.calls[0]["prompt"]
+    assert "VALIDATION TARGET MODE:\nstructured_artifacts" in validator.calls[0]["prompt"]
+    assert "RENDERED HTML IS NOT INCLUDED" in validator.calls[0]["prompt"]
 
 
 def test_practice_validator_policy_accepts_honest_underspecified_tasks() -> None:
@@ -432,6 +373,7 @@ def test_practice_validator_policy_accepts_honest_underspecified_tasks() -> None
     assert "For refactoring tasks, separate runtime tests from manual/static checks" in policy
     assert "stdout tests cannot prove" in policy
     assert "neither runtime tests" in policy
+    assert "visually spans the next line" in policy
 
 
 def test_self_work_validation_policy_forbids_visible_keys() -> None:
@@ -474,10 +416,23 @@ def test_practice_validation_prompt_allows_visible_expected_stdout() -> None:
 
     assert "Visible expected stdout in a student-facing deterministic test table is allowed" in prompt
     assert "Do not reject practice merely because deterministic tests show concrete expected stdout" in prompt
+    assert "do not validate learner-facing faulty_code" in prompt
+    assert "These fields are intentionally faulty learning inputs" in prompt
     assert "Their absence from student practice is correct" in prompt
 
 
-def test_practice_validation_prompt_sanitizes_teacher_only_artifacts() -> None:
+def test_prompt_skills_do_not_recommend_faulty_code_markers() -> None:
+    prompts_dir = Path("docs/ismart/Материалы для ИИ-агентов/рабочая область агента/prompts_skills")
+    practice_prompt = (prompts_dir / "03_Практика_prompt_skill.md").read_text(encoding="utf-8")
+    formatting_prompt = (prompts_dir / "08_Форматирование_заданий_курса_prompt.md").read_text(encoding="utf-8")
+    combined = f"{practice_prompt}\n{formatting_prompt}"
+
+    assert "нейтральный маркер/комментарий" not in combined
+    assert "фрагмент намеренно обрывается" not in combined
+    assert "Валидатор не должен требовать синтаксической корректности" in combined
+
+
+def test_practice_validation_prompt_includes_full_structured_artifacts() -> None:
     spec = MaterialSpec(
         kind="practice",
         material_type="Practice",
@@ -498,7 +453,6 @@ def test_practice_validation_prompt_sanitizes_teacher_only_artifacts() -> None:
                 }
             ]
         },
-        "practice_student_leak_check": {"approved": True, "issues": []},
     }
 
     prompt = build_validation_prompt(
@@ -512,16 +466,16 @@ def test_practice_validation_prompt_sanitizes_teacher_only_artifacts() -> None:
         generation_artifacts=artifacts,
     )
 
-    assert "VALIDATION VIEW OF GENERATION ARTIFACTS" in prompt
-    assert "SECRET_FIXED_CODE" not in prompt
-    assert "SECRET_TEACHER_NOTES" not in prompt
+    assert "STRUCTURED GENERATION ARTIFACTS" in prompt
+    assert "SECRET_FIXED_CODE" in prompt
+    assert "SECRET_TEACHER_NOTES" in prompt
     assert "runtime_tests" in prompt
     assert "manual_checks" in prompt
-    assert "practice_student_leak_check" in prompt
-    assert "Do not infer a learner-facing answer leak from internal artifacts" in prompt
+    assert "primary validation target for structured material kinds" in prompt
+    assert "forbidden internal content appears in structured student-facing fields" in prompt
 
 
-def test_practice_controller_prompt_sanitizes_teacher_only_artifacts() -> None:
+def test_practice_controller_prompt_includes_full_structured_artifacts() -> None:
     spec = MaterialSpec(
         kind="practice",
         material_type="Practice",
@@ -540,7 +494,6 @@ def test_practice_controller_prompt_sanitizes_teacher_only_artifacts() -> None:
                 }
             ]
         },
-        "practice_student_leak_check": {"approved": True, "issues": []},
     }
 
     prompt = build_validation_controller_prompt(
@@ -556,14 +509,16 @@ def test_practice_controller_prompt_sanitizes_teacher_only_artifacts() -> None:
         generation_artifacts=artifacts,
     )
 
-    assert "VALIDATION VIEW OF GENERATION ARTIFACTS" in prompt
-    assert "SECRET_FIXED_CODE" not in prompt
-    assert "SECRET_TEACHER_NOTES" not in prompt
+    assert "STRUCTURED GENERATION ARTIFACTS" in prompt
+    assert "SECRET_FIXED_CODE" in prompt
+    assert "SECRET_TEACHER_NOTES" in prompt
     assert "overrule validator objections that treat teacher-only fields inside internal generation artifacts" in prompt
+    assert "overrule validator objections that treat intentionally faulty starter" in prompt
+    assert "not syntactically correct" in prompt
     assert "Do not uphold a validator claim of learner-facing key leakage merely because an internal artifact" in prompt
 
 
-def test_validation_artifact_sanitizer_keeps_full_artifacts_for_teacher_channels() -> None:
+def test_generation_artifacts_for_validation_preserves_full_artifacts_for_all_channels() -> None:
     artifacts = {
         "practice_instances": {
             "tasks": [
@@ -591,10 +546,10 @@ def test_validation_artifact_sanitizer_keeps_full_artifacts_for_teacher_channels
         validator_kind="qa",
     )
 
-    practice_view = sanitize_generation_artifacts_for_validation(practice_spec, artifacts)
-    qa_view = sanitize_generation_artifacts_for_validation(qa_spec, artifacts)
+    practice_view = generation_artifacts_for_validation(practice_spec, artifacts)
+    qa_view = generation_artifacts_for_validation(qa_spec, artifacts)
 
-    assert "hidden_solution" not in practice_view["practice_instances"]["tasks"][0]
+    assert practice_view["practice_instances"]["tasks"][0]["hidden_solution"] == "SECRET_FIXED_CODE"
     assert qa_view["practice_instances"]["tasks"][0]["hidden_solution"] == "SECRET_FIXED_CODE"
 
 
@@ -613,12 +568,45 @@ def test_practice_source_contract_is_template_variant_based() -> None:
     rules = " ".join(contract["generation_rules"])
 
     assert contract["contract_type"] == "practice_source_contract"
+    assert contract["authoritative_task_ids"] == ["P1"]
+    assert contract["required_task_count"] == 1
     assert "authoritative task pattern" in rules
+    assert "lesson.difficulty.*.count is planning context only" in rules
     assert "Create a new concrete variant of the same pattern" in rules
+    assert "Do not choose manual_only merely because the starting code is intentionally faulty" in rules
+    assert "quote the expected diagnostic message" in rules
     assert "Do not show source_text, source task, source contract" in rules
     assert "level, source task, condition" not in rules
     assert "PracticeTaskTemplateAgent" in " ".join(contract["pipeline"])
     assert "PracticeTaskVariantAgent" in " ".join(contract["pipeline"])
+
+
+def test_practice_variant_prompt_requires_single_file_for_deterministic_fix_tasks() -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "lesson": {
+            "practice_tasks": {
+                "l2": [{"number": 3, "text": "Дан код: print(\"Привет). Найти ошибку и исправить."}],
+            },
+        }
+    }
+
+    prompt = build_practice_variant_prompt(
+        task=task,
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        templates={"tasks": [{"id": "P3", "template_id": "P3"}]},
+        previous_artifacts={},
+        previous_issues=[],
+    )
+
+    assert "Classify each fix/debug task before choosing run_mode" in prompt
+    assert "correction task with deterministic corrected behavior" in prompt
+    assert "Use run_mode=single_file" in prompt
+    assert "Do not downgrade this to manual_only just because the initial code is faulty" in prompt
+    assert "For no-stdin corrected-output fix/debug tasks, create 3 runtime_tests/tests" in prompt
 
 
 class NamedFakeGraph(FakeGraph):
@@ -630,6 +618,22 @@ class NamedFakeGraph(FakeGraph):
     def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
         self.call_order.append(self.name)
         return super().invoke(state)
+
+
+class RaisingThenFakeGraph(FakeGraph):
+    def __init__(self, error: Exception, responses: list[Any]) -> None:
+        super().__init__(responses)
+        self.error = error
+        self.raised = False
+
+    def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(dict(state))
+        if not self.raised:
+            self.raised = True
+            raise self.error
+        if not self.responses:
+            raise AssertionError("RaisingThenFakeGraph has no more responses")
+        return {"result": self.responses.pop(0)}
 
 
 def _practice_template_set() -> PracticeTaskTemplateSet:
@@ -653,6 +657,8 @@ def _practice_template_set() -> PracticeTaskTemplateSet:
 
 def _practice_instance_set() -> PracticeTaskInstanceSet:
     return PracticeTaskInstanceSet(
+        lesson_goal="Научиться создавать переменную и выводить её значение.",
+        lesson_objectives=["создаёт переменную", "выводит значение переменной", "проверяет результат запуска"],
         tasks=[
             PracticeTaskInstance(
                 id="P1",
@@ -664,7 +670,11 @@ def _practice_instance_set() -> PracticeTaskInstanceSet:
                 starter_code="",
                 input_requirements="Ввод не требуется.",
                 output_requirements="Программа выводит Тула.",
-                tests=[{"input": "", "expected_output": "Тула"}],
+                tests=[
+                    {"input": "", "expected_output": "Тула"},
+                    {"input": "", "expected_output": "Тула"},
+                    {"input": "", "expected_output": "Тула"},
+                ],
                 hidden_solution="city = 'Тула'\nprint(city)",
                 teacher_explanation="Проверить присваивание строки переменной city и вывод значения.",
                 uniqueness_notes=["Не использует пример из теории про имя."],
@@ -672,6 +682,25 @@ def _practice_instance_set() -> PracticeTaskInstanceSet:
         ],
         agent_notes=["instances ok"],
     )
+
+
+def _practice_instance_set_repaired() -> PracticeTaskInstanceSet:
+    repaired = _practice_instance_set().model_copy(deep=True)
+    repaired.lesson_goal = "Закрепить вывод значения переменной в редакторе Python."
+    repaired.tasks[0].student_condition = "Создайте переменную city со значением 'Казань' и выведите её."
+    repaired.tasks[0].output_requirements = "Программа выводит Казань."
+    repaired.tasks[0].tests = [
+        {"input": "", "expected_output": "Казань"},
+        {"input": "", "expected_output": "Казань"},
+        {"input": "", "expected_output": "Казань"},
+    ]
+    repaired.tasks[0].runtime_tests = [
+        {"input": "", "expected_output": "Казань"},
+        {"input": "", "expected_output": "Казань"},
+        {"input": "", "expected_output": "Казань"},
+    ]
+    repaired.tasks[0].hidden_solution = "city = 'Казань'\nprint(city)"
+    return repaired
 
 
 def _practice_worker_spec() -> MaterialSpec:
@@ -695,6 +724,18 @@ def _self_work_worker_spec() -> MaterialSpec:
         validator_kind="self_study",
         dependency_kinds=("theory", "practice"),
         reference_fields=("requirements", "reference_examples", "template_descriptions"),
+    )
+
+
+def _current_control_worker_spec() -> MaterialSpec:
+    return MaterialSpec(
+        kind="current_control",
+        material_type="Current Control",
+        agent_type="CurrentControlAgent",
+        prompt_files=(),
+        validator_kind="current_control",
+        reference_fields=("template_descriptions", "requirements", "reference_examples"),
+        json_field_labels=("lesson.content", "lesson.difficulty", "lesson.hours.raw"),
     )
 
 
@@ -731,6 +772,50 @@ def _self_work_autocheck_set() -> SelfWorkAutocheckSet:
     )
 
 
+def _current_control_autocheck_set() -> CurrentControlAutocheckSet:
+    return CurrentControlAutocheckSet(
+        questions=[
+            CurrentControlAutocheckQuestion(
+                id="CC1",
+                template_code="question",
+                question_type="single choice",
+                skill_target="print syntax",
+                student_prompt="Choose the correct print call.",
+                options=["print('Hi')", "prnt('Hi')"],
+                expected_answer_format="one option",
+                correct_answers=["print('Hi')"],
+                autocheck_config={"correct_option": 0},
+                internal_explanation="The built-in function is print.",
+            ),
+            CurrentControlAutocheckQuestion(
+                id="CC2",
+                template_code="6A",
+                question_type="ordering",
+                skill_target="program execution order",
+                student_prompt="Put the actions in execution order.",
+                options=["assign value", "call print"],
+                expected_answer_format="ordered options",
+                correct_answers=["assign value", "call print"],
+                autocheck_config={"order": [0, 1]},
+                internal_explanation="Assignment happens before print.",
+            ),
+            CurrentControlAutocheckQuestion(
+                id="CC3",
+                template_code="3H",
+                question_type="open text",
+                skill_target="function name recognition",
+                student_prompt="Write the exact Python function name used to output text, without parentheses.",
+                options=[],
+                expected_answer_format="function name only, without parentheses",
+                correct_answers=["print"],
+                autocheck_config={"normalize": "strip/lower", "accepted": ["print"]},
+                internal_explanation="The expected function name is print.",
+            ),
+        ],
+        agent_notes=["current control autocheck ok"],
+    )
+
+
 def _intermediate_worker_spec() -> MaterialSpec:
     return MaterialSpec(
         kind="intermediate",
@@ -751,29 +836,37 @@ def _intermediate_assessment_artifact() -> IntermediateAssessmentArtifact:
             IntermediateAssessmentVariant(
                 id=variant_id,
                 title=f"Variant {variant_index}",
-                closed_questions=[
-                    IntermediateClosedQuestion(
-                        id=f"{variant_id}-C{question_index:02d}",
+                test_questions=[
+                    IntermediateTestQuestion(
+                        id=f"{variant_id}-T{question_index:02d}",
                         template_code=template_codes[(question_index - 1) % len(template_codes)],
                         skill_target="module concept",
-                        student_prompt=f"Closed question {variant_index}.{question_index}",
+                        student_prompt=f"Test question {variant_index}.{question_index}",
                         options=["A", "B", "C", "D"],
-                        correct_answers=[f"Internal closed key {variant_index}.{question_index}"],
-                        autocheck_config={"correct": f"Internal closed key {variant_index}.{question_index}"},
-                        internal_explanation="Teacher-only closed explanation.",
+                        correct_answers=[f"Internal test key {variant_index}.{question_index}"],
+                        autocheck_config={"correct": f"Internal test key {variant_index}.{question_index}"},
+                        internal_explanation="Teacher-only test explanation.",
                     )
-                    for question_index in range(1, 17)
+                    for question_index in range(1, 6)
                 ],
-                open_questions=[
-                    IntermediateOpenQuestion(
-                        id=f"{variant_id}-O{question_index:02d}",
-                        skill_target="explain Python behavior",
-                        student_prompt=f"Open question {variant_index}.{question_index}",
-                        reference_answer=f"Internal open reference {variant_index}.{question_index}",
+                open_code_questions=[
+                    IntermediateOpenCodeQuestion(
+                        id=f"{variant_id}-OC{question_index:02d}",
+                        skill_target="write Python expression",
+                        student_prompt=f"Напишите код Python для открытого задания {variant_index}.{question_index}.",
+                        input_requirements="stdin contains one number",
+                        output_requirements="stdout contains processed number",
+                        runtime_tests=[
+                            {"input": "1\n", "expected_output": "2\n"},
+                            {"input": "2\n", "expected_output": "4\n"},
+                            {"input": "3\n", "expected_output": "6\n"},
+                        ],
+                        manual_check_rules=[],
+                        hidden_solution="value = int(input())\nprint(value * 2)",
                         rubric=["1 point for concept", "1 point for example"],
                         internal_explanation="Teacher-only open explanation.",
                     )
-                    for question_index in range(1, 5)
+                    for question_index in range(1, 6)
                 ],
                 code_tasks=[
                     IntermediateCodeTask(
@@ -782,12 +875,16 @@ def _intermediate_assessment_artifact() -> IntermediateAssessmentArtifact:
                         student_condition=f"Code task {variant_index}.{task_index}",
                         input_requirements="stdin contains one number",
                         output_requirements="stdout contains processed number",
-                        runtime_tests=[{"input": "2\n", "expected_output": "4\n"}],
+                        runtime_tests=[
+                            {"input": "1\n", "expected_output": "2\n"},
+                            {"input": "2\n", "expected_output": "4\n"},
+                            {"input": "3\n", "expected_output": "6\n"},
+                        ],
                         manual_check_rules=[],
                         hidden_solution="value = int(input())\nprint(value * 2)",
                         teacher_explanation="Teacher-only code explanation.",
                     )
-                    for task_index in range(1, 4)
+                    for task_index in range(1, 6)
                 ],
             )
         )
@@ -839,6 +936,43 @@ def test_self_work_worker_uses_autocheck_pipeline_and_writes_artifacts(tmp_path:
     assert list((tmp_path / "tmp" / "self-work").glob("*.self_work_autocheck_check.json"))
 
 
+def test_self_work_worker_freezes_valid_autocheck_on_retry(tmp_path: Path) -> None:
+    autocheck_agent = FakeGraph([_self_work_autocheck_set()])
+    self_work_agent = FakeGraph(
+        [
+            GeneratedMaterial(content=VALID_HTML, agent_notes=["attempt 1"]),
+            GeneratedMaterial(content=VALID_HTML, agent_notes=["attempt 2"]),
+        ]
+    )
+    validator = FakeGraph(
+        [
+            MaterialValidationDecision(approved=False, issues=["repair HTML"], fix_instructions=["repair HTML"]),
+            MaterialValidationDecision(approved=True, passed_blocks=[]),
+        ]
+    )
+    worker = MaterialWorker(
+        subagents={
+            "SelfWorkAutocheckAgent": autocheck_agent,
+            "SelfStudyAgent": self_work_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=2),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {}, "lesson": {"content_flags": {"self_work": True}, "hours": {"self_study": 2}}},
+        spec=_self_work_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert len(autocheck_agent.calls) == 1
+    assert len(self_work_agent.calls) == 2
+    assert "self_work_autocheck" in self_work_agent.calls[1]["prompt"]
+
+
 def test_self_work_worker_blocks_missing_internal_autocheck_keys_before_html(tmp_path: Path) -> None:
     bad = _self_work_autocheck_set()
     bad.selfcheck_questions[0].correct_answers = []
@@ -872,10 +1006,10 @@ def test_self_work_validation_view_keeps_internal_autocheck_answers() -> None:
     spec = _self_work_worker_spec()
     artifacts = {"self_work_autocheck": _self_work_autocheck_set().model_dump(mode="json")}
 
-    view = sanitize_generation_artifacts_for_validation(spec, artifacts)
+    view = generation_artifacts_for_validation(spec, artifacts)
 
     assert view["self_work_autocheck"]["selfcheck_questions"][0]["correct_answers"] == ["Internal self-check key 1"]
-    assert "self_work_autocheck_visibility_note" in view
+    assert set(view) == {"self_work_autocheck"}
 
 
 def test_self_work_source_contract_defines_internal_autocheck_layer() -> None:
@@ -888,6 +1022,277 @@ def test_self_work_source_contract_defines_internal_autocheck_layer() -> None:
     assert contract["required_selfcheck_question_count"] == 10
     assert "generation_artifacts.self_work_autocheck" in " ".join(contract["generation_rules"])
     assert "Do not require visible keys" in " ".join(contract["validation_rules"])
+
+
+def test_current_control_worker_uses_autocheck_pipeline_and_writes_artifacts(tmp_path: Path) -> None:
+    call_order: list[str] = []
+    autocheck_agent = NamedFakeGraph(
+        "CurrentControlAutocheckAgent",
+        [_current_control_autocheck_set()],
+        call_order,
+    )
+    validator = NamedFakeGraph(
+        "MaterialValidatorAgent",
+        [MaterialValidationDecision(approved=True, passed_blocks=[])],
+        call_order,
+    )
+    worker = MaterialWorker(
+        subagents={
+            "CurrentControlAutocheckAgent": autocheck_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {}, "lesson": {"content_flags": {"current_control": True}, "hours": {"raw": "1"}}},
+        spec=_current_control_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert call_order == ["CurrentControlAutocheckAgent", "MaterialValidatorAgent"]
+    assert result.generation_artifacts["current_control_autocheck"]["questions"][0]["correct_answers"]
+    assert "print('Hi')" in validator.calls[0]["prompt"]
+    assert "print(&#x27;Hi&#x27;)" in result.content
+    assert "The built-in function is print." not in result.content
+    assert "autocheck_config" not in result.content
+    assert "Current-control HTML rendered deterministically from current_control_autocheck." in result.agent_notes
+    assert list((tmp_path / "tmp" / "current-control").glob("*.current_control_autocheck.json"))
+    assert list((tmp_path / "tmp" / "current-control").glob("*.current_control_autocheck_check.json"))
+
+
+def test_current_control_worker_freezes_valid_autocheck_on_retry(tmp_path: Path) -> None:
+    autocheck_agent = FakeGraph([_current_control_autocheck_set()])
+    validator = FakeGraph(
+        [
+            MaterialValidationDecision(approved=False, issues=["repair HTML"], fix_instructions=["repair HTML"]),
+            MaterialValidationDecision(approved=True, passed_blocks=[]),
+        ]
+    )
+    worker = MaterialWorker(
+        subagents={
+            "CurrentControlAutocheckAgent": autocheck_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=2),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {}, "lesson": {"content_flags": {"current_control": True}, "hours": {"raw": "1"}}},
+        spec=_current_control_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert len(autocheck_agent.calls) == 1
+    assert len(validator.calls) == 2
+
+
+def test_current_control_worker_blocks_missing_internal_autocheck_keys_before_html(tmp_path: Path) -> None:
+    bad = _current_control_autocheck_set()
+    bad.questions[0].correct_answers = []
+    autocheck_agent = FakeGraph([bad])
+    validator = FakeGraph([MaterialValidationDecision(approved=True)])
+    worker = MaterialWorker(
+        subagents={
+            "CurrentControlAutocheckAgent": autocheck_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {}, "lesson": {"content_flags": {"current_control": True}, "hours": {"raw": "1"}}},
+        spec=_current_control_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "failed"
+    assert "needs at least one correct answer" in " ".join(result.validation_issues)
+    assert validator.calls == []
+
+
+def test_current_control_worker_retries_structured_output_parser_error(tmp_path: Path) -> None:
+    autocheck_agent = RaisingThenFakeGraph(
+        RuntimeError("5 validation errors for CurrentControlAutocheckSet: questions.3 agent_notes=["),
+        [_current_control_autocheck_set()],
+    )
+    validator = FakeGraph([MaterialValidationDecision(approved=True)])
+    worker = MaterialWorker(
+        subagents={
+            "CurrentControlAutocheckAgent": autocheck_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=2),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {}, "lesson": {"content_flags": {"current_control": True}, "hours": {"raw": "1"}}},
+        spec=_current_control_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert len(autocheck_agent.calls) == 2
+    assert len(validator.calls) == 1
+    checks = list((tmp_path / "tmp" / "current-control").glob("*.current_control_autocheck_check.json"))
+    assert len(checks) == 2
+
+
+def test_current_control_validation_view_keeps_internal_autocheck_answers() -> None:
+    spec = _current_control_worker_spec()
+    artifacts = {"current_control_autocheck": _current_control_autocheck_set().model_dump(mode="json")}
+
+    view = generation_artifacts_for_validation(spec, artifacts)
+
+    assert view["current_control_autocheck"]["questions"][0]["correct_answers"] == ["print('Hi')"]
+    assert set(view) == {"current_control_autocheck"}
+
+
+def test_current_control_renderer_does_not_render_matching_answer_pairs() -> None:
+    content = render_current_control_material_html(
+        {"lesson": {"lesson_number": 2, "title": "Облачная IDE"}},
+        {
+            "questions": [
+                {
+                    "id": "CC2",
+                    "template_code": "8D",
+                    "question_type": "matching",
+                    "student_prompt": "Соедините сообщение с причиной.",
+                    "options": [],
+                    "expected_answer_format": "4 пары",
+                    "correct_answers": ["A -> 1"],
+                    "autocheck_config": {
+                        "left_items": ["A", "B"],
+                        "right_items": ["1", "2"],
+                        "correct_pairs": [[0, 0], [1, 1]],
+                    },
+                    "internal_explanation": "A matches 1.",
+                }
+            ]
+        },
+        html_template=load_html_format_template(),
+    )
+
+    assert "Список A" in content
+    assert "Список B" in content
+    assert "<li>A</li>" in content
+    assert "<li>1</li>" in content
+    assert "<td>A</td>" not in content
+    assert "A -&gt; 1" not in content
+    assert "correct_pairs" not in content
+    assert "A matches 1." not in content
+
+
+def test_current_control_renderer_hides_expected_format_when_it_contains_answer() -> None:
+    content = render_current_control_material_html(
+        {"lesson": {"lesson_number": 2, "title": "Облачная IDE"}},
+        {
+            "questions": [
+                {
+                    "id": "CC3",
+                    "template_code": "3H",
+                    "question_type": "open_answer",
+                    "student_prompt": "Напишите правильную строку кода.",
+                    "options": [],
+                    "expected_answer_format": "Одна строка Python-кода: print(\"Привет\")",
+                    "correct_answers": ["print(\"Привет\")"],
+                    "autocheck_config": {"type": "open_answer"},
+                    "internal_explanation": "Correct answer is print.",
+                }
+            ]
+        },
+        html_template=load_html_format_template(),
+    )
+
+    assert "print(&quot;Привет&quot;)" not in content
+    assert "Одна строка Python-кода" not in content
+    assert "введите ответ в поле платформы" in content
+    assert "Correct answer is print." not in content
+
+
+def test_current_control_source_contract_defines_internal_autocheck_layer() -> None:
+    spec = _current_control_worker_spec()
+
+    contract = source_contract_for_spec({"lesson": {"hours": {"raw": "1"}}}, spec)
+
+    assert contract["contract_type"] == "current_control_autocheck_contract"
+    assert contract["required_question_count"] == 3
+    assert "generation_artifacts.current_control_autocheck" in " ".join(contract["generation_rules"])
+    assert "Do not require visible keys" in " ".join(contract["validation_rules"])
+
+
+def test_intermediate_artifact_prompt_requires_per_variant_coded_template_diversity() -> None:
+    spec = _intermediate_worker_spec()
+    prompt = build_intermediate_assessment_artifact_prompt(
+        task={"course": {}, "module": {"lessons": []}, "lesson": {"content_flags": {"attestation": True}}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        previous_artifacts={},
+        previous_issues=[
+            "intermediate_assessment.V1 must include at least 3 coded template types from 6A/6D/6G/8D/10D"
+        ],
+    )
+    contract = source_contract_for_spec({"course": {}, "module": {"lessons": []}, "lesson": {}}, spec)
+
+    assert "For each variant" in prompt
+    assert "at least 3 distinct coded template_code values" in prompt
+    assert "per-variant requirement" in prompt
+    assert "repair only test_questions in the named variant(s)" in prompt
+    assert "Do not satisfy this only across the whole artifact" in " ".join(contract["generation_rules"])
+    assert "fewer than 3 distinct coded template_code values" in " ".join(contract["validation_rules"])
+    assert "Runtime tests must describe the corrected/reference behavior" in prompt
+    assert "85.00 rather than 85.0" in prompt
+    assert "real left_items/right_items" in prompt
+    assert "right_items in deranged display order" in prompt
+    assert "right_items[i] must not be the correct pair for left_items[i]" in prompt
+    assert "repair only matching/pairing questions by reordering right_items" in prompt
+    assert "generic placeholders" in " ".join(contract["validation_rules"])
+    assert "even one same-position correct pair is answer-key leakage" in " ".join(contract["validation_rules"])
+
+
+def test_intermediate_generation_prompt_forbids_matching_placeholders() -> None:
+    spec = get_material_spec("intermediate")
+
+    prompt = build_generation_prompt(
+        task={"course": {}, "module": {"lessons": []}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        previous_content="",
+        previous_issues=[],
+        generation_artifacts={"intermediate_assessment": _intermediate_assessment_artifact().model_dump(mode="json")},
+    )
+
+    assert "render the actual visible left_items and right_items" in prompt
+    assert "Never sort right_items back into the correct-pair order" in prompt
+    assert "never leave any list B item on the same row as its correct list A pair" in prompt
+    assert "Never replace them with generic placeholders" in prompt
+    assert "Action 1" in prompt
+    assert "Variant A" in prompt
+
+
+def test_intermediate_test_question_schema_mentions_coded_template_diversity() -> None:
+    schema = IntermediateTestQuestion.model_json_schema()
+    description = schema["properties"]["template_code"]["description"]
+    autocheck_description = schema["properties"]["autocheck_config"]["description"]
+
+    assert "at least 3 distinct" in description
+    assert "6A, 6D, 6G, 8D, 10D" in description
+    assert "right_items must be a derangement" in autocheck_description
+    assert "no right_items[i] may be the correct pair for left_items[i]" in autocheck_description
 
 
 def test_intermediate_worker_uses_assessment_artifact_pipeline_and_writes_artifacts(tmp_path: Path) -> None:
@@ -930,18 +1335,142 @@ def test_intermediate_worker_uses_assessment_artifact_pipeline_and_writes_artifa
         "IntermediateAssessmentAgent",
         "MaterialValidatorAgent",
     ]
-    assert result.generation_artifacts["intermediate_assessment"]["variants"][0]["closed_questions"][0]["correct_answers"]
+    assert result.generation_artifacts["intermediate_assessment"]["variants"][0]["test_questions"][0]["correct_answers"]
     assert "GENERATION ARTIFACTS FOR THIS MATERIAL" in intermediate_agent.calls[0]["prompt"]
     assert "intermediate_assessment" in intermediate_agent.calls[0]["prompt"]
-    assert "Internal closed key 1.1" in validator.calls[0]["prompt"]
-    assert "Internal closed key" not in result.content
+    assert "Internal test key 1.1" in validator.calls[0]["prompt"]
+    assert "Internal test key" not in result.content
     assert list((tmp_path / "tmp" / "intermediate").glob("*.intermediate_assessment.json"))
     assert list((tmp_path / "tmp" / "intermediate").glob("*.intermediate_assessment_check.json"))
 
 
+def test_intermediate_worker_freezes_valid_assessment_artifact_on_retry(tmp_path: Path) -> None:
+    artifact_agent = FakeGraph([_intermediate_assessment_artifact()])
+    intermediate_agent = FakeGraph(
+        [
+            GeneratedMaterial(content=VALID_HTML, agent_notes=["attempt 1"]),
+            GeneratedMaterial(content=VALID_HTML, agent_notes=["attempt 2"]),
+        ]
+    )
+    validator = FakeGraph(
+        [
+            MaterialValidationDecision(approved=False, issues=["repair HTML"], fix_instructions=["repair HTML"]),
+            MaterialValidationDecision(approved=True, passed_blocks=[]),
+        ]
+    )
+    worker = MaterialWorker(
+        subagents={
+            "IntermediateAssessmentArtifactAgent": artifact_agent,
+            "IntermediateAssessmentAgent": intermediate_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=2),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {"lessons": []}, "lesson": {"content_flags": {"attestation": True}}},
+        spec=_intermediate_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert len(artifact_agent.calls) == 1
+    assert len(intermediate_agent.calls) == 2
+    assert "intermediate_assessment" in intermediate_agent.calls[1]["prompt"]
+
+
+def test_intermediate_worker_does_not_rule_block_visible_matching_answer_pairs(tmp_path: Path) -> None:
+    artifact = _intermediate_assessment_artifact()
+    question = artifact.variants[0].test_questions[0]
+    question.id = "V1-T01"
+    question.template_code = "8D"
+    question.student_prompt = "Match each error type with its usual cause."
+    question.options = ["SyntaxError", "NameError", "Missing quote", "Misspelled name"]
+    question.correct_answers = ["SyntaxError->Missing quote", "NameError->Misspelled name"]
+    question.autocheck_config = {
+        "type": "8D",
+        "left": [{"id": "l1", "text": "SyntaxError"}, {"id": "l2", "text": "NameError"}],
+        "right": [{"id": "r1", "text": "Missing quote"}, {"id": "r2", "text": "Misspelled name"}],
+        "correct_pairs": [["l1", "r1"], ["l2", "r2"]],
+    }
+    html = (
+        '<style>.x{}</style><div class="cc-lesson"><h2 id="variant-1">Variant 1</h2>'
+        "<p>Match each error type with its usual cause.</p>"
+        "<ul><li>SyntaxError — Missing quote</li><li>NameError — Misspelled name</li></ul>"
+        "</div>"
+    )
+    artifact_agent = FakeGraph([artifact])
+    intermediate_agent = FakeGraph([GeneratedMaterial(content=html)])
+    worker = MaterialWorker(
+        subagents={
+            "IntermediateAssessmentArtifactAgent": artifact_agent,
+            "IntermediateAssessmentAgent": intermediate_agent,
+        },
+        config=IsmartGenerationConfig(
+            prompts_dir=tmp_path,
+            output_root=tmp_path,
+            max_generation_iterations=1,
+            use_llm_validator=False,
+        ),
+    )
+
+    result = worker.run(
+        task={"course": {}, "module": {"lessons": []}, "lesson": {"content_flags": {"attestation": True}}},
+        spec=_intermediate_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert "leaks matching answer pair" not in " ".join(result.validation_issues)
+
+
+def test_intermediate_validation_prompt_uses_structured_artifact_not_html() -> None:
+    artifact = _intermediate_assessment_artifact().model_dump(mode="json")
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=_intermediate_worker_spec(),
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content='<style>.x{}</style><div class="cc-lesson"><p>VISIBLE_HTML_SHOULD_NOT_BE_SENT</p></div>',
+        rule_result=ValidationResult.ok(),
+        generation_artifacts={"intermediate_assessment": artifact},
+    )
+
+    assert "VALIDATION TARGET MODE:\nstructured_artifacts" in prompt
+    assert "STRUCTURED GENERATION ARTIFACTS" in prompt
+    assert "intermediate_assessment" in prompt
+    assert "VISIBLE_HTML_SHOULD_NOT_BE_SENT" not in prompt
+    assert "RENDERED HTML IS NOT INCLUDED" in prompt
+
+
+def test_intermediate_artifact_validation_does_not_semantically_reject_decimal_runtime_tests(tmp_path: Path) -> None:
+    artifact = _intermediate_assessment_artifact()
+    task = artifact.variants[0].code_tasks[0]
+    task.skill_target = "rounding to two decimal places"
+    task.student_condition = "Read price and print discounted price with exactly two decimal places."
+    task.output_requirements = "One number with exactly two decimal places."
+    task.runtime_tests = [
+        {"stdin": "100\n", "stdout": "85.0\n"},
+        {"stdin": "0\n", "stdout": "0.0\n"},
+        {"stdin": "199.99\n", "stdout": "169.99\n"},
+    ]
+    task.hidden_solution = "price = float(input())\nprint(round(price * 0.85, 2))"
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+
+    result = worker._validate_intermediate_assessment_artifact(artifact.model_dump(mode="json"))
+
+    assert result.approved
+    assert not result.issues
+
+
 def test_intermediate_worker_blocks_incomplete_assessment_artifact_before_html(tmp_path: Path) -> None:
     bad = _intermediate_assessment_artifact()
-    bad.variants[0].closed_questions[0].correct_answers = []
+    bad.variants[0].test_questions[0].correct_answers = []
     artifact_agent = FakeGraph([bad])
     intermediate_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
@@ -970,8 +1499,8 @@ def test_intermediate_worker_blocks_incomplete_assessment_artifact_before_html(t
 
 def test_intermediate_worker_blocks_single_key_when_question_declares_multiple_valid_answers(tmp_path: Path) -> None:
     bad = _intermediate_assessment_artifact()
-    question = bad.variants[2].closed_questions[10]
-    question.id = "V3-C11"
+    question = bad.variants[2].test_questions[3]
+    question.id = "V3-T04"
     question.template_code = "10D"
     question.student_prompt = (
         "В выражении c = (a * 2 + b * 3) / 5 выберите «магическое число», которое можно вынести в переменную."
@@ -1010,12 +1539,12 @@ def test_intermediate_validation_view_keeps_internal_assessment_answers() -> Non
     spec = _intermediate_worker_spec()
     artifacts = {"intermediate_assessment": _intermediate_assessment_artifact().model_dump(mode="json")}
 
-    view = sanitize_generation_artifacts_for_validation(spec, artifacts)
+    view = generation_artifacts_for_validation(spec, artifacts)
 
-    assert view["intermediate_assessment"]["variants"][0]["closed_questions"][0]["correct_answers"] == [
-        "Internal closed key 1.1"
+    assert view["intermediate_assessment"]["variants"][0]["test_questions"][0]["correct_answers"] == [
+        "Internal test key 1.1"
     ]
-    assert "intermediate_assessment_visibility_note" in view
+    assert set(view) == {"intermediate_assessment"}
 
 
 def test_intermediate_source_contract_defines_internal_assessment_layer() -> None:
@@ -1025,11 +1554,42 @@ def test_intermediate_source_contract_defines_internal_assessment_layer() -> Non
 
     assert contract["contract_type"] == "intermediate_assessment_contract"
     assert contract["required_variant_count"] == 4
-    assert contract["required_closed_questions_per_variant"] == 16
-    assert contract["required_open_questions_per_variant"] == 4
-    assert contract["required_code_tasks_per_variant"] == 3
+    assert contract["required_test_questions_per_variant"] == 5
+    assert contract["required_open_code_questions_per_variant"] == 5
+    assert contract["required_code_tasks_per_variant"] == 5
+    assert contract["minimum_code_item_ratio"] == "10/15"
     assert "generation_artifacts.intermediate_assessment" in " ".join(contract["generation_rules"])
     assert "Do not require visible keys" in " ".join(contract["validation_rules"])
+
+
+def test_intermediate_artifact_rejects_legacy_closed_open_shape(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    legacy_variant = {
+        "id": "V1",
+        "title": "Legacy",
+        "closed_questions": [{"id": "V1-C01", "template_code": "6A", "skill_target": "x", "student_prompt": "x"}],
+        "open_questions": [{"id": "V1-O01", "skill_target": "x", "student_prompt": "x", "reference_answer": "x"}],
+        "code_tasks": [
+            {
+                "id": "V1-P01",
+                "skill_target": "x",
+                "student_condition": "Напишите код.",
+                "hidden_solution": "print(1)",
+                "runtime_tests": [
+                    {"input": "", "expected_output": "1\n"},
+                    {"input": "", "expected_output": "1\n"},
+                    {"input": "", "expected_output": "1\n"},
+                ],
+                "manual_check_rules": [],
+            }
+        ],
+    }
+
+    result = worker._validate_intermediate_assessment_artifact({"variants": [legacy_variant] * 4})
+
+    assert result.approved is False
+    assert "test_questions must be a list" in " ".join(result.issues)
+    assert "open_code_questions must be a list" in " ".join(result.issues)
 
 
 def test_intermediate_validation_policy_allows_options_and_publishable_html() -> None:
@@ -1037,8 +1597,11 @@ def test_intermediate_validation_policy_allows_options_and_publishable_html() ->
 
     assert "Candidate answer options in closed questions are allowed" in policy
     assert "not answer-key leakage unless the correct option is explicitly marked" in policy
+    assert "Matching/classification questions may show the candidate left-side and right-side items" in policy
     assert "Do not require platform-import markup" in policy
     assert "Find/fix/explain the error" in policy
+    assert "Критерии оценивания" in policy
+    assert "manual_check_rules" in policy
 
 
 def test_intermediate_controller_prompt_overrules_template_and_option_false_positives() -> None:
@@ -1062,6 +1625,8 @@ def test_intermediate_controller_prompt_overrules_template_and_option_false_posi
     )
 
     assert "For intermediate, overrule validator objections that treat candidate answer options" in prompt
+    assert "keep failed when a matching/classification question displays solved left-right pairs" in prompt
+    assert "even one same-position correct pair" in prompt
     assert "platform-import template markup" in prompt
     assert "find/fix/explain the error" in prompt
     assert "generation_artifacts.intermediate_assessment" in prompt
@@ -1095,14 +1660,6 @@ def test_intermediate_appellate_policy_accepts_overstrict_controller_issues(tmp_
 
     adjusted = worker._apply_intermediate_appellate_policy(
         spec=_intermediate_worker_spec(),
-        content=(
-            '<style>.x{}</style><div class="cc-lesson">'
-            '<h2 id="v1">Variant 1</h2>'
-            "<p>Task 10D. Select the fragment that causes SyntaxError.</p>"
-            "<ul><li>print</li><li>(\"Hello)</li></ul>"
-            "<p>Fix the error in this line: print(\"Hello)</p>"
-            "</div>"
-        ),
         rule_result=ValidationResult.ok(),
         validation=ValidationResult.fail(decision["blocking_issues"]),
         generation_artifacts=artifacts,
@@ -1116,7 +1673,7 @@ def test_intermediate_appellate_policy_accepts_overstrict_controller_issues(tmp_
     assert len(adjusted["overruled_validator_issues"]) == 3
 
 
-def test_intermediate_appellate_policy_keeps_visible_key_failure(tmp_path: Path) -> None:
+def test_intermediate_appellate_policy_overrules_html_visible_key_claim_when_artifact_is_valid(tmp_path: Path) -> None:
     worker = MaterialWorker(
         subagents={},
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, validation_controller_accept_score=3),
@@ -1140,30 +1697,21 @@ def test_intermediate_appellate_policy_keeps_visible_key_failure(tmp_path: Path)
 
     adjusted = worker._apply_intermediate_appellate_policy(
         spec=_intermediate_worker_spec(),
-        content=(
-            '<style>.x{}</style><div class="cc-lesson">'
-            "<h2>Variant 1</h2><p>Правильный ответ: B</p></div>"
-        ),
         rule_result=ValidationResult.ok(),
         validation=ValidationResult.fail(decision["blocking_issues"]),
         generation_artifacts=artifacts,
         decision=decision,
     )
 
-    assert adjusted["approved"] is False
-    assert adjusted["decision"] == "keep_failed"
-    assert adjusted["blocking_issues"]
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["blocking_issues"] == []
 
 
 def test_practice_worker_uses_template_variant_pipeline_and_writes_artifacts(tmp_path: Path) -> None:
     call_order: list[str] = []
     template_agent = NamedFakeGraph("PracticeTaskTemplateAgent", [_practice_template_set()], call_order)
     variant_agent = NamedFakeGraph("PracticeTaskVariantAgent", [_practice_instance_set()], call_order)
-    practice_agent = NamedFakeGraph(
-        "PracticeMaterialAgent",
-        [GeneratedMaterial(content=VALID_HTML, agent_notes=["html ok"])],
-        call_order,
-    )
     validator = NamedFakeGraph(
         "MaterialValidatorAgent",
         [MaterialValidationDecision(approved=True, passed_blocks=[])],
@@ -1173,7 +1721,6 @@ def test_practice_worker_uses_template_variant_pipeline_and_writes_artifacts(tmp
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1208,15 +1755,60 @@ def test_practice_worker_uses_template_variant_pipeline_and_writes_artifacts(tmp
     assert call_order == [
         "PracticeTaskTemplateAgent",
         "PracticeTaskVariantAgent",
-        "PracticeMaterialAgent",
         "MaterialValidatorAgent",
     ]
     assert result.generation_artifacts["practice_instances"]["tasks"][0]["hidden_solution"]
-    assert "GENERATION ARTIFACTS FOR THIS MATERIAL" in practice_agent.calls[0]["prompt"]
     assert "PracticeTaskInstanceSet" not in result.content
+    assert "Создайте переменную city" in result.content
+    assert "city = 'Тула'\nprint(city)" not in result.content
     assert list((tmp_path / "tmp" / "practice").glob("*.practice_templates.json"))
     assert list((tmp_path / "tmp" / "practice").glob("*.practice_instances.json"))
-    assert list((tmp_path / "tmp" / "practice").glob("*.practice_duplicate_check.json"))
+
+
+def test_practice_worker_regenerates_instances_after_semantic_failure(tmp_path: Path) -> None:
+    template_agent = FakeGraph([_practice_template_set()])
+    variant_agent = FakeGraph([_practice_instance_set(), _practice_instance_set_repaired()])
+    validator = FakeGraph(
+        [
+            MaterialValidationDecision(approved=False, issues=["repair HTML"], fix_instructions=["repair HTML"]),
+            MaterialValidationDecision(approved=True, passed_blocks=[]),
+        ]
+    )
+    worker = MaterialWorker(
+        subagents={
+            "PracticeTaskTemplateAgent": template_agent,
+            "PracticeTaskVariantAgent": variant_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=2),
+    )
+
+    result = worker.run(
+        task={
+            "course": {},
+            "module": {},
+            "lesson": {
+                "content_flags": {"practice": True},
+                "hours": {"practice": 1},
+                "practice_tasks": {"l1": [{"number": 1, "text": "Create a variable with a name and print it"}]},
+            },
+        },
+        spec=_practice_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert len(template_agent.calls) == 1
+    assert len(variant_agent.calls) == 2
+    assert len(validator.calls) == 2
+    assert result.generation_artifacts["practice_instances"]["tasks"][0]["hidden_solution"] == "city = 'Казань'\nprint(city)"
+    assert "Создайте переменную city со значением &#x27;Казань&#x27;" in result.content
+    assert "Создайте переменную city со значением &#x27;Тула&#x27;" not in result.content
+    assert "PREVIOUS FULL VALIDATION RESULT" in variant_agent.calls[1]["prompt"]
+    assert "repair HTML" in variant_agent.calls[1]["prompt"]
+    assert "city = 'Казань'\nprint(city)" not in result.content
 
 
 def test_practice_worker_blocks_invalid_instance_ids_before_html(tmp_path: Path) -> None:
@@ -1237,13 +1829,11 @@ def test_practice_worker_blocks_invalid_instance_ids_before_html(tmp_path: Path)
     )
     template_agent = FakeGraph([_practice_template_set()])
     variant_agent = FakeGraph([bad_instances])
-    practice_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     worker = MaterialWorker(
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1267,11 +1857,10 @@ def test_practice_worker_blocks_invalid_instance_ids_before_html(tmp_path: Path)
 
     assert result.status == "failed"
     assert "practice_instances task ids/order mismatch" in " ".join(result.validation_issues)
-    assert practice_agent.calls == []
     assert validator.calls == []
 
 
-def test_practice_worker_blocks_direct_copy_from_theory_before_html(tmp_path: Path) -> None:
+def test_practice_worker_delegates_duplicate_semantics_to_validator(tmp_path: Path) -> None:
     copied_text = "Создайте переменную student_name со значением Анна и выведите её на экран"
     copied_instances = PracticeTaskInstanceSet(
         tasks=[
@@ -1289,7 +1878,6 @@ def test_practice_worker_blocks_direct_copy_from_theory_before_html(tmp_path: Pa
     )
     template_agent = FakeGraph([_practice_template_set()])
     variant_agent = FakeGraph([copied_instances])
-    practice_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     theory = MaterialResult(
         kind="theory",
@@ -1304,7 +1892,6 @@ def test_practice_worker_blocks_direct_copy_from_theory_before_html(tmp_path: Pa
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1326,14 +1913,13 @@ def test_practice_worker_blocks_direct_copy_from_theory_before_html(tmp_path: Pa
         attempts_dir=tmp_path / "tmp",
     )
 
-    assert result.status == "failed"
-    assert "directly copies text/code from dependency:theory" in " ".join(result.validation_issues)
-    assert result.generation_artifacts["practice_duplicate_check"]["approved"] is False
-    assert practice_agent.calls == []
-    assert validator.calls == []
+    assert result.status == "approved"
+    assert "practice_duplicate_check" not in result.generation_artifacts
+    assert copied_text in result.content
+    assert validator.calls
 
 
-def test_practice_worker_blocks_solution_hint_in_instance_before_html(tmp_path: Path) -> None:
+def test_practice_worker_delegates_solution_hint_semantics_to_validator(tmp_path: Path) -> None:
     hinted_instances = PracticeTaskInstanceSet(
         tasks=[
             PracticeTaskInstance(
@@ -1355,15 +1941,15 @@ def test_practice_worker_blocks_solution_hint_in_instance_before_html(tmp_path: 
             )
         ]
     )
-    template_agent = FakeGraph([_practice_template_set()])
+    hinted_templates = _practice_template_set()
+    hinted_templates.tasks[0].task_type = "fix"
+    template_agent = FakeGraph([hinted_templates])
     variant_agent = FakeGraph([hinted_instances])
-    practice_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     worker = MaterialWorker(
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1385,45 +1971,47 @@ def test_practice_worker_blocks_solution_hint_in_instance_before_html(tmp_path: 
         attempts_dir=tmp_path / "tmp",
     )
 
-    assert result.status == "failed"
-    assert "student-facing fields reveal the exact fix" in " ".join(result.validation_issues)
-    assert practice_agent.calls == []
-    assert validator.calls == []
+    assert result.status == "approved"
+    assert "замените prnt на print" in result.content
+    assert validator.calls
 
 
-def test_practice_solution_hint_check_allows_shared_error_message(tmp_path: Path) -> None:
-    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+def test_practice_instance_normalization_preserves_faulty_code_marker_lines() -> None:
+    instances = {
+        "tasks": [
+            {
+                "id": "P1",
+                "faulty_code": 'msg = "Paper collection tomorrow\nprint(msg)\n# фрагмент намеренно обрывается здесь\n',
+                "faulty_code_display": (
+                    'msg = "Paper collection tomorrow\n'
+                    "print(msg)\n"
+                    "# фрагмент намеренно обрывается здесь\n"
+                ),
+                "display_note": "Последняя строка - нейтральный маркер, где фрагмент намеренно обрывается.",
+                "tests": [],
+                "runtime_tests": [],
+            }
+        ],
+        "agent_notes": [],
+    }
 
-    issues = worker._practice_solution_hint_issues(
-        {
-            "id": "P1",
-            "task_type": "fix",
-            "source_text": "Fix code with SyntaxError: EOL while scanning string literal",
-            "scenario": "IDE показывает сообщение об ошибке.",
-            "student_condition": (
-                'При запуске кода появляется ошибка: "SyntaxError: EOL while scanning string literal". '
-                "Исправьте фрагмент так, чтобы программа запускалась."
-            ),
-            "input_requirements": "Ввод не требуется.",
-            "output_requirements": "Программа должна пройти тесты.",
-            "hidden_solution": (
-                "Сообщение SyntaxError: EOL while scanning string literal помогает понять тип ошибки; "
-                "исправление находится в starter_code."
-            ),
-        }
-    )
+    normalized = _normalize_practice_instance_tests(instances)
+    task = normalized["tasks"][0]
 
-    assert issues == []
+    assert "# фрагмент намеренно обрывается здесь" in task["faulty_code"]
+    assert "# фрагмент намеренно обрывается здесь" in task["faulty_code_display"]
+    assert "нейтральный маркер" in task["display_note"]
+    assert "Removed marker/comment line(s) from practice_instances.P1" not in " ".join(normalized["agent_notes"])
 
 
-def test_practice_worker_blocks_internal_source_marker_in_student_fields(tmp_path: Path) -> None:
+def test_practice_worker_does_not_block_internal_source_marker_in_student_fields(tmp_path: Path) -> None:
     marked_instances = PracticeTaskInstanceSet(
         tasks=[
             PracticeTaskInstance(
                 id="P1",
                 template_id="P1",
                 level="L1",
-                task_type="fix",
+                task_type="write_code",
                 scenario="Программа не запускается.",
                 student_condition=(
                     "Источник (как в задании урока): Fix one print typo.\n\n"
@@ -1440,13 +2028,11 @@ def test_practice_worker_blocks_internal_source_marker_in_student_fields(tmp_pat
     )
     template_agent = FakeGraph([_practice_template_set()])
     variant_agent = FakeGraph([marked_instances])
-    practice_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     worker = MaterialWorker(
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1468,10 +2054,10 @@ def test_practice_worker_blocks_internal_source_marker_in_student_fields(tmp_pat
         attempts_dir=tmp_path / "tmp",
     )
 
-    assert result.status == "failed"
-    assert "student-facing fields contain internal source/pipeline marker" in " ".join(result.validation_issues)
-    assert practice_agent.calls == []
-    assert validator.calls == []
+    assert result.status == "approved"
+    assert "Источник (как в задании урока)" in result.content
+    assert "student-facing fields contain internal source/pipeline marker" not in " ".join(result.validation_issues)
+    assert validator.calls
 
 
 def test_practice_worker_normalizes_output_test_key_before_rendering(tmp_path: Path) -> None:
@@ -1486,7 +2072,11 @@ def test_practice_worker_normalizes_output_test_key_before_rendering(tmp_path: P
                 student_condition="Создайте переменную status и выведите её.",
                 input_requirements="Ввод не требуется.",
                 output_requirements="Программа выводит Готово.",
-                tests=[{"input": "", "output": "Готово\n"}],
+                tests=[
+                    {"input": "", "output": "Готово\n"},
+                    {"input": "", "output": "Готово\n"},
+                    {"input": "", "output": "Готово\n"},
+                ],
                 hidden_solution="status = 'Готово'\nprint(status)",
                 teacher_explanation="Проверяется присваивание и вывод.",
             )
@@ -1494,13 +2084,11 @@ def test_practice_worker_normalizes_output_test_key_before_rendering(tmp_path: P
     )
     template_agent = FakeGraph([_practice_template_set()])
     variant_agent = FakeGraph([instances])
-    practice_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     worker = MaterialWorker(
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1526,7 +2114,7 @@ def test_practice_worker_normalizes_output_test_key_before_rendering(tmp_path: P
     assert result.status == "approved"
     assert task["tests"][0]["expected_output"] == "Готово\n"
     assert task["runtime_tests"][0]["expected_output"] == "Готово\n"
-    assert "GENERATION ARTIFACTS FOR THIS MATERIAL" in practice_agent.calls[0]["prompt"]
+    assert "Готово" in result.content
 
 
 def test_practice_worker_mirrors_runtime_tests_to_legacy_tests(tmp_path: Path) -> None:
@@ -1541,7 +2129,11 @@ def test_practice_worker_mirrors_runtime_tests_to_legacy_tests(tmp_path: Path) -
                 student_condition="Создайте переменную status и выведите её.",
                 input_requirements="Ввод не требуется.",
                 output_requirements="Программа выводит Готово.",
-                runtime_tests=[{"input": "", "stdout": "Готово\n"}],
+                runtime_tests=[
+                    {"input": "", "stdout": "Готово\n"},
+                    {"input": "", "stdout": "Готово\n"},
+                    {"input": "", "stdout": "Готово\n"},
+                ],
                 manual_checks=["Проверьте читаемое имя переменной."],
                 run_mode="separate_snippets",
                 hidden_solution="status = 'Готово'\nprint(status)",
@@ -1551,13 +2143,11 @@ def test_practice_worker_mirrors_runtime_tests_to_legacy_tests(tmp_path: Path) -
     )
     template_agent = FakeGraph([_practice_template_set()])
     variant_agent = FakeGraph([instances])
-    practice_agent = FakeGraph([GeneratedMaterial(content=VALID_HTML)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     worker = MaterialWorker(
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1586,20 +2176,192 @@ def test_practice_worker_mirrors_runtime_tests_to_legacy_tests(tmp_path: Path) -
     assert task["manual_checks"] == ["Проверьте читаемое имя переменной."]
 
 
-def test_practice_worker_fails_when_student_html_leaks_hidden_solution(tmp_path: Path) -> None:
-    leaked_html = (
-        '<style>.x{}</style><div class="cc-lesson"><h2>P1</h2>'
-        "<p>city = 'Тула'\nprint(city)</p></div>"
+def test_practice_instance_validation_does_not_require_three_runtime_tests(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    templates = _practice_template_set().model_dump(mode="json")
+    instances = _practice_instance_set().model_dump(mode="json")
+    instances["tasks"][0]["runtime_tests"] = [{"input": "", "expected_output": "Тула"}]
+    instances["tasks"][0]["tests"] = [{"input": "", "expected_output": "Тула"}]
+
+    result = worker._validate_practice_instances(
+        task={
+            "lesson": {
+                "practice_tasks": {"l1": [{"number": 1, "text": "Create a variable with a name and print it"}]},
+            }
+        },
+        spec=_practice_worker_spec(),
+        templates=templates,
+        instances=instances,
     )
+
+    assert result.approved is True
+    assert result.issues == []
+
+
+def test_practice_instance_validation_does_not_semantically_judge_error_demonstration_tests(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    templates = _practice_template_set().model_dump(mode="json")
+    templates["tasks"][0]["source_text"] = "Прочитать сообщение об ошибке SyntaxError при запуске кода"
+    templates["tasks"][0]["task_type"] = "debug_error_message"
+    templates["tasks"][0]["skill_target"] = "read Python error message"
+    templates["tasks"][0]["test_policy"] = "check expected error message"
+    instances = _practice_instance_set().model_dump(mode="json")
+    instances["tasks"][0]["task_type"] = "debug_error_message"
+    instances["tasks"][0]["scenario"] = "IDE показывает ошибку при запуске программы."
+    instances["tasks"][0]["student_condition"] = "Запустите код и прочитайте сообщение об ошибке."
+    instances["tasks"][0]["faulty_code"] = 'print("Готово)\n'
+    instances["tasks"][0]["faulty_code_display"] = 'print("Готово)\n'
+    instances["tasks"][0]["output_requirements"] = "Результат проверки - сообщение ошибки SyntaxError."
+    stdout_tests = [
+        {"input": "", "expected_output": "Готово\n"},
+        {"input": "", "expected_output": "Проверка\n"},
+        {"input": "", "expected_output": "Старт\n"},
+    ]
+    instances["tasks"][0]["runtime_tests"] = stdout_tests
+    instances["tasks"][0]["tests"] = stdout_tests
+
+    result = worker._validate_practice_instances(
+        task={
+            "lesson": {
+                "practice_tasks": {
+                    "l1": [{"number": 1, "text": "Прочитать сообщение об ошибке SyntaxError при запуске кода"}]
+                },
+            }
+        },
+        spec=_practice_worker_spec(),
+        templates=templates,
+        instances=instances,
+    )
+
+    assert result.approved is True
+
+
+def test_practice_instance_validation_allows_expected_error_for_error_demonstration_task(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    templates = _practice_template_set().model_dump(mode="json")
+    templates["tasks"][0]["source_text"] = "Прочитать сообщение об ошибке SyntaxError при запуске кода"
+    templates["tasks"][0]["task_type"] = "debug_error_message"
+    templates["tasks"][0]["skill_target"] = "read Python error message"
+    templates["tasks"][0]["test_policy"] = "check expected error message"
+    instances = _practice_instance_set().model_dump(mode="json")
+    instances["tasks"][0]["task_type"] = "debug_error_message"
+    instances["tasks"][0]["scenario"] = "IDE показывает ошибку при запуске программы."
+    instances["tasks"][0]["student_condition"] = "Запустите код и прочитайте сообщение об ошибке."
+    instances["tasks"][0]["faulty_code"] = 'print("Готово)\n'
+    instances["tasks"][0]["faulty_code_display"] = 'print("Готово)\n'
+    instances["tasks"][0]["output_requirements"] = "Результат проверки - сообщение ошибки SyntaxError."
+    error_tests = [
+        {"input": "", "expected_error": "SyntaxError"},
+        {"input": "", "expected_error": "SyntaxError"},
+        {"input": "", "expected_error": "SyntaxError"},
+    ]
+    instances["tasks"][0]["runtime_tests"] = error_tests
+    instances["tasks"][0]["tests"] = error_tests
+
+    result = worker._validate_practice_instances(
+        task={
+            "lesson": {
+                "practice_tasks": {
+                    "l1": [{"number": 1, "text": "Прочитать сообщение об ошибке SyntaxError при запуске кода"}]
+                },
+            }
+        },
+        spec=_practice_worker_spec(),
+        templates=templates,
+        instances=instances,
+    )
+
+    assert result.approved is True
+
+
+def test_practice_instance_validation_allows_manual_check_for_error_demonstration_task(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    templates = _practice_template_set().model_dump(mode="json")
+    templates["tasks"][0]["source_text"] = "Прочитать сообщение об ошибке SyntaxError при запуске кода"
+    templates["tasks"][0]["task_type"] = "debug_error_message"
+    templates["tasks"][0]["skill_target"] = "read Python error message"
+    templates["tasks"][0]["test_policy"] = "manual/static check: code runs without SyntaxError after correction"
+    instances = _practice_instance_set().model_dump(mode="json")
+    instances["tasks"][0]["task_type"] = "debug_error_message"
+    instances["tasks"][0]["scenario"] = "IDE показывает ошибку при запуске программы."
+    instances["tasks"][0]["student_condition"] = "Запустите код и прочитайте сообщение об ошибке."
+    instances["tasks"][0]["faulty_code"] = 'print("Готово)\n'
+    instances["tasks"][0]["faulty_code_display"] = 'print("Готово)\n'
+    instances["tasks"][0]["output_requirements"] = (
+        "После исправления программа запускается без SyntaxError, связанной с незавершённой строкой."
+    )
+    instances["tasks"][0]["runtime_tests"] = []
+    instances["tasks"][0]["tests"] = []
+    instances["tasks"][0]["manual_checks"] = ["Код запускается без SyntaxError, связанной с незавершённой строкой."]
+
+    result = worker._validate_practice_instances(
+        task={
+            "lesson": {
+                "practice_tasks": {
+                    "l1": [{"number": 1, "text": "Прочитать сообщение об ошибке SyntaxError при запуске кода"}]
+                },
+            }
+        },
+        spec=_practice_worker_spec(),
+        templates=templates,
+        instances=instances,
+    )
+
+    assert result.approved is True
+
+
+def test_practice_instance_validation_allows_stdout_after_fix_for_non_diagnostic_debug_task(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    templates = _practice_template_set().model_dump(mode="json")
+    templates["tasks"][0]["source_text"] = "Дан код: prnt(\"Привет\"). Исправить на print."
+    templates["tasks"][0]["task_type"] = "fix_faulty_code (NameError: misspelled print)"
+    templates["tasks"][0]["skill_target"] = "Исправлять NameError из-за опечатки в имени функции print."
+    templates["tasks"][0]["test_policy"] = (
+        "Предпочтительно stdout-автопроверка: после исправления вывод детерминирован. "
+        "В learner-facing тестах не требовать демонстрации NameError; демонстрация ошибки — диагностический шаг, "
+        "но автопроверка проверяет корректный запуск и stdout после исправления."
+    )
+    instances = _practice_instance_set().model_dump(mode="json")
+    instances["tasks"][0]["task_type"] = "fix_faulty_code (NameError: misspelled print)"
+    instances["tasks"][0]["scenario"] = (
+        "В проекте есть однострочный скрипт, который должен вывести метку версии. "
+        "Сейчас автопроверка падает из-за ошибки при запуске."
+    )
+    instances["tasks"][0]["student_condition"] = "Скопируйте код и исправьте его так, чтобы программа вывела строку."
+    instances["tasks"][0]["faulty_code"] = 'prnint("Версия: 1.0")\n'
+    instances["tasks"][0]["faulty_code_display"] = 'prnint("Версия: 1.0")\n'
+    instances["tasks"][0]["output_requirements"] = "Программа должна вывести одну строку: Версия: 1.0"
+    tests = [
+        {"input": "", "expected_output": "Версия: 1.0\n"},
+        {"input": "", "expected_output": "Версия: 1.0\n"},
+        {"input": "", "expected_output": "Версия: 1.0\n"},
+    ]
+    instances["tasks"][0]["runtime_tests"] = tests
+    instances["tasks"][0]["tests"] = tests
+    instances["tasks"][0]["manual_checks"] = ["Программа печатает только указанную строку."]
+
+    result = worker._validate_practice_instances(
+        task={
+            "lesson": {
+                "practice_tasks": {"l1": [{"number": 1, "text": "Дан код: prnt(\"Привет\"). Исправить на print."}]},
+            }
+        },
+        spec=_practice_worker_spec(),
+        templates=templates,
+        instances=instances,
+    )
+
+    assert result.approved is True
+
+
+def test_practice_worker_deterministic_renderer_excludes_hidden_solution(tmp_path: Path) -> None:
     template_agent = FakeGraph([_practice_template_set()])
     variant_agent = FakeGraph([_practice_instance_set()])
-    practice_agent = FakeGraph([GeneratedMaterial(content=leaked_html)])
     validator = FakeGraph([MaterialValidationDecision(approved=True)])
     worker = MaterialWorker(
         subagents={
             "PracticeTaskTemplateAgent": template_agent,
             "PracticeTaskVariantAgent": variant_agent,
-            "PracticeMaterialAgent": practice_agent,
             "MaterialValidatorAgent": validator,
         },
         config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=1),
@@ -1621,42 +2383,100 @@ def test_practice_worker_fails_when_student_html_leaks_hidden_solution(tmp_path:
         attempts_dir=tmp_path / "tmp",
     )
 
-    assert result.status == "failed"
-    assert "student practice HTML leaks hidden_solution for P1" in " ".join(result.validation_issues)
+    assert result.status == "approved"
+    assert "Создайте переменную city" in result.content
+    assert "city = 'Тула'\nprint(city)" not in result.content
+    assert "Practice HTML rendered deterministically from practice_instances." in result.agent_notes
     assert len(validator.calls) == 1
 
 
-def test_practice_student_leak_check_ignores_starter_code_in_hidden_solution(tmp_path: Path) -> None:
-    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
-    content = "<style></style><div class=\"cc-lesson\"><pre><code># Табличка\nprint('Секция)</code></pre></div>"
-    instances = {
-        "tasks": [
-            {
-                "id": "P1",
-                "scenario": "Исправьте программу.",
-                "student_condition": "Код не запускается.",
-                "starter_code": "# Табличка\nprint('Секция)",
-                "input_requirements": "stdin пустой",
-                "output_requirements": "stdout должен совпасть с тестом",
-                "hidden_solution": "Нужно закрыть строковый литерал.\nИсправленный код:\n# Табличка\nprint('Секция')",
-                "teacher_explanation": "Строка должна быть закрыта кавычкой.",
-            }
-        ]
-    }
+def test_practice_renderer_uses_format_prompt_with_verbatim_nameerror_check(tmp_path: Path) -> None:
+    html_template = load_html_format_template()
 
-    assert worker._practice_student_leak_issues(content, instances) == []
-
-
-def test_practice_student_leak_check_rejects_source_pipeline_markers(tmp_path: Path) -> None:
-    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
-    content = (
-        "<style></style><div class=\"cc-lesson\"><p><strong>Исходный паттерн из JSON:</strong> "
-        "Исправить на print.</p></div>"
+    content = render_practice_material_html(
+        {"lesson": {"number": 2, "title": "Облачная IDE"}},
+        {
+            "tasks": [
+                {
+                    "id": "P2",
+                    "level": "L1",
+                    "scenario": "Запустите код и определите тип ошибки.",
+                    "student_condition": "Исправьте программу после диагностики.",
+                    "starter_code": "pritn('Готово')",
+                    "input_requirements": "Ввод не требуется.",
+                    "output_requirements": "После исправления программа выводит Готово.",
+                    "runtime_tests": [{"input": "", "expected_output": "Готово\n"}],
+                    "manual_checks": ["Запуск исходного кода даёт NameError: name 'pritn' is not defined."],
+                }
+            ]
+        },
+        html_template=html_template,
     )
 
-    issues = worker._practice_student_leak_issues(content, {"tasks": []})
+    assert ".cc-lesson { max-width: 920px; margin: 0 auto; padding: 24px 18px;" in content
+    assert "<h1>Занятие 2. Облачная IDE</h1>" in content
+    assert "pritn(&#x27;Готово&#x27;)" in content
+    assert "NameError: name &#x27;pritn&#x27; is not defined" in content
+    assert "NameError: name &#x27;...&#x27; is not defined" not in content
+    assert "<td><pre><code></code></pre></td>" in content
 
-    assert "student practice HTML contains internal source/pipeline marker" in " ".join(issues)
+
+def test_practice_renderer_renders_lesson_goal_and_objectives(tmp_path: Path) -> None:
+    content = render_practice_material_html(
+        {"lesson": {"number": 2, "title": "Облачная IDE"}},
+        _practice_instance_set().model_dump(mode="json"),
+        html_template=load_html_format_template(),
+    )
+
+    assert '<section id="goals"><h2 id="goals">Цели и задачи</h2>' in content
+    assert "<strong>Цель:</strong> Научиться создавать переменную и выводить её значение." in content
+    assert "<li>создаёт переменную</li>" in content
+
+
+def test_practice_renderer_adds_empty_code_block_for_write_code_without_starter(tmp_path: Path) -> None:
+    content = render_practice_material_html(
+        {"lesson": {"number": 3, "title": "Вывод данных"}},
+        {
+            "tasks": [
+                {
+                    "id": "P1",
+                    "level": "L1",
+                    "task_type": "write_code",
+                    "scenario": "Создайте переменную и выведите её.",
+                    "student_condition": "Напишите программу.",
+                    "input_requirements": "Ввод не требуется.",
+                    "output_requirements": "Выведите значение переменной.",
+                    "runtime_tests": [{"input": "", "expected_output": "Сокол\n"}],
+                    "run_mode": "single_file",
+                }
+            ]
+        },
+        html_template=load_html_format_template(),
+    )
+
+    assert "<p><strong>Код в редакторе:</strong></p><pre><code></code></pre>" in content
+
+
+def test_practice_renderer_does_not_add_empty_code_block_for_manual_only_without_code(tmp_path: Path) -> None:
+    content = render_practice_material_html(
+        {"lesson": {"number": 2, "title": "Ошибки"}},
+        {
+            "tasks": [
+                {
+                    "id": "P1",
+                    "level": "L1",
+                    "task_type": "diagnostic",
+                    "scenario": "Прочитайте сообщение об ошибке.",
+                    "student_condition": "Назовите тип ошибки.",
+                    "manual_checks": ["Назван класс SyntaxError."],
+                    "run_mode": "manual_only",
+                }
+            ]
+        },
+        html_template=load_html_format_template(),
+    )
+
+    assert "<p><strong>Код в редакторе:</strong></p><pre><code></code></pre>" not in content
 
 
 def test_channel_policy_resolves_key_visibility_for_mr_practice() -> None:
@@ -1672,8 +2492,9 @@ def test_channel_policy_resolves_key_visibility_for_mr_practice() -> None:
     validation_policy = validation_policy_for_spec(spec)
 
     assert "CHANNEL AND KEY VISIBILITY POLICY" in channel_policy
-    assert "Learner-facing lesson materials are theory, practice, and self_work" in channel_policy
-    assert "Self-check/autocheck keys for learner-facing self_work must not be visible in HTML" in channel_policy
+    assert "Learner-facing lesson materials are theory, practice, self_work, current_control, and intermediate" in channel_policy
+    assert "Autocheck keys for learner-facing self_work and current_control must not be visible in HTML" in channel_policy
+    assert "generation_artifacts.current_control_autocheck" in channel_policy
     assert "mr_practice is teacher-facing and is expected to include keys/solutions" in channel_policy
     assert "A \"do not show keys\" instruction applies to learner-facing materials" in channel_policy
     assert "MR_PRACTICE VALIDATION POLICY" in validation_policy
@@ -1775,9 +2596,16 @@ def test_mr_intermediate_contract_uses_dependency_artifact_without_key_bank_html
     contract = source_contract_for_spec({"course": {}, "module": {}, "lesson": {}}, spec)
 
     assert contract["contract_type"] == "mr_intermediate_guidance_contract"
+    assert contract["required_assessment_composition"]["variant_count"] == 4
+    assert contract["required_assessment_composition"]["items_per_variant"] == 15
+    assert contract["required_assessment_composition"]["minimum_code_writing_items_per_variant"] == 10
+    assert contract["scoring_policy"]["allow_numeric_points_thresholds_or_grade_conversion"].startswith("only when")
     assert "generation_artifacts.intermediate_assessment" in " ".join(contract["generation_rules"])
     assert "Do not duplicate the full variant-by-variant answer bank" in " ".join(contract["generation_rules"])
+    assert "Do not invent a numeric scoring scale" in " ".join(contract["generation_rules"])
     assert "Do not require a full key bank inside mr_intermediate HTML" in " ".join(contract["validation_rules"])
+    assert "Reject if mr_intermediate invents numeric scoring" in " ".join(contract["validation_rules"])
+    assert "required per-variant composition" in " ".join(contract["validation_rules"])
 
 
 def test_mr_intermediate_prompts_keep_full_keys_in_intermediate_artifact() -> None:
@@ -1817,7 +2645,224 @@ def test_mr_intermediate_prompts_keep_full_keys_in_intermediate_artifact() -> No
     assert "Reject mr_intermediate HTML if it duplicates full variant-by-variant keys" in validation_prompt
     assert "intermediate_assessment" in generation_prompt
     assert "Не печатай полный банк ключей" in generation_prompt
-    assert "внутреннего QA/artifact-слоя intermediate_assessment" in generation_prompt
+    assert "Не выдумывай числовую шкалу оценивания" in generation_prompt
+    assert "4 варианта; в каждом варианте 15 элементов" in generation_prompt
+    assert "закрытого учительского проверочного слоя" in generation_prompt
+    assert "внутреннего QA/artifact-слоя intermediate_assessment" not in generation_prompt
+    assert "Reject invented scoring norms" in validation_prompt
+    assert "required approved assessment composition" in validation_prompt
+
+
+def test_mr_intermediate_validation_prompt_omits_dependency_html_content() -> None:
+    spec = get_material_spec("mr_intermediate")
+    dependency = MaterialResult(
+        kind="intermediate",
+        material_type="Intermediate",
+        agent_type="IntermediateAssessmentAgent",
+        status="approved",
+        iterations=1,
+        content='<style></style><div class="cc-lesson"><h2 id="v1">SECRET_DEPENDENCY_KIM</h2></div>',
+        prompt_files=(),
+        generation_artifacts={"intermediate_assessment": _intermediate_assessment_artifact().model_dump(mode="json")},
+    )
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[dependency],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert "SECRET_DEPENDENCY_KIM" not in prompt
+    assert '"content_omitted": true' in prompt
+    assert "Dependency intermediate HTML is not the checked mr_intermediate material" in prompt
+    assert "CHECKED MATERIAL HTML START" in prompt
+
+
+def test_validation_prompt_requires_checked_html_evidence_quote() -> None:
+    spec = get_material_spec("specification_qa")
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert '"evidence_quote"' in prompt
+    assert "CHECKED MATERIAL HTML START" in prompt
+    assert "include an exact short evidence_quote copied from CHECKED MATERIAL HTML" in prompt
+
+
+def test_validation_prompt_uses_clean_reference_context_without_paths_or_sha() -> None:
+    spec = get_material_spec("specification_qa")
+    references = {
+        "requirements": [
+            ReferenceDocument(
+                field="requirements",
+                path="docs/ismart/source_rules.md",
+                resolved_path="C:\\Projects\\bot_platform\\docs\\ismart\\source_rules.md",
+                sha="abc123def456",
+                truncated=False,
+                content="Reference content for QA validation.",
+            )
+        ]
+    }
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references=references,
+        dependencies=[],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert "Reference content for QA validation." in prompt
+    assert "source_rules" in prompt
+    assert "docs/ismart/source_rules.md" not in prompt
+    assert "C:\\Projects\\bot_platform" not in prompt
+    assert "abc123def456" not in prompt
+    assert '"sha"' not in prompt
+    assert '"resolved_path"' not in prompt
+
+
+def test_validation_prompt_dependency_context_omits_runtime_metadata() -> None:
+    spec = get_material_spec("specification_qa")
+    dependency = MaterialResult(
+        kind="practice",
+        material_type="Practice",
+        agent_type="PracticeMaterialAgent",
+        status="approved",
+        iterations=7,
+        content=VALID_HTML,
+        prompt_files=("03_Практика_prompt_skill.md",),
+        validation_issues=["old validator issue"],
+        agent_notes=["internal generation note"],
+        generation_artifacts={"practice_instances": {"tasks": [{"id": "P1", "hidden_solution": "answer = 1"}]}},
+    )
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[dependency],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert '"kind": "practice"' in prompt
+    assert '"status": "approved"' in prompt
+    assert "answer = 1" in prompt
+    assert "PracticeMaterialAgent" not in prompt
+    assert '"iterations": 7' not in prompt
+    assert "old validator issue" not in prompt
+    assert "internal generation note" not in prompt
+    assert "03_Практика_prompt_skill.md" not in prompt
+
+
+def test_validation_prompt_requires_complete_first_pass_audit() -> None:
+    spec = get_material_spec("practice")
+    artifacts = {
+        "practice_templates": _practice_template_set().model_dump(mode="json"),
+        "practice_instances": _practice_instance_set().model_dump(mode="json"),
+    }
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content='<style></style><div class="cc-lesson"><p>HTML_SHOULD_NOT_BE_VALIDATED</p></div>',
+        rule_result=ValidationResult.ok(),
+        generation_artifacts=artifacts,
+    )
+
+    assert "VALIDATION COMPLETENESS AND STABILITY" in prompt
+    assert "VALIDATION TARGET MODE:\nstructured_artifacts" in prompt
+    assert "HTML_SHOULD_NOT_BE_VALIDATED" not in prompt
+    assert "RENDERED HTML IS NOT INCLUDED" in prompt
+    assert "On the first validation pass, report every material issue" in prompt
+    assert "Do not stop after finding the first blocking issue" in prompt
+    assert "Keep the validation standard stable across attempts" in prompt
+    assert "Top-level issues must be a complete summary of all blocking issues" in prompt
+
+
+def test_controller_prompt_treats_unquoted_visible_claims_as_unproven() -> None:
+    spec = get_material_spec("specification_qa")
+
+    prompt = build_validation_controller_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+        llm_result=ValidationResult.fail(["visible HTML contains docs/..."]),
+        merged_validation=ValidationResult.fail(["visible HTML contains docs/..."]),
+    )
+
+    assert "require a direct quote from CHECKED MATERIAL HTML" in prompt
+    assert "VALIDATION TARGET MODE:\nhtml" in prompt
+    assert "Treat a learner-facing leakage claim as unproven" in prompt
+
+
+def test_controller_prompt_for_structured_materials_excludes_rendered_html() -> None:
+    artifacts = {
+        "practice_templates": _practice_template_set().model_dump(mode="json"),
+        "practice_instances": _practice_instance_set().model_dump(mode="json"),
+    }
+    prompt = build_validation_controller_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=get_material_spec("practice"),
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content='<style></style><div class="cc-lesson"><p>HTML_CONTROLLER_SHOULD_NOT_SEE</p></div>',
+        rule_result=ValidationResult.ok(),
+        llm_result=ValidationResult.fail(["HTML formatting issue"]),
+        merged_validation=ValidationResult.fail(["HTML formatting issue"]),
+        generation_artifacts=artifacts,
+    )
+
+    assert "VALIDATION TARGET MODE:\nstructured_artifacts" in prompt
+    assert "HTML_CONTROLLER_SHOULD_NOT_SEE" not in prompt
+    assert "RENDERED HTML IS NOT INCLUDED" in prompt
+    assert "do not keep failed for HTML rendering/assembly issues" in prompt
+
+
+def test_mr_intermediate_html_first_validation_prompt_keeps_checked_html_visible() -> None:
+    spec = get_material_spec("mr_intermediate")
+    content = (
+        '<style></style><div class="cc-lesson">'
+        "<p>Use intermediate_assessment, generation_artifacts.hidden_solution and autocheck_config.</p>"
+        "</div>"
+    )
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content=content,
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert "VALIDATION TARGET MODE:\nhtml" in prompt
+    assert "CHECKED MATERIAL HTML START" in prompt
+    assert "intermediate_assessment" in prompt
+    assert "autocheck_config" in prompt
 
 
 def test_controller_prompt_overrules_missing_mr_intermediate_key_bank_when_artifact_exists() -> None:
@@ -1849,6 +2894,109 @@ def test_controller_prompt_overrules_missing_mr_intermediate_key_bank_when_artif
     assert "MR_INTERMEDIATE VALIDATION POLICY" in prompt
     assert "generation_artifacts.intermediate_assessment" in prompt
     assert "Do not require a full key bank" in prompt
+    assert "keep failed when the checked HTML invents maximum points" in prompt
+    assert "approved composition of each variant" in prompt
+
+
+def test_mr_intermediate_appellate_policy_overrules_dependency_kim_duplication_claim(tmp_path: Path) -> None:
+    spec = get_material_spec("mr_intermediate")
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    issue = "mr_intermediate duplicates full KIM variants V1-V4 from the intermediate dependency"
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 1,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [issue],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [issue],
+    }
+
+    adjusted = worker._apply_mr_intermediate_appellate_policy(
+        spec=spec,
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail([issue]),
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["quality_score"] >= worker.config.validation_controller_accept_score
+    assert adjusted["blocking_issues"] == []
+    assert issue in adjusted["overruled_validator_issues"]
+
+
+def test_mr_intermediate_appellate_policy_overrules_full_kim_duplication_claim(tmp_path: Path) -> None:
+    spec = get_material_spec("mr_intermediate")
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    issue = "mr_intermediate duplicates full KIM variants V1-V4 in checked HTML"
+    full_kim_html = (
+        '<style></style><div class="cc-lesson">'
+        "<h2>Variant 1</h2><p><strong>Task 1</strong></p><p><strong>Task 2</strong></p>"
+        "<h2>Variant 2</h2><p><strong>Task 1</strong></p><p><strong>Task 2</strong></p>"
+        "<h2>Variant 3</h2><p><strong>Task 1</strong></p><p><strong>Task 2</strong></p>"
+        "<h2>Variant 4</h2><p><strong>Task 1</strong></p><p><strong>Task 2</strong></p>"
+        "</div>"
+    )
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 1,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [issue],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [issue],
+    }
+
+    adjusted = worker._apply_mr_intermediate_appellate_policy(
+        spec=spec,
+        content=full_kim_html,
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail([issue]),
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["blocking_issues"] == []
+    assert issue in adjusted["overruled_validator_issues"]
+
+
+def test_mr_intermediate_appellate_policy_keeps_internal_marker_leak_blocking(tmp_path: Path) -> None:
+    spec = get_material_spec("mr_intermediate")
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    issue = "publishable HTML exposes intermediate_assessment internal marker"
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 1,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [issue],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [issue],
+    }
+
+    adjusted = worker._apply_mr_intermediate_appellate_policy(
+        spec=spec,
+        content='<style></style><div class="cc-lesson"><p>intermediate_assessment</p></div>',
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail([issue]),
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is False
+    assert adjusted["blocking_issues"] == [issue]
+    assert adjusted["overruled_validator_issues"] == []
 
 
 def test_specification_qa_contract_preserves_underspecified_practice_tasks() -> None:
@@ -1924,6 +3072,112 @@ def test_specification_qa_validation_prompt_rejects_invented_underspecified_test
     assert "Do not require or approve invented concrete values" in prompt
     assert "no deterministic test" in prompt
     assert "reuse that interpretation" in prompt
+
+
+def test_specification_qa_validation_prompt_allows_visible_qa_ids_and_forbids_process_logs() -> None:
+    spec = get_material_spec("specification_qa")
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content='<style></style><div class="cc-lesson"><h3>P1 - QA-ID: L2-P1</h3></div>',
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert "QA-ID labels are allowed in specification_qa visible HTML" in prompt
+    assert "Do not treat visible QA-ID labels as source-marker leakage" in prompt
+    assert "Visible specification_qa HTML must not contain raw local source paths" in prompt
+    assert "source hashes/SHA values" in prompt
+    assert "исправлено по замечаниям валидатора" in prompt
+
+
+def test_specification_qa_controller_prompt_overrules_visible_qa_id_leakage_claims() -> None:
+    spec = get_material_spec("specification_qa")
+
+    prompt = build_validation_controller_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content='<style></style><div class="cc-lesson"><h3>P1 - QA-ID: L2-P1</h3></div>',
+        rule_result=ValidationResult.ok(),
+        llm_result=ValidationResult.fail(["QA-ID is internal marker leakage"]),
+        merged_validation=ValidationResult.fail(["QA-ID is internal marker leakage"]),
+    )
+
+    assert "For specification_qa, overrule validator objections that visible QA-ID labels are internal marker leakage" in prompt
+    assert "QA-ID is allowed in this internal QA artifact" in prompt
+    assert "source hashes/SHA values" in prompt
+    assert "process/retry logs" in prompt
+
+
+def test_specification_qa_appellate_policy_approves_qa_id_only_rejection(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 2.0,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": ["QA-ID is internal marker leakage in visible HTML"],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": ["Remove QA-ID from headings"],
+    }
+
+    adjusted = worker._apply_specification_qa_appellate_policy(
+        spec=get_material_spec("specification_qa"),
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail(["QA-ID is internal marker leakage in visible HTML"]),
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["quality_score"] >= worker.config.validation_controller_accept_score
+    assert adjusted["blocking_issues"] == []
+    assert adjusted["overruled_validator_issues"] == ["QA-ID is internal marker leakage in visible HTML"]
+    assert adjusted["fix_instructions"] == []
+
+
+def test_specification_qa_appellate_policy_keeps_process_log_blocker(tmp_path: Path) -> None:
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 2.0,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [
+            "QA-ID is internal marker leakage in visible HTML",
+            "Раздел содержит процессную формулировку: исправлено по замечаниям валидатора",
+        ],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [
+            "Remove QA-ID from headings",
+            "Remove process wording",
+        ],
+    }
+
+    adjusted = worker._apply_specification_qa_appellate_policy(
+        spec=get_material_spec("specification_qa"),
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail(decision["blocking_issues"]),
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is False
+    assert adjusted["decision"] == "keep_failed"
+    assert adjusted["blocking_issues"] == ["Раздел содержит процессную формулировку: исправлено по замечаниям валидатора"]
+    assert adjusted["overruled_validator_issues"] == ["QA-ID is internal marker leakage in visible HTML"]
+    assert adjusted["fix_instructions"] == ["Remove process wording"]
 
 
 def test_mr_theory_policy_keeps_teacher_guidance_separate_from_student_theory() -> None:
@@ -2032,6 +3286,235 @@ def test_controller_prompt_overrules_non_authoritative_task_ids() -> None:
     assert "If a validator issue says that keys are missing for a task id that is not listed in authoritative_task_ids" in prompt
 
 
+def test_practice_controller_prompt_overrules_difficulty_count_mismatch() -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "course": {},
+        "module": {},
+        "lesson": {
+            "difficulty": {"l1": {"count": 2}, "l2": {"count": 4}},
+            "practice_tasks": {
+                "l1": [{"number": 1, "text": "Read SyntaxError"}, {"number": 2, "text": "Read NameError"}],
+                "l2": [
+                    {"number": 3, "text": "Fix print quote"},
+                    {"number": 4, "text": "Fix prnt"},
+                    {"number": 5, "text": "Fix missing quotes"},
+                ],
+            },
+        },
+    }
+
+    prompt = build_validation_controller_prompt(
+        task=task,
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+        llm_result=ValidationResult.fail(["требуется 2 задания L1 и 4 задания L2, отсутствует P6"]),
+        merged_validation=ValidationResult.fail(["требуется 2 задания L1 и 4 задания L2, отсутствует P6"]),
+    )
+
+    assert "authoritative_task_ids" in prompt
+    assert "lesson.difficulty.*.count conflicts with lesson.practice_tasks" in prompt
+    assert "overrule validator demands to invent extra tasks such as P6/P7" in prompt
+
+
+def test_practice_controller_prompt_overrules_unclosed_string_display_objection() -> None:
+    spec = get_material_spec("practice")
+
+    prompt = build_validation_controller_prompt(
+        task={
+            "course": {},
+            "module": {},
+            "lesson": {"practice_tasks": {"l1": [{"number": 1, "text": "Read SyntaxError"}]}},
+        },
+        spec=spec,
+        prompt_contents={},
+        references={},
+        dependencies=[],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+        llm_result=ValidationResult.fail(["faulty_code_display visually spans the next line"]),
+        merged_validation=ValidationResult.fail(["faulty_code_display visually spans the next line"]),
+    )
+
+    assert "overrule validator objections that the displayed faulty snippet visually becomes multi-line" in prompt
+    assert "This is the expected learner-facing faulty input for this error type" in prompt
+
+
+def test_practice_validation_policy_focuses_on_methodology_not_task_layout() -> None:
+    policy = validation_policy_for_spec(get_material_spec("practice"))
+
+    assert "Validate practice methodology, not a rigid task-layout template" in policy
+    assert "Do not reject practice solely because a task lacks a specific visual subsection" in policy
+    assert "starter code is optional" in policy
+
+
+def test_practice_appellate_policy_approves_overstrict_difficulty_count_issue(tmp_path: Path) -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "course": {},
+        "module": {},
+        "lesson": {
+            "difficulty": {"l1": {"count": 2}, "l2": {"count": 4}},
+            "practice_tasks": {
+                "l1": [{"number": 1, "text": "Read SyntaxError"}, {"number": 2, "text": "Read NameError"}],
+                "l2": [
+                    {"number": 3, "text": "Fix print quote"},
+                    {"number": 4, "text": "Fix prnt"},
+                    {"number": 5, "text": "Fix missing quotes"},
+                ],
+            },
+        },
+    }
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    issue = "Несоответствие обязательному количеству задач по JSON: требуется 2 задания L1 и 4 задания L2 (всего 6), фактически дано 5; отсутствует одно задание уровня L2."
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 2.0,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [issue],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [issue],
+    }
+
+    adjusted = worker._apply_practice_appellate_policy(
+        spec=spec,
+        task=task,
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail([issue]),
+        generation_artifacts={
+            "practice_instances": {
+                "tasks": [{"id": f"P{index}"} for index in range(1, 6)]
+            }
+        },
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["blocking_issues"] == []
+    assert adjusted["overruled_validator_issues"] == [issue]
+
+
+def test_practice_appellate_policy_approves_subject_entity_and_layout_objections(tmp_path: Path) -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "course": {},
+        "module": {},
+        "lesson": {
+            "practice_tasks": {
+                "l1": [{"number": 1, "text": "Create one string variable and print it"}],
+                "l2": [
+                    {"number": 2, "text": "Create one integer variable and print it"},
+                    {"number": 3, "text": "Create string and integer variables and print them"},
+                    {"number": 4, "text": "Print text and a variable in one print call"},
+                    {"number": 5, "text": "Create favorite color and favorite animal variables and print them"},
+                ],
+            },
+        },
+    }
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    subject_issue = (
+        "P5: подмена требуемых сущностей («любимый цвет» и «любимое животное») "
+        "на «любимый напиток» и «вид спорта» — это изменение паттерна относительно source_text/контракта."
+    )
+    layout_issue = (
+        "Во всех задачах P1–P5 отсутствует явный learner-facing блок «Код» (<pre><code>…</code></pre>) "
+        "как место/заготовка для ввода решения."
+    )
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 2.0,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [subject_issue, layout_issue],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [subject_issue, layout_issue],
+    }
+
+    adjusted = worker._apply_practice_appellate_policy(
+        spec=spec,
+        task=task,
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail([subject_issue, layout_issue]),
+        generation_artifacts={
+            "practice_instances": {
+                "tasks": [{"id": f"P{index}"} for index in range(1, 6)]
+            }
+        },
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["blocking_issues"] == []
+    assert adjusted["overruled_validator_issues"] == [subject_issue, layout_issue]
+    assert adjusted["fix_instructions"] == []
+
+
+def test_practice_appellate_policy_approves_overstrict_unclosed_string_issue(tmp_path: Path) -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "course": {},
+        "module": {},
+        "lesson": {
+            "practice_tasks": {
+                "l1": [{"number": 1, "text": "Прочитать сообщение об ошибке SyntaxError"}],
+                "l2": [{"number": 2, "text": "Дан код: print(\"Привет). Найти ошибку и исправить"}],
+            },
+        },
+    }
+    worker = MaterialWorker(subagents={}, config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path))
+    issue = (
+        "P1: learner-facing faulty_code_display содержит незакрытую строку, из-за чего фрагмент "
+        "в HTML фактически разрывается на две строки, что делает код невалидным и не соответствует "
+        "инварианту «ровно одна ошибка в кавычках»."
+    )
+    decision = {
+        "approved": False,
+        "decision": "keep_failed",
+        "quality_score": 2.0,
+        "score_rationale": "",
+        "rationale": "",
+        "blocking_issues": [issue],
+        "non_blocking_issues": [],
+        "overruled_validator_issues": [],
+        "residual_risks": [],
+        "fix_instructions": [issue],
+    }
+
+    adjusted = worker._apply_practice_appellate_policy(
+        spec=spec,
+        task=task,
+        rule_result=ValidationResult.ok(),
+        validation=ValidationResult.fail([issue]),
+        generation_artifacts={
+            "practice_instances": {
+                "tasks": [
+                    {"id": "P1"},
+                    {"id": "P2"},
+                ]
+            }
+        },
+        decision=decision,
+    )
+
+    assert adjusted["approved"] is True
+    assert adjusted["decision"] == "approve_material"
+    assert adjusted["blocking_issues"] == []
+    assert adjusted["overruled_validator_issues"] == [issue]
+
+
 def test_package_validation_prompt_includes_full_final_content() -> None:
     content = '<style>.x{}</style><div class="cc-lesson"><p>' + ("x" * 9000) + "TAIL</p></div>"
     spec = MaterialSpec(
@@ -2063,6 +3546,36 @@ def test_package_validation_prompt_includes_full_final_content() -> None:
     assert "content_truncated" in prompt
     assert "TAIL</p></div>" in prompt
     assert "Do not claim that a material is truncated unless content_truncated is true" in prompt
+
+
+def test_package_validation_prompt_omits_html_for_structured_materials() -> None:
+    content = '<style>.x{}</style><div class="cc-lesson"><p>STRUCTURED_HTML_SHOULD_BE_OMITTED</p></div>'
+    spec = get_material_spec("practice")
+    material = MaterialResult(
+        kind="practice",
+        material_type="Practice",
+        agent_type="PracticeMaterialAgent",
+        status="approved",
+        iterations=1,
+        content=content,
+        prompt_files=(),
+        generation_artifacts={
+            "practice_templates": _practice_template_set().model_dump(mode="json"),
+            "practice_instances": _practice_instance_set().model_dump(mode="json"),
+        },
+    )
+
+    prompt = build_package_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {"lesson_number": 2}},
+        specs=[spec],
+        materials=[material],
+        rule_result=ValidationResult.ok(),
+    )
+
+    assert "STRUCTURED_HTML_SHOULD_BE_OMITTED" not in prompt
+    assert "full_final_content_omitted" in prompt
+    assert "primary_structured_artifact_keys" in prompt
+    assert "do not semantically review rendered HTML" in prompt
 
 
 def test_package_validator_is_advisory_and_preserves_issues(tmp_path: Path) -> None:

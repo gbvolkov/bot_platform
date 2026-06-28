@@ -1,19 +1,9 @@
 from __future__ import annotations
 
-import html
 import re
 from typing import Any
 
 from .contracts import MaterialResult, MaterialSpec, ValidationResult
-
-
-SERVICE_MARKERS = ("QA-ID", "SHA", "candidate_internal", "leakage", "artifact_id")
-SOURCE_EXTENSIONS_FORBIDDEN = (".docx", ".pdf", ".html", ".xlsx", ".xls")
-
-
-def html_to_text(content: str) -> str:
-    without_tags = re.sub(r"<[^>]+>", " ", content)
-    return html.unescape(re.sub(r"\s+", " ", without_tags)).strip()
 
 
 class RuleValidator:
@@ -26,12 +16,6 @@ class RuleValidator:
         issues: list[str] = []
 
         issues.extend(self._formatting_issues(content))
-        issues.extend(self._source_boundary_issues(content, spec.validator_kind))
-
-        if spec.validator_kind != "qa":
-            for marker in SERVICE_MARKERS:
-                if marker in content:
-                    issues.append(f"служебный маркер {marker} найден вне QA")
 
         return ValidationResult.fail(issues) if issues else ValidationResult.ok()
 
@@ -71,14 +55,4 @@ class RuleValidator:
             issues.append("нет div.cc-lesson")
         if "<script" in content.lower() or "<link" in content.lower():
             issues.append("HTML содержит script/link")
-        return issues
-
-    def _source_boundary_issues(self, content: str, kind: str) -> list[str]:
-        text = html_to_text(content)
-        issues = []
-        for ext in SOURCE_EXTENSIONS_FORBIDDEN:
-            if ext in text:
-                issues.append(f"материал содержит запрещённую ссылку на исходный формат {ext}")
-        if kind != "qa" and "docs/ismart/" in text and "референсы/" in text:
-            issues.append("источники/локаторы Markdown попали вне QA")
         return issues
