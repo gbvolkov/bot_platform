@@ -622,6 +622,110 @@ def validation_html_section(spec: MaterialSpec, content: str, artifacts: dict[st
 CHECKED MATERIAL HTML END"""
 
 
+def validation_checked_artifact_section(
+    spec: MaterialSpec,
+    content: str,
+    artifacts: dict[str, Any],
+) -> str:
+    target_mode = validation_target_mode(spec, artifacts)
+    primary_keys = primary_structured_artifact_keys(spec, artifacts)
+    html_section = validation_html_section(spec, content, artifacts)
+    return f"""PRIMARY CHECKED ARTIFACT START
+CHECKED MATERIAL KIND:
+{spec.kind}
+
+CHECKED MATERIAL TYPE:
+{spec.material_type}
+
+VALIDATION TARGET MODE:
+{target_mode}
+
+PRIMARY STRUCTURED ARTIFACT KEYS:
+{compact_json(primary_keys)}
+
+STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL START
+{compact_json(artifacts)}
+STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL END
+
+{html_section}
+PRIMARY CHECKED ARTIFACT END"""
+
+
+def reference_context_sections(spec: MaterialSpec, references: ReferenceBundle) -> str:
+    lines = [
+        "SOURCE/REFERENCE MATERIALS START",
+        "These materials are source/context only. They are not the checked artifact.",
+    ]
+    has_references = False
+    for field in spec.reference_fields:
+        for index, document in enumerate(references.get(field, []), start=1):
+            has_references = True
+            lines.extend(
+                [
+                    "SOURCE DOCUMENT START",
+                    f"SOURCE FIELD: {document.field}",
+                    f"SOURCE DOCUMENT INDEX: {index}",
+                    f"SOURCE DOCUMENT NAME: {Path(str(document.path)).stem}",
+                    f"SOURCE DOCUMENT TRUNCATED: {bool(document.truncated)}",
+                    "SOURCE DOCUMENT CONTENT START",
+                    document.content,
+                    "SOURCE DOCUMENT CONTENT END",
+                    "SOURCE DOCUMENT END",
+                ]
+            )
+    if not has_references:
+        lines.append("NO SOURCE/REFERENCE MATERIALS.")
+    lines.append("SOURCE/REFERENCE MATERIALS END")
+    return "\n".join(lines)
+
+
+def dependency_context_sections(spec: MaterialSpec, dependencies: list[MaterialResult]) -> str:
+    lines = [
+        "DEPENDENCY MATERIALS START",
+        "These materials are dependency context only. They are not the checked artifact.",
+    ]
+    summaries = dependency_result_summaries_for_validation(spec, dependencies)
+    if not summaries:
+        lines.append("NO DEPENDENCY MATERIALS.")
+    for index, summary in enumerate(summaries, start=1):
+        lines.extend(
+            [
+                "DEPENDENCY MATERIAL START",
+                f"DEPENDENCY INDEX: {index}",
+                f"DEPENDENCY KIND: {summary.get('kind')}",
+                f"DEPENDENCY TYPE: {summary.get('type')}",
+                f"DEPENDENCY STATUS: {summary.get('status')}",
+            ]
+        )
+        if summary.get("generation_artifacts"):
+            lines.extend(
+                [
+                    "DEPENDENCY GENERATION ARTIFACTS START",
+                    compact_json(summary["generation_artifacts"]),
+                    "DEPENDENCY GENERATION ARTIFACTS END",
+                ]
+            )
+        if summary.get("content_omitted"):
+            lines.extend(
+                [
+                    "DEPENDENCY CONTENT OMITTED: true",
+                    f"DEPENDENCY CONTENT CHARS: {summary.get('content_chars')}",
+                    f"DEPENDENCY CONTENT OMISSION REASON: {summary.get('content_omission_reason', '')}",
+                ]
+            )
+        elif "content" in summary:
+            lines.extend(
+                [
+                    "DEPENDENCY CONTENT START",
+                    str(summary.get("content") or ""),
+                    "DEPENDENCY CONTENT END",
+                ]
+            )
+        lines.append("DEPENDENCY MATERIAL END")
+    lines.append("DEPENDENCY MATERIALS END")
+    return "\n".join(lines)
+
+
 def build_generation_prompt(
     *,
     task: dict[str, Any],
@@ -1068,9 +1172,7 @@ def build_validation_prompt(
     generation_artifacts: dict[str, Any] | None = None,
 ) -> str:
     validation_generation_artifacts = generation_artifacts_for_validation(spec, generation_artifacts)
-    target_mode = validation_target_mode(spec, validation_generation_artifacts)
-    primary_keys = primary_structured_artifact_keys(spec, validation_generation_artifacts)
-    html_section = validation_html_section(spec, content, validation_generation_artifacts)
+    checked_artifact_section = validation_checked_artifact_section(spec, content, validation_generation_artifacts)
     return f"""
 Проверь один материал. Не исправляй и не перегенерируй контент.
 
@@ -1106,6 +1208,12 @@ You are responsible for semantic validation. Evaluate the material against the J
 Check semantic completeness, internal consistency, source faithfulness, sufficient depth for the configured academic hours, suitability for the target learner/teacher, required task/assessment composition, and absence of contradictions or invented facts.
 Do not reject a material only because section headings use different wording, unless a prompt/skill/reference explicitly requires exact fixed headings. Judge whether the required meaning and content are present.
 
+CONTEXT BOUNDARY:
+- Only the content between PRIMARY CHECKED ARTIFACT START and PRIMARY CHECKED ARTIFACT END is the material under validation.
+- SOURCE/REFERENCE MATERIALS, DEPENDENCY MATERIALS, JSON CONTEXT, SOURCE CONTRACT, and PROMPT/SKILL FILES are supporting context only. They may explain requirements and examples, but they are not published content of the checked material.
+- Never report that a local path, image src, source filename, SHA, prompt text, runtime detail, or any other string is visible in the checked material unless that exact string appears inside PRIMARY CHECKED ARTIFACT.
+- If a string appears only in SOURCE/REFERENCE MATERIALS or DEPENDENCY MATERIALS, do not report it as a defect in the checked material.
+
 PRIMARY VALIDATION TARGET:
 - If VALIDATION TARGET MODE is structured_artifacts, validate only STRUCTURED GENERATION ARTIFACTS semantically. Do not validate rendered HTML with LLM.
 - For practice, the primary content is practice_templates and practice_instances. Validate task ids, task fields, tests, manual checks, hidden solutions, teacher explanations, and internal consistency from practice_instances. Report fixes by exact field_path such as practice_instances.tasks[P3].student_condition.
@@ -1138,6 +1246,7 @@ BLOCK-LEVEL REPORTING:
 EVIDENCE RULE:
 - For issues about structured content, field_path is required and evidence_quote may be empty.
 - For issues about rendered HTML, copied visible text, visible leaked key, visible formatting, or a specific HTML block, include an exact short evidence_quote copied from CHECKED MATERIAL HTML. This applies only when CHECKED MATERIAL HTML is included in this prompt.
+- For rendered HTML claims, evidence_quote must be copied from inside PRIMARY CHECKED ARTIFACT, specifically from CHECKED MATERIAL HTML START/END. Quotes from SOURCE/REFERENCE MATERIALS or DEPENDENCY MATERIALS are invalid evidence.
 - The evidence_quote must contain the claimed rendered defect itself, not only the surrounding heading.
 - If rendered HTML is not included in this prompt, do not report rendered HTML issues.
 - Do not use HTML evidence rules to avoid reporting structured defects. If the contradiction is in practice_instances/current_control_autocheck/intermediate_assessment, report the structured field_path directly.
@@ -1146,17 +1255,7 @@ EVIDENCE RULE:
 AGENT TYPE:
 MaterialValidatorAgent
 
-CHECKED MATERIAL KIND:
-{spec.kind}
-
-CHECKED MATERIAL TYPE:
-{spec.material_type}
-
-VALIDATION TARGET MODE:
-{target_mode}
-
-PRIMARY STRUCTURED ARTIFACT KEYS:
-{compact_json(primary_keys)}
+{checked_artifact_section}
 
 PROMPT/SKILL FILES FOR CHECKED MATERIAL:
 {compact_json(prompt_contents)}
@@ -1167,18 +1266,13 @@ JSON CONTEXT:
 SOURCE CONTRACT FROM JSON:
 {compact_json(source_contract_for_spec(task, spec))}
 
-MARKDOWN REFERENCES CONTENT:
-{compact_json(select_references(spec, references))}
+{reference_context_sections(spec, references)}
 
-DEPENDENCY MATERIALRESULT OBJECTS:
-{compact_json(dependency_result_summaries_for_validation(spec, dependencies))}
-
-STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL:
-{compact_json(validation_generation_artifacts)}
+{dependency_context_sections(spec, dependencies)}
 
 ARTIFACT VISIBILITY RULE:
 - For current_control, current_control_autocheck is the required non-rendered platform/QA layer for answers and autocheck settings. If it is complete and consistent, it satisfies requirements for keys/autocheck without visible answer keys in HTML.
-- The section above is structured generation output, not learner-facing HTML. It is the primary validation target for structured material kinds and may include teacher-only/internal fields.
+- STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL is structured generation output, not learner-facing HTML. It is the primary validation target for structured material kinds and may include teacher-only/internal fields.
 - Do not infer a learner-facing answer leak merely because an internal artifact contains keys, hidden_solution, teacher_explanation, correct_answers, tests, or autocheck_config. For structured validation, a leak is present only when forbidden internal content appears in structured student-facing fields.
 - For self_work, self_work_autocheck is the required non-rendered platform/QA layer for answers and autocheck settings. If it is complete and consistent, it satisfies requirements for keys/autocheck without visible answer keys in HTML.
 - For intermediate, intermediate_assessment is the required non-rendered assessment/QA layer for keys, эталоны, rubrics, tests, and solutions. If it is complete and consistent, it satisfies requirements for keys/autocheck without visible answer keys in HTML.
@@ -1186,8 +1280,6 @@ ARTIFACT VISIBILITY RULE:
 
 RULE VALIDATOR ISSUES:
 {compact_json(rule_result.issues)}
-
-{html_section}
 
 If VALIDATION TARGET MODE is structured_artifacts, only STRUCTURED GENERATION ARTIFACTS is the LLM-checked material.
 If VALIDATION TARGET MODE is html, CHECKED MATERIAL HTML is the LLM-checked material.
@@ -1216,9 +1308,7 @@ def build_validation_controller_prompt(
     generation_artifacts: dict[str, Any] | None = None,
 ) -> str:
     validation_generation_artifacts = generation_artifacts_for_validation(spec, generation_artifacts)
-    target_mode = validation_target_mode(spec, validation_generation_artifacts)
-    primary_keys = primary_structured_artifact_keys(spec, validation_generation_artifacts)
-    html_section = validation_html_section(spec, content, validation_generation_artifacts)
+    checked_artifact_section = validation_checked_artifact_section(spec, content, validation_generation_artifacts)
     return f"""
 Review a material after all configured generation/validation attempts were exhausted.
 Do not generate, rewrite, or repair the material. Decide whether the validator rejection should remain blocking.
@@ -1247,10 +1337,12 @@ Default stance: be skeptical of validator strictness. The validator bears the bu
 APPELLATE REVIEW METHOD:
 - Treat the validator's factual claims, severity labels, and interpretation of sources as unproven until you verify them against the checked material, JSON, prompt/skill files, and references.
 - For each validator issue, ask: is the claimed defect actually present, does it contradict a source or core requirement, and would it materially prevent the artifact from serving its learner/teacher purpose?
+- Only the content between PRIMARY CHECKED ARTIFACT START and PRIMARY CHECKED ARTIFACT END is the material under review. SOURCE/REFERENCE MATERIALS and DEPENDENCY MATERIALS are supporting context only.
+- If a validator issue claims that a path, image src, source filename, SHA, prompt text, runtime detail, or any other string is visible in the checked material, verify that the exact string is inside PRIMARY CHECKED ARTIFACT. If it appears only in SOURCE/REFERENCE MATERIALS or DEPENDENCY MATERIALS, overrule the issue as invalid evidence.
 - If VALIDATION TARGET MODE is structured_artifacts, audit validator claims against STRUCTURED GENERATION ARTIFACTS, not rendered HTML.
 - For validator issues about structured content, require a concrete field_path or an equivalent exact reference to the structured object/field.
 - If VALIDATION TARGET MODE is structured_artifacts, overrule validator issues about rendered HTML structure, visible HTML formatting, HTML section composition, or HTML leakage. HTML rendering is a separate technical layer and is not a controller problem.
-- If VALIDATION TARGET MODE is html, require a direct quote from CHECKED MATERIAL HTML for rendered HTML claims.
+- If VALIDATION TARGET MODE is html, require a direct quote from CHECKED MATERIAL HTML for rendered HTML claims; the quote must come from inside PRIMARY CHECKED ARTIFACT, not from source/reference/dependency context.
 - Treat a learner-facing leakage claim as unproven if it relies only on internal artifacts and does not show that forbidden content appears in structured student-facing fields or, for html mode only, in CHECKED MATERIAL HTML.
 - Overrule a validator issue when the claim is unsupported by the checked material, based on a debatable interpretation, based on optional style, or fixable by a narrow local edit without changing the material's source meaning.
 - Do not let one local wording or terminology imperfection fail the whole material unless that imperfection teaches a materially wrong core rule, breaks required task composition, reveals forbidden answers, or makes the artifact unsafe/unusable.
@@ -1314,11 +1406,7 @@ CHECKED MATERIAL KIND:
 CHECKED MATERIAL TYPE:
 {spec.material_type}
 
-VALIDATION TARGET MODE:
-{target_mode}
-
-PRIMARY STRUCTURED ARTIFACT KEYS:
-{compact_json(primary_keys)}
+{checked_artifact_section}
 
 PROMPT/SKILL FILES FOR CHECKED MATERIAL:
 {compact_json(prompt_contents)}
@@ -1329,18 +1417,13 @@ JSON CONTEXT:
 SOURCE CONTRACT FROM JSON:
 {compact_json(source_contract_for_spec(task, spec))}
 
-MARKDOWN REFERENCES CONTENT:
-{compact_json(select_references(spec, references))}
+{reference_context_sections(spec, references)}
 
-DEPENDENCY MATERIALRESULT OBJECTS:
-{compact_json(dependency_result_summaries_for_validation(spec, dependencies))}
-
-STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL:
-{compact_json(validation_generation_artifacts)}
+{dependency_context_sections(spec, dependencies)}
 
 ARTIFACT VISIBILITY RULE:
 - For current_control, current_control_autocheck is the required non-rendered platform/QA layer for answers and autocheck settings. Validator objections about missing visible keys should be overruled when this artifact is complete and internally consistent.
-- The section above is structured generation output, not learner-facing HTML. It is the primary evidence for structured-content claims and may include teacher-only/internal fields.
+- STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL is structured generation output, not learner-facing HTML. It is the primary evidence for structured-content claims and may include teacher-only/internal fields.
 - Do not uphold a validator claim of learner-facing key leakage merely because an internal artifact contains teacher-only data. In structured_artifacts mode, uphold leakage only if forbidden content appears in structured student-facing fields.
 - For self_work, self_work_autocheck is the required non-rendered platform/QA layer for answers and autocheck settings. Validator objections about missing visible keys should be overruled when this artifact is complete and internally consistent.
 - For intermediate, intermediate_assessment is the required non-rendered assessment/QA layer for keys, эталоны, rubrics, tests, and solutions. Validator objections about missing visible keys should be overruled when this artifact is complete and internally consistent.
@@ -1354,8 +1437,6 @@ LLM VALIDATION:
 
 MERGED VALIDATION:
 {compact_json(validation_result_summary(merged_validation))}
-
-{html_section}
 """.strip()
 
 

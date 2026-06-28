@@ -41,7 +41,7 @@ class IsmartGenerationConfig:
     max_reference_chars: int = 0
     use_llm_validator: bool = True
     use_validation_controller: bool = True
-    validation_controller_accept_score: float = 3.0
+    validation_controller_accept_score: float = 0.2
     generation_target: str | None = None
     verbose: bool = False
 

@@ -2677,7 +2677,7 @@ def test_mr_intermediate_validation_prompt_omits_dependency_html_content() -> No
     )
 
     assert "SECRET_DEPENDENCY_KIM" not in prompt
-    assert '"content_omitted": true' in prompt
+    assert "DEPENDENCY CONTENT OMITTED: true" in prompt
     assert "Dependency intermediate HTML is not the checked mr_intermediate material" in prompt
     assert "CHECKED MATERIAL HTML START" in prompt
 
@@ -2700,7 +2700,7 @@ def test_validation_prompt_requires_checked_html_evidence_quote() -> None:
     assert "include an exact short evidence_quote copied from CHECKED MATERIAL HTML" in prompt
 
 
-def test_validation_prompt_uses_clean_reference_context_without_paths_or_sha() -> None:
+def test_validation_prompt_separates_reference_context_without_metadata_paths_or_sha() -> None:
     spec = get_material_spec("specification_qa")
     references = {
         "requirements": [
@@ -2727,11 +2727,50 @@ def test_validation_prompt_uses_clean_reference_context_without_paths_or_sha() -
 
     assert "Reference content for QA validation." in prompt
     assert "source_rules" in prompt
+    assert "PRIMARY CHECKED ARTIFACT START" in prompt
+    assert "SOURCE/REFERENCE MATERIALS START" in prompt
+    assert "SOURCE DOCUMENT CONTENT START" in prompt
     assert "docs/ismart/source_rules.md" not in prompt
     assert "C:\\Projects\\bot_platform" not in prompt
     assert "abc123def456" not in prompt
     assert '"sha"' not in prompt
     assert '"resolved_path"' not in prompt
+
+
+def test_validation_prompt_preserves_reference_content_outside_checked_artifact() -> None:
+    spec = get_material_spec("specification_qa")
+    reference_content = r'<img src="C:\Projects\bot_platform\docs\ismart\reference.png">'
+    references = {
+        "template_descriptions": [
+            ReferenceDocument(
+                field="template_descriptions",
+                path="docs/ismart/templates.md",
+                resolved_path="C:\\Projects\\bot_platform\\docs\\ismart\\templates.md",
+                sha="abc123",
+                truncated=False,
+                content=reference_content,
+            )
+        ]
+    }
+
+    prompt = build_validation_prompt(
+        task={"course": {}, "module": {}, "lesson": {}},
+        spec=spec,
+        prompt_contents={},
+        references=references,
+        dependencies=[],
+        content=VALID_HTML,
+        rule_result=ValidationResult.ok(),
+    )
+
+    checked_section = prompt.split("PRIMARY CHECKED ARTIFACT START", 1)[1].split(
+        "PRIMARY CHECKED ARTIFACT END",
+        1,
+    )[0]
+    assert reference_content in prompt
+    assert reference_content not in checked_section
+    assert "If a string appears only in SOURCE/REFERENCE MATERIALS or DEPENDENCY MATERIALS" in prompt
+    assert "Quotes from SOURCE/REFERENCE MATERIALS or DEPENDENCY MATERIALS are invalid evidence" in prompt
 
 
 def test_validation_prompt_dependency_context_omits_runtime_metadata() -> None:
@@ -2759,8 +2798,8 @@ def test_validation_prompt_dependency_context_omits_runtime_metadata() -> None:
         rule_result=ValidationResult.ok(),
     )
 
-    assert '"kind": "practice"' in prompt
-    assert '"status": "approved"' in prompt
+    assert "DEPENDENCY KIND: practice" in prompt
+    assert "DEPENDENCY STATUS: approved" in prompt
     assert "answer = 1" in prompt
     assert "PracticeMaterialAgent" not in prompt
     assert '"iterations": 7' not in prompt
@@ -2799,12 +2838,24 @@ def test_validation_prompt_requires_complete_first_pass_audit() -> None:
 
 def test_controller_prompt_treats_unquoted_visible_claims_as_unproven() -> None:
     spec = get_material_spec("specification_qa")
+    reference_content = r'<img src="C:\Projects\bot_platform\docs\ismart\reference.png">'
 
     prompt = build_validation_controller_prompt(
         task={"course": {}, "module": {}, "lesson": {}},
         spec=spec,
         prompt_contents={},
-        references={},
+        references={
+            "template_descriptions": [
+                ReferenceDocument(
+                    field="template_descriptions",
+                    path="docs/ismart/templates.md",
+                    resolved_path="C:\\Projects\\bot_platform\\docs\\ismart\\templates.md",
+                    sha="abc123",
+                    truncated=False,
+                    content=reference_content,
+                )
+            ]
+        },
         dependencies=[],
         content=VALID_HTML,
         rule_result=ValidationResult.ok(),
@@ -2812,7 +2863,14 @@ def test_controller_prompt_treats_unquoted_visible_claims_as_unproven() -> None:
         merged_validation=ValidationResult.fail(["visible HTML contains docs/..."]),
     )
 
+    checked_section = prompt.split("PRIMARY CHECKED ARTIFACT START", 1)[1].split(
+        "PRIMARY CHECKED ARTIFACT END",
+        1,
+    )[0]
+    assert reference_content in prompt
+    assert reference_content not in checked_section
     assert "require a direct quote from CHECKED MATERIAL HTML" in prompt
+    assert "If it appears only in SOURCE/REFERENCE MATERIALS or DEPENDENCY MATERIALS" in prompt
     assert "VALIDATION TARGET MODE:\nhtml" in prompt
     assert "Treat a learner-facing leakage claim as unproven" in prompt
 
