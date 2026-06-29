@@ -81,19 +81,29 @@ class PracticeTaskInstance(BaseModel):
         ),
     )
     input_requirements: str = Field(default="", description="Student-facing input data requirements.")
-    output_requirements: str = Field(default="", description="Student-facing output/checking requirements.")
+    output_requirements: str = Field(
+        default="",
+        description=(
+            "Student-facing output/checking requirements. For deterministic stdout tasks, define one exact "
+            "symbol-for-symbol expected output format without extra labels such as 'Answer:'."
+        ),
+    )
     tests: list[dict[str, str]] = Field(
         default_factory=list,
         description=(
             "Legacy visible checks. For normal behavior use input + expected_output and keep equal to runtime_tests. "
-            "For error-message diagnostic tasks use expected_error/error_message or manual_checks instead of normal stdout values."
+            "For normal autocheckable tasks provide meaningful typical, boundary, and atypical/special cases when applicable; "
+            "do not duplicate the same test row to satisfy count. For error-message diagnostic tasks use "
+            "expected_error/error_message or manual_checks instead of normal stdout values."
         ),
     )
     runtime_tests: list[dict[str, str]] = Field(
         default_factory=list,
         description=(
             "Visible runtime checks. For normal behavior use stdin/input -> expected stdout. For tasks whose result is "
-            "a Python error message, check expected_error/error_message rather than inventing normal stdout."
+            "a Python error message, check expected_error/error_message rather than inventing normal stdout. "
+            "When deterministic stdout tests are used, include typical, boundary, and atypical/special cases if applicable "
+            "and avoid duplicate input/expected_output pairs."
         ),
     )
     manual_checks: list[str] = Field(
