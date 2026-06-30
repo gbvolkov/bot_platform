@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, TypedDict
+from typing import Annotated, Any, Mapping, NotRequired
 
+from langchain.agents import AgentState, create_agent
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import END, START, StateGraph
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel
+
+from agents.structured_prompt_utils import provider_then_tool
 
 from .schemas import (
     CurrentControlAutocheckSet,
@@ -64,10 +68,10 @@ ALL_SUBAGENT_TYPES: tuple[str, ...] = (
 )
 
 
-class StructuredSubagentState(TypedDict, total=False):
-    system_prompt: str
-    prompt: str
-    result: Any
+class StructuredSubagentState(AgentState[dict[str, Any]]):
+    messages: Annotated[list[BaseMessage], add_messages]
+    system_prompt: NotRequired[str]
+    prompt: NotRequired[str]
 
 
 def _build_structured_subagent(
@@ -76,28 +80,21 @@ def _build_structured_subagent(
     model: BaseChatModel,
     schema: type[BaseModel],
 ):
-    try:
-        structured_model = model.with_structured_output(schema, method="function_calling")
-    except TypeError:
-        structured_model = model.with_structured_output(schema)
+    @dynamic_prompt
+    def build_prompt(request: ModelRequest) -> str:
+        return str((request.state or {}).get("system_prompt") or "")
 
-    def invoke_model(state: StructuredSubagentState) -> dict[str, Any]:
-        messages = []
-        system_prompt = state.get("system_prompt") or ""
-        if system_prompt:
-            messages.append(SystemMessage(content=system_prompt))
-        messages.append(HumanMessage(content=state.get("prompt") or ""))
-        return {"result": structured_model.invoke(messages)}
-
-    builder = StateGraph(StructuredSubagentState)
-    builder.add_node("structured_output", invoke_model)
-    builder.add_edge(START, "structured_output")
-    builder.add_edge("structured_output", END)
-    return builder.compile(name=name)
+    return create_agent(
+        model=model,
+        tools=None,
+        middleware=[build_prompt, provider_then_tool],
+        response_format=schema,
+        state_schema=StructuredSubagentState,
+    )
 
 
 def build_subagent_registry(model: BaseChatModel) -> Mapping[str, Any]:
-    """Build all explicit iSMART subagents as compiled LangGraph graphs."""
+    """Build all explicit iSMART subagents as compiled LangGraph agents."""
 
     registry: dict[str, Any] = {}
     for agent_type in CONTENT_AGENT_TYPES:

@@ -59,6 +59,8 @@ def write_task_output(
         "task_id": result.task_id,
         "lesson_number": result.lesson_number,
         "lesson_title": result.lesson_title,
+        "course_level": result.course_level,
+        "resolved_profile": result.course_level,
         "status": result.status,
         "agents_called": result.agents_called,
         "prompt_files_used": result.prompt_files_used,
@@ -76,6 +78,8 @@ def write_task_output(
         },
         "references": result.reference_summary,
     }
+    if result.skip_reason:
+        manifest["skip_reason"] = result.skip_reason
     write_json(output_dir / "manifest.json", manifest)
     write_json(output_dir / "result.json", result.to_public_json())
 
@@ -97,16 +101,29 @@ def write_batch_manifest(batch_dir: Path, results: list[IsmartGenerationResult])
     write_json(
         batch_dir / "batch_manifest.json",
         {
-            "status": "approved" if all(item.status == "approved" for item in results) else "has_failures",
+            "status": _batch_status(results),
+            "task_count": len(results),
+            "skipped_count": sum(1 for item in results if item.status == "skipped"),
             "tasks": [
                 {
                     "task_id": item.task_id,
                     "lesson_number": item.lesson_number,
                     "lesson_title": item.lesson_title,
+                    "course_level": item.course_level,
+                    "resolved_profile": item.course_level,
                     "status": item.status,
                     "output_dir": item.output_dir,
+                    **({"skip_reason": item.skip_reason} if item.skip_reason else {}),
                 }
                 for item in results
             ],
         },
     )
+
+
+def _batch_status(results: list[IsmartGenerationResult]) -> str:
+    if any(item.status not in {"approved", "skipped"} for item in results):
+        return "has_failures"
+    if any(item.status == "skipped" for item in results):
+        return "completed_with_skips"
+    return "approved"

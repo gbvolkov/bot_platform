@@ -9,6 +9,8 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from .profiles import normalize_course_level
+
 
 REFERENCE_FIELDS = (
     "requirements",
@@ -45,6 +47,7 @@ def convert_tracker_to_generation_json(
         available = ", ".join(workbook.sheetnames)
         raise ValueError(f"Sheet not found: {sheet_name}. Available sheets: {available}")
     sheet = workbook[sheet_name]
+    course_level = detect_course_level(workbook_path, sheet.cell(1, 1).value)
 
     missing_references: list[dict[str, Any]] = []
     ignored_references: list[dict[str, Any]] = []
@@ -72,6 +75,7 @@ def convert_tracker_to_generation_json(
         lesson = build_lesson(
             sheet,
             row,
+            course_level=course_level,
             references_dir=references_dir,
             missing_references=missing_references,
             ignored_references=ignored_references,
@@ -98,6 +102,8 @@ def convert_tracker_to_generation_json(
     payload = {
         "course": {
             "title": clean_text(sheet.cell(1, 1).value),
+            "level": course_level,
+            "direction": "python",
             "norms": clean_text(sheet.cell(2, 1).value),
             "legend": clean_text(sheet.cell(3, 1).value),
             "source_workbook": as_posix(workbook_path),
@@ -128,6 +134,7 @@ def build_lesson(
     sheet: Any,
     row: int,
     *,
+    course_level: str,
     references_dir: Path,
     missing_references: list[dict[str, Any]],
     ignored_references: list[dict[str, Any]],
@@ -140,6 +147,7 @@ def build_lesson(
     attestation = bool_cell(sheet, row, 20)
     return {
         "lesson_number": lesson_number,
+        "course_level": course_level,
         "tracker_row": row,
         "tracker_index": to_int(sheet.cell(row, 1).value),
         "module": clean_text(sheet.cell(row, 2).value),
@@ -309,7 +317,7 @@ def parse_tasks(value: Any) -> list[dict[str, Any]]:
     if bonus_marker:
         text = text[: bonus_marker.start()].strip()
 
-    matches = list(re.finditer(r"(?<!\d)(\d{1,2})\.\s+", text))
+    matches = list(re.finditer(r"(?m)^\s*(\d{1,2})\.\s+", text))
     tasks: list[dict[str, Any]] = []
     for index, match in enumerate(matches):
         start = match.end()
@@ -358,6 +366,18 @@ def clean_text(value: Any) -> str | None:
     return text or None
 
 
+def detect_course_level(workbook_path: Path, course_title: Any) -> str:
+    candidates = [
+        workbook_path.name,
+        clean_text(course_title) or "",
+    ]
+    for value in candidates:
+        level = normalize_course_level(value)
+        if level:
+            return level
+    return "basic"
+
+
 def to_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -402,13 +422,12 @@ def find_workspace_dir(workbook_path: Path) -> Path:
 
 
 def find_references_dir(workspace_dir: Path) -> Path:
-    for candidate in workspace_dir.iterdir():
-        if candidate.is_dir() and candidate.name != "prompts_skills":
-            if any(child.suffix.lower() == ".md" for child in candidate.iterdir()):
-                return candidate.resolve()
+    references_dir = workspace_dir / "референсы"
+    if references_dir.is_dir():
+        return references_dir.resolve()
     raise FileNotFoundError(
-        "Could not locate Markdown references dir under workspace dir. "
-        "Pass --references-dir explicitly."
+        "Could not locate Markdown references dir at workspace_dir/референсы. "
+        "Pass --references-dir explicitly for a non-standard layout."
     )
 
 

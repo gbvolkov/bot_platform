@@ -331,7 +331,7 @@ CHANNEL AND KEY VISIBILITY POLICY:
 """.strip()
 
 
-def validation_policy_for_spec(spec: MaterialSpec) -> str:
+def _base_validation_policy_for_spec(spec: MaterialSpec) -> str:
     if spec.kind == "theory":
         return """
 THEORY VALIDATION POLICY:
@@ -486,6 +486,12 @@ PRACTICE VALIDATION POLICY:
 - Do not create an impossible requirement where an underspecified task must both avoid invented values and still provide exact autocheck pairs.
 - Separate deterministic tasks from underspecified tasks in the report. A problem in one task does not make valid tests in another task blocking.
 """.strip()
+
+
+def validation_policy_for_spec(spec: MaterialSpec) -> str:
+    base = _base_validation_policy_for_spec(spec)
+    addendum = spec.validation_policy_addendum.strip()
+    return f"{base}\n\n{addendum}" if addendum else base
 
 
 def material_result_summary(
@@ -1222,7 +1228,9 @@ CONTEXT BOUNDARY:
 
 PRIMARY VALIDATION TARGET:
 - If VALIDATION TARGET MODE is structured_artifacts, validate only STRUCTURED GENERATION ARTIFACTS semantically. Do not validate rendered HTML with LLM.
-- For practice, the primary content is practice_templates and practice_instances. Validate task ids, task fields, tests, manual checks, hidden solutions, teacher explanations, and internal consistency from practice_instances. Report fixes by exact field_path such as practice_instances.tasks[P3].student_condition.
+- For practice, the primary content is practice_templates and practice_instances. Validate task ids, student-facing task fields, tests, manual checks, and internal consistency from practice_instances. Use hidden_solution and teacher_explanation only as internal reference evidence, not as checked target fields. Report fixes by exact field_path such as practice_instances.tasks[P3].student_condition.
+- For practice, hidden_solution and teacher_explanation are internal reference fields. They are required and allowed inside practice_instances. Do not report their mere presence as a learner-facing leak, and do not ask to remove or move them.
+- For practice, validate student-facing fields such as scenario, student_condition, starter_code, faulty_code_display, display_note, input_requirements, output_requirements, subtasks, tests, runtime_tests, manual_checks, run_mode, and uniqueness_notes. If a visible leak exists, point field_path to the leaking student-facing field, not to hidden_solution or teacher_explanation.
 - For self_work, current_control, and intermediate, validate the corresponding autocheck/assessment artifact as the primary platform/QA layer when present.
 - If VALIDATION TARGET MODE is html, validate CHECKED MATERIAL HTML as the primary content.
 - If VALIDATION TARGET MODE is structured_artifacts, any material-kind policy text about visible HTML/rendering is out of LLM semantic validation scope. Apply only the parts that map to structured student-facing/internal fields.
@@ -1280,6 +1288,7 @@ ARTIFACT VISIBILITY RULE:
 - For current_control, current_control_autocheck is the required non-rendered platform/QA layer for answers and autocheck settings. If it is complete and consistent, it satisfies requirements for keys/autocheck without visible answer keys in HTML.
 - STRUCTURED GENERATION ARTIFACTS FOR CHECKED MATERIAL is structured generation output, not learner-facing HTML. It is the primary validation target for structured material kinds and may include teacher-only/internal fields.
 - Do not infer a learner-facing answer leak merely because an internal artifact contains keys, hidden_solution, teacher_explanation, correct_answers, tests, or autocheck_config. For structured validation, a leak is present only when forbidden internal content appears in structured student-facing fields.
+- For practice, hidden_solution and teacher_explanation are internal reference fields for MR/QA. Their presence in practice_instances is not a defect. Treat them as reference evidence only; do not create issues or fix_instructions targeting these field paths.
 - For self_work, self_work_autocheck is the required non-rendered platform/QA layer for answers and autocheck settings. If it is complete and consistent, it satisfies requirements for keys/autocheck without visible answer keys in HTML.
 - For intermediate, intermediate_assessment is the required non-rendered assessment/QA layer for keys, эталоны, rubrics, tests, and solutions. If it is complete and consistent, it satisfies requirements for keys/autocheck without visible answer keys in HTML.
 - For mr_intermediate, dependency intermediate content/artifacts are source evidence only. They are not the checked material. Claims that mr_intermediate duplicates a full KIM/variant bank are valid only when the duplicated variants/tasks appear between CHECKED MATERIAL HTML START/END.
@@ -1403,6 +1412,9 @@ When only local/editorial cleanup remains and the material can be used without c
 
 MATERIAL-KIND VALIDATION POLICY:
 {validation_policy_for_spec(spec)}
+
+CONTROLLER ADDENDUM:
+{spec.controller_policy_addendum or "No additional controller policy."}
 
 {channel_key_visibility_policy_for_spec(spec)}
 

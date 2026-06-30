@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,9 +13,12 @@ from agents.utils import ModelType, get_llm
 from .agent import load_payload_from_path_or_text, load_payload_from_url, tasks_from_payload
 from .context import material_result_summary, task_identity
 from .contracts import IsmartGenerationConfig, IsmartGenerationResult
+from .observability import build_callback_handlers
+from .profiles import resolve_course_level
 from .runtime import run_ismart_task
 from .subagents import build_subagent_registry
-from .writer import safe_slug, write_json
+from .task_skip import build_skipped_result, practice_task_count, skip_reason_for_task
+from .writer import safe_slug, write_json, write_task_output
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,13 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     provider = parse_provider(args.provider)
-    llm = get_llm(
-        model=args.model_mode,
-        provider=provider.value,
-        temperature=0.2,
-        streaming=False,
-    )
-    subagents = build_subagent_registry(llm)
+    callback_handlers = build_callback_handlers(f"ismart_generator_agent_{time.strftime('%Y%m%d%H%M')}")
 
     output_root = Path(args.output)
     batch_dir = output_root / (args.run_name or f"sequential_{timestamp()}")
@@ -83,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         max_reference_chars=args.max_reference_chars,
         generation_target=args.generation_target,
         verbose=bool(args.verbose),
+        langchain_config={"callbacks": callback_handlers},
     )
 
     print(
@@ -115,9 +114,39 @@ def main(argv: list[str] | None = None) -> int:
     module_summaries: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for index, task in enumerate(tasks, start=1):
         task_id, lesson_number, lesson_title = task_identity(task)
+        course_level = resolve_course_level(task)
         run_dir = batch_dir / safe_slug(f"{index:03d}-{lesson_number}-{task_id}")
         module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
         summaries = module_summaries.setdefault(module_key, {})
+        skip_reason = skip_reason_for_task(task)
+        if skip_reason:
+            result = build_skipped_result(task=task, output_dir=run_dir, reason=skip_reason)
+            write_task_output(
+                result=result,
+                output_dir=run_dir,
+                validation_reports={"package": result.package_validation},
+            )
+            manifest["tasks"].append(manifest_entry_from_result(index, result))
+            print(
+                json.dumps(
+                    {
+                        "event": "task.skipped",
+                        "index": index,
+                        "task_id": task_id,
+                        "lesson_number": lesson_number,
+                        "lesson_title": lesson_title,
+                        "course_level": course_level,
+                        "resolved_profile": course_level,
+                        "output_dir": str(run_dir),
+                        "practice_task_count": practice_task_count(task),
+                        "reason": skip_reason,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            write_runner_manifest(batch_dir, manifest)
+            continue
 
         print(
             json.dumps(
@@ -127,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
                     "task_id": task_id,
                     "lesson_number": lesson_number,
                     "lesson_title": lesson_title,
+                    "course_level": course_level,
+                    "resolved_profile": course_level,
                     "output_dir": str(run_dir),
                 },
                 ensure_ascii=False,
@@ -135,6 +166,26 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         try:
+            task_llm = get_llm(
+                model=args.model_mode,
+                provider=provider.value,
+                temperature=0.2,
+                streaming=False,
+            )
+            subagents = build_subagent_registry(task_llm)
+            if args.verbose:
+                print(
+                    json.dumps(
+                        {
+                            "event": "task.subagents.reset",
+                            "index": index,
+                            "task_id": task_id,
+                            "lesson_number": lesson_number,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
             result = run_ismart_task(
                 task,
                 config,
@@ -152,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
                         "index": index,
                         "task_id": task_id,
                         "lesson_number": lesson_number,
+                        "course_level": result.course_level,
+                        "resolved_profile": result.course_level,
                         "status": result.status,
                         "output_dir": result.output_dir,
                     },
@@ -174,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
                 "task_id": task_id,
                 "lesson_number": lesson_number,
                 "lesson_title": lesson_title,
+                "course_level": course_level,
+                "resolved_profile": course_level,
                 "status": "error",
                 "output_dir": str(run_dir),
                 "error": str(exc),
@@ -187,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
                         "index": index,
                         "task_id": task_id,
                         "lesson_number": lesson_number,
+                        "course_level": course_level,
+                        "resolved_profile": course_level,
                         "error": str(exc),
                     },
                     ensure_ascii=False,
@@ -216,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         flush=True,
     )
-    return 0 if manifest["status"] == "approved" else 1
+    return 0 if successful_overall_status(str(manifest["status"])) else 1
 
 
 def select_tasks(tasks: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -243,11 +300,13 @@ def select_tasks(tasks: list[dict[str, Any]], args: argparse.Namespace) -> list[
 
 
 def manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> dict[str, Any]:
-    return {
+    entry = {
         "index": index,
         "task_id": result.task_id,
         "lesson_number": result.lesson_number,
         "lesson_title": result.lesson_title,
+        "course_level": result.course_level,
+        "resolved_profile": result.course_level,
         "status": result.status,
         "output_dir": result.output_dir,
         "materials": [
@@ -264,18 +323,38 @@ def manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> di
             "issues": result.package_validation.issues,
         },
     }
+    if result.skip_reason:
+        entry["skip_reason"] = result.skip_reason
+        entry["practice_task_count"] = 0
+    return entry
 
 
 def write_runner_manifest(batch_dir: Path, manifest: dict[str, Any]) -> None:
+    update_runner_manifest_counts(manifest)
     write_json(batch_dir / "sequential_manifest.json", manifest)
 
 
 def overall_status(entries: list[dict[str, Any]]) -> str:
     if any(entry.get("status") == "error" for entry in entries):
         return "has_errors"
-    if any(entry.get("status") != "approved" for entry in entries):
+    if any(entry.get("status") not in {"approved", "skipped"} for entry in entries):
         return "has_failures"
+    if any(entry.get("status") == "skipped" for entry in entries):
+        return "completed_with_skips"
     return "approved"
+
+
+def update_runner_manifest_counts(manifest: dict[str, Any]) -> None:
+    entries = manifest.get("tasks") or []
+    manifest["generated_count"] = sum(1 for entry in entries if entry.get("status") not in {"skipped", "error"})
+    manifest["approved_count"] = sum(1 for entry in entries if entry.get("status") == "approved")
+    manifest["skipped_count"] = sum(1 for entry in entries if entry.get("status") == "skipped")
+    manifest["error_count"] = sum(1 for entry in entries if entry.get("status") == "error")
+    manifest["failed_count"] = sum(1 for entry in entries if entry.get("status") not in {"approved", "skipped", "error"})
+
+
+def successful_overall_status(status: str) -> bool:
+    return status in {"approved", "completed_with_skips"}
 
 
 def print_selected_tasks(tasks: list[dict[str, Any]]) -> None:
@@ -286,6 +365,10 @@ def print_selected_tasks(tasks: list[dict[str, Any]]) -> None:
                     "task_id": task_identity(task)[0],
                     "lesson_number": task_identity(task)[1],
                     "lesson_title": task_identity(task)[2],
+                    "course_level": resolve_course_level(task),
+                    "resolved_profile": resolve_course_level(task),
+                    "skip_reason": skip_reason_for_task(task),
+                    "practice_task_count": practice_task_count(task),
                 }
                 for task in tasks
             ],

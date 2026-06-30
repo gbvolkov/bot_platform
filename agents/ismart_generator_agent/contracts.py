@@ -33,6 +33,7 @@ def default_workspace_dir() -> Path:
 class IsmartGenerationConfig:
     prompts_dir: Path = field(default_factory=lambda: default_workspace_dir() / "prompts_skills")
     output_root: Path = field(default_factory=lambda: default_workspace_dir() / "ismart_agent_outputs")
+    course_level: Literal["basic", "advanced"] = "basic"
     model: str = "gpt-4o-mini"
     base_url: str = "https://api.openai.com/v1"
     api_key: str | None = None
@@ -44,6 +45,7 @@ class IsmartGenerationConfig:
     validation_controller_accept_score: float = 0.2
     generation_target: str | None = None
     verbose: bool = False
+    langchain_config: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -53,10 +55,13 @@ class MaterialSpec:
     agent_type: str
     prompt_files: tuple[str, ...]
     validator_kind: str
+    course_level: Literal["basic", "advanced"] = "basic"
     dependency_kinds: tuple[str, ...] = ()
     reference_fields: tuple[str, ...] = ()
     json_field_labels: tuple[str, ...] = ()
     prompt_addendum: str = ""
+    validation_policy_addendum: str = ""
+    controller_policy_addendum: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,6 +162,7 @@ class IsmartGenerationResult:
     task_id: str
     lesson_number: str
     lesson_title: str
+    course_level: str
     status: str
     output_dir: str
     materials: list[MaterialResult]
@@ -164,12 +170,15 @@ class IsmartGenerationResult:
     reference_summary: dict[str, list[dict[str, Any]]]
     agents_called: list[str]
     prompt_files_used: list[str]
+    skip_reason: str | None = None
 
     def to_public_json(self) -> dict[str, Any]:
-        return {
+        data = {
             "task_id": self.task_id,
             "lesson_number": self.lesson_number,
             "lesson_title": self.lesson_title,
+            "course_level": self.course_level,
+            "resolved_profile": self.course_level,
             "status": self.status,
             "output_dir": self.output_dir,
             "agents_called": self.agents_called,
@@ -182,3 +191,6 @@ class IsmartGenerationResult:
             },
             "references": self.reference_summary,
         }
+        if self.skip_reason:
+            data["skip_reason"] = self.skip_reason
+        return data

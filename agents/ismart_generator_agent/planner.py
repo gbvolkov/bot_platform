@@ -30,16 +30,17 @@ def build_material_plan(
     lesson = task.get("lesson") or {}
     flags = lesson.get("content_flags") or {}
     kinds: list[str] = []
+    course_level = config.course_level if config else "basic"
 
     target = task.get("generation_target") or (config.generation_target if config else None)
     if target == "final_project":
         kinds.append("final_project")
         kinds.append("specification_qa")
-        return [get_material_spec(kind) for kind in kinds]
+        return [get_material_spec(kind, course_level=course_level) for kind in kinds]
 
     if flags.get("attestation"):
         kinds.extend(["intermediate", "mr_intermediate", "specification_qa"])
-        return [get_material_spec(kind) for kind in kinds]
+        return [get_material_spec(kind, course_level=course_level) for kind in kinds]
 
     if flags.get("theory") and positive_hours(lesson, "theory"):
         kinds.append("theory")
@@ -58,4 +59,4 @@ def build_material_plan(
         kinds.append("current_control")
 
     kinds.append("specification_qa")
-    return [get_material_spec(kind) for kind in kinds]
+    return [get_material_spec(kind, course_level=course_level) for kind in kinds]

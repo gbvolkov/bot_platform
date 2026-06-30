@@ -12,6 +12,7 @@ from .contracts import (
     ValidationResult,
 )
 from .planner import build_material_plan
+from .profiles import config_for_task_profile, resolve_course_level
 from .sources import ReferenceLoader, reference_summary
 from .trace import TraceLogger
 from .validators import RuleValidator
@@ -43,6 +44,7 @@ class IsmartGeneratorRuntime:
         subagents: Mapping[str, Any],
     ) -> None:
         self.config = config
+        self.subagents = subagents
         self.trace = TraceLogger(enabled=config.verbose)
         self.rule_validator = RuleValidator()
         self.worker = MaterialWorker(
@@ -66,16 +68,39 @@ class IsmartGeneratorRuntime:
         module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
     ) -> IsmartGenerationResult:
         task_id, lesson_number, lesson_title = task_identity(task)
+        course_level = resolve_course_level(task)
+        task_config = config_for_task_profile(self.config, task)
+        rule_validator = RuleValidator()
+        worker = MaterialWorker(
+            subagents=self.subagents,
+            config=task_config,
+            rule_validator=rule_validator,
+            trace=self.trace,
+        )
+        package_validator = PackageValidator(
+            subagents=self.subagents,
+            config=task_config,
+            rule_validator=rule_validator,
+            trace=self.trace,
+        )
         output_dir = run_dir or self._new_run_dir(task)
         attempts_dir = output_dir / "tmp"
         attempts_dir.mkdir(parents=True, exist_ok=True)
-        self.trace.log("task.start", task_id=task_id, lesson_number=lesson_number, lesson_title=lesson_title)
-        specs = build_material_plan(task, self.config)
+        self.trace.log(
+            "task.start",
+            task_id=task_id,
+            lesson_number=lesson_number,
+            lesson_title=lesson_title,
+            course_level=course_level,
+            prompts_dir=str(task_config.prompts_dir),
+        )
+        specs = build_material_plan(task, task_config)
         self.trace.log(
             "planner.done",
+            course_level=course_level,
             material_plan=[{"kind": spec.kind, "agent": spec.agent_type, "prompt_files": list(spec.prompt_files)} for spec in specs],
         )
-        references = ReferenceLoader(self.config, trace=self.trace).load(task)
+        references = ReferenceLoader(task_config, trace=self.trace).load(task)
         materials: list[MaterialResult] = []
         validation_reports: dict[str, ValidationResult] = {}
 
@@ -87,7 +112,7 @@ class IsmartGeneratorRuntime:
                 agent=spec.agent_type,
                 dependencies=[{"kind": item.kind, "status": item.status} for item in dependencies],
             )
-            material = self.worker.run(
+            material = worker.run(
                 task=task,
                 spec=spec,
                 references=references,
@@ -126,6 +151,7 @@ class IsmartGeneratorRuntime:
                     task_id=task_id,
                     lesson_number=lesson_number,
                     lesson_title=lesson_title,
+                    course_level=course_level,
                     output_dir=output_dir,
                     materials=materials,
                     references=references,
@@ -135,7 +161,7 @@ class IsmartGeneratorRuntime:
                 )
 
         self.trace.log("package.start", material_count=len(materials))
-        package_validation = self.package_validator.validate(
+        package_validation = package_validator.validate(
             task=task,
             specs=specs,
             materials=materials,
@@ -148,6 +174,7 @@ class IsmartGeneratorRuntime:
             task_id=task_id,
             lesson_number=lesson_number,
             lesson_title=lesson_title,
+            course_level=course_level,
             output_dir=output_dir,
             materials=materials,
             references=references,
@@ -162,6 +189,7 @@ class IsmartGeneratorRuntime:
         task_id: str,
         lesson_number: str,
         lesson_title: str,
+        course_level: str,
         output_dir: Path,
         materials: list[MaterialResult],
         references: Any,
@@ -173,6 +201,7 @@ class IsmartGeneratorRuntime:
             task_id=task_id,
             lesson_number=lesson_number,
             lesson_title=lesson_title,
+            course_level=course_level,
             status=self._result_status(materials, package_validation),
             output_dir=str(output_dir),
             materials=materials,

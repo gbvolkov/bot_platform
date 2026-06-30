@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     results = state.get("results") or []
     if not results or not all(isinstance(item, dict) for item in results):
         return 1
-    return 0 if all(item.get("status") == "approved" for item in results) else 1
+    return 0 if all(item.get("status") in {"approved", "skipped"} for item in results) else 1
 
 
 def _build_configurable(args: argparse.Namespace) -> dict[str, Any]:

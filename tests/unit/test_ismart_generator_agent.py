@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
+from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
+from agents.ismart_generator_agent import agent as agent_module
 from agents.ismart_generator_agent import cli
+from agents.ismart_generator_agent import sequential_runner
 from agents.ismart_generator_agent.context import (
     build_intermediate_assessment_artifact_prompt,
     build_generation_prompt,
@@ -19,8 +23,22 @@ from agents.ismart_generator_agent.context import (
     source_contract_for_spec,
     validation_policy_for_spec,
 )
-from agents.ismart_generator_agent.contracts import IsmartGenerationConfig, MaterialResult, MaterialSpec, ReferenceDocument
+from agents.ismart_generator_agent.contracts import (
+    IsmartGenerationConfig,
+    IsmartGenerationResult,
+    MaterialResult,
+    MaterialSpec,
+    ReferenceDocument,
+)
 from agents.ismart_generator_agent.contracts import ValidationResult
+from agents.ismart_generator_agent.planner import build_material_plan
+from agents.ismart_generator_agent.profiles import (
+    config_for_task_profile,
+    langfuse_agent_name_for_task,
+    prompts_dir_for_level,
+    resolve_course_class,
+    resolve_course_level,
+)
 from agents.ismart_generator_agent.runtime import IsmartGeneratorRuntime
 from agents.ismart_generator_agent.registry import FORMAT_PROMPT, get_material_spec
 from agents.ismart_generator_agent.schemas import (
@@ -43,22 +61,284 @@ from agents.ismart_generator_agent.schemas import (
     SelfWorkAutocheckSet,
     SelfWorkTaskCheck,
 )
+from agents.ismart_generator_agent import subagents as subagents_module
+from agents.ismart_generator_agent.sources import read_prompt_files
 from agents.ismart_generator_agent.subagents import (
     ALL_SUBAGENT_TYPES,
     build_subagent_registry,
+)
+from agents.ismart_generator_agent.task_skip import (
+    NO_PRACTICE_TASKS_SKIP_REASON,
+    practice_task_count,
+    skip_reason_for_task,
 )
 from agents.ismart_generator_agent.workers import (
     HTML_TEMPLATE_PATH,
     MaterialWorker,
     PackageValidator,
+    StructuredSubagentError,
+    StructuredSubagentInvoker,
     _normalize_practice_instance_tests,
     load_html_format_template,
     render_current_control_material_html,
     render_practice_material_html,
 )
+from agents.ismart_generator_agent.trace import TraceLogger
+from agents.ismart_generator_agent.tracker_converter import detect_course_level, find_references_dir, parse_tasks
 
 
 VALID_HTML = '<style>.x{}</style><div class="cc-lesson"><h2 id="concepts">Concepts</h2><p>ok</p></div>'
+
+
+def _profile_task(*, lesson_level: str | None = None, course_level: str | None = None) -> dict[str, Any]:
+    lesson: dict[str, Any] = {
+        "lesson_number": 1,
+        "title": "Profile test",
+        "hours": {"practice": 1},
+        "content": {"audience": ""},
+        "content_flags": {"practice": True},
+        "practice_tasks": {"l1": [{"number": 1, "text": "Write a program."}], "l2": [], "l3": []},
+    }
+    if lesson_level is not None:
+        lesson["course_level"] = lesson_level
+    course: dict[str, Any] = {"title": "Python"}
+    if course_level is not None:
+        course["level"] = course_level
+    return {"task_id": "profile-test", "course": course, "module": {"title": "M"}, "lesson": lesson}
+
+
+def test_course_level_resolution_prefers_lesson_then_course_then_basic() -> None:
+    assert resolve_course_level(_profile_task(lesson_level="advanced", course_level="basic")) == "advanced"
+    assert resolve_course_level(_profile_task(course_level="продвинутый")) == "advanced"
+    assert resolve_course_level(_profile_task()) == "basic"
+
+
+def test_langfuse_agent_name_uses_profile_and_class() -> None:
+    advanced_task = _profile_task(lesson_level="advanced")
+    advanced_task["lesson"]["content"]["audience"] = "10-11 классы"
+    basic_task = _profile_task(lesson_level="basic")
+    basic_task["lesson"]["content"]["audience"] = "8-9 классы"
+
+    assert resolve_course_class(advanced_task) == "10"
+    assert langfuse_agent_name_for_task(advanced_task) == "ismart_generator_advanced_10_lesson_1"
+    assert resolve_course_class(basic_task) == "8"
+    assert langfuse_agent_name_for_task(basic_task) == "ismart_generator_basic_8_lesson_1"
+
+
+def test_practice_lesson_without_practice_tasks_is_skippable() -> None:
+    task = _profile_task()
+    task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+
+    assert practice_task_count(task) == 0
+    assert skip_reason_for_task(task) == NO_PRACTICE_TASKS_SKIP_REASON
+
+
+def test_run_tasks_skips_practice_lesson_without_llm(tmp_path: Path) -> None:
+    task = _profile_task()
+    task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+
+    def fail_subagent_factory() -> Mapping[str, Any]:
+        raise AssertionError("subagents should not be built for skipped lessons")
+
+    results = agent_module.run_tasks(
+        [task],
+        config=IsmartGenerationConfig(output_root=tmp_path),
+        subagent_factory=fail_subagent_factory,
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert results[0].skip_reason == NO_PRACTICE_TASKS_SKIP_REASON
+    result_path = Path(results[0].output_dir) / "result.json"
+    manifest_path = Path(results[0].output_dir) / "manifest.json"
+    assert result_path.exists()
+    assert manifest_path.exists()
+    assert json.loads(result_path.read_text(encoding="utf-8"))["status"] == "skipped"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["skip_reason"] == NO_PRACTICE_TASKS_SKIP_REASON
+
+
+def test_sequential_runner_skips_empty_practice_lesson_and_writes_manifest(
+    tmp_path: Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    task = _profile_task()
+    task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([task], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(sequential_runner, "build_callback_handlers", lambda _log_name: [])
+    monkeypatch.setattr(
+        sequential_runner,
+        "get_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
+    )
+
+    exit_code = sequential_runner.main(
+        [
+            "--input",
+            str(input_path),
+            "--output",
+            str(tmp_path / "out"),
+            "--run-name",
+            "skip-run",
+        ]
+    )
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert '"event": "task.skipped"' in captured.out
+    manifest = json.loads((tmp_path / "out" / "skip-run" / "sequential_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "completed_with_skips"
+    assert manifest["skipped_count"] == 1
+    assert manifest["tasks"][0]["status"] == "skipped"
+    assert manifest["tasks"][0]["skip_reason"] == NO_PRACTICE_TASKS_SKIP_REASON
+
+
+def test_profile_config_selects_sibling_prompt_directory(tmp_path: Path) -> None:
+    basic_dir = tmp_path / "prompts_skills"
+    advanced_dir = tmp_path / "prompts_skills_advanced"
+    basic_dir.mkdir()
+    advanced_dir.mkdir()
+
+    config = IsmartGenerationConfig(prompts_dir=basic_dir, output_root=tmp_path)
+
+    assert config_for_task_profile(config, _profile_task()).prompts_dir == basic_dir
+    assert config_for_task_profile(config, _profile_task(lesson_level="advanced")).prompts_dir == advanced_dir
+    assert prompts_dir_for_level("basic", base_prompts_dir=advanced_dir) == basic_dir
+    traced = config_for_task_profile(config, _profile_task(lesson_level="advanced"))
+    assert traced.langchain_config["run_name"] == "ismart_generator_advanced_unknown_lesson_1"
+    assert "profile:advanced" in traced.langchain_config["tags"]
+    assert "lesson:1" in traced.langchain_config["tags"]
+
+
+def test_material_plan_uses_advanced_registry_when_task_is_advanced(tmp_path: Path) -> None:
+    config = IsmartGenerationConfig(prompts_dir=tmp_path / "prompts_skills", output_root=tmp_path, course_level="advanced")
+
+    specs = build_material_plan(_profile_task(lesson_level="advanced"), config)
+    practice = next(spec for spec in specs if spec.kind == "practice")
+
+    assert practice.course_level == "advanced"
+    assert "L3 tasks are allowed" in practice.validation_policy_addendum
+
+
+def test_prompt_isolation_reads_only_resolved_profile_files(tmp_path: Path) -> None:
+    basic_dir = tmp_path / "prompts_skills"
+    advanced_dir = tmp_path / "prompts_skills_advanced"
+    basic_dir.mkdir()
+    advanced_dir.mkdir()
+    spec = get_material_spec("practice", course_level="advanced")
+    for name in spec.prompt_files:
+        (basic_dir / name).write_text(f"basic marker for {name}", encoding="utf-8")
+        (advanced_dir / name).write_text(f"advanced marker for {name}", encoding="utf-8")
+
+    task_config = config_for_task_profile(
+        IsmartGenerationConfig(prompts_dir=basic_dir, output_root=tmp_path),
+        _profile_task(lesson_level="advanced"),
+    )
+    prompt_contents = read_prompt_files(task_config, spec.prompt_files)
+
+    assert prompt_contents
+    assert all("advanced marker" in value for value in prompt_contents.values())
+    assert all("basic marker" not in value for value in prompt_contents.values())
+
+
+def test_run_tasks_uses_fresh_subagents_per_task(monkeypatch: Any, tmp_path: Path) -> None:
+    task_one = {"task_id": "lesson-1", "course": {}, "module": {}, "lesson": {"lesson_number": 1, "title": "L1"}}
+    task_two = {"task_id": "lesson-2", "course": {}, "module": {}, "lesson": {"lesson_number": 2, "title": "L2"}}
+    factory_results: list[dict[str, Any]] = []
+    received_subagents: list[dict[str, Any]] = []
+
+    def subagent_factory() -> dict[str, Any]:
+        subagents = {"marker": len(factory_results)}
+        factory_results.append(subagents)
+        return subagents
+
+    def fake_run_ismart_task(
+        task: dict[str, Any],
+        config: IsmartGenerationConfig,
+        *,
+        subagents: Mapping[str, Any],
+        run_dir: Path,
+        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> IsmartGenerationResult:
+        received_subagents.append(subagents)  # type: ignore[arg-type]
+        return IsmartGenerationResult(
+            task_id=str(task["task_id"]),
+            lesson_number=str(task["lesson"]["lesson_number"]),
+            lesson_title=str(task["lesson"]["title"]),
+            course_level="basic",
+            status="approved",
+            output_dir=str(run_dir),
+            materials=[],
+            package_validation=ValidationResult(approved=True),
+            reference_summary={},
+            agents_called=[],
+            prompt_files_used=[],
+        )
+
+    monkeypatch.setattr(agent_module, "run_ismart_task", fake_run_ismart_task)
+
+    results = agent_module.run_tasks(
+        [task_one, task_two],
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path),
+        subagent_factory=subagent_factory,
+    )
+
+    assert [result.task_id for result in results] == ["lesson-1", "lesson-2"]
+    assert len(factory_results) == 2
+    assert received_subagents == factory_results
+    assert received_subagents[0] is not received_subagents[1]
+
+
+def test_advanced_registry_does_not_add_per_lesson_practice_quota_rule() -> None:
+    advanced_specs = [get_material_spec(kind, course_level="advanced") for kind in ("practice", "specification_qa")]
+    joined = "\n".join(
+        "\n".join((spec.prompt_addendum, spec.validation_policy_addendum, spec.controller_policy_addendum))
+        for spec in advanced_specs
+    )
+
+    assert "≥7 задач" not in joined
+    assert "7 задач" not in joined
+    assert "7 tasks" not in joined.lower()
+
+
+def test_tracker_converter_detects_course_level_from_workbook_name() -> None:
+    assert detect_course_level(Path("Трекер_Python_DOP_Продвинутый.xlsx"), None) == "advanced"
+    assert detect_course_level(Path("Трекер_Python_DOP_Базовый.xlsx"), None) == "basic"
+
+
+def test_tracker_converter_uses_fixed_references_dir(tmp_path: Path) -> None:
+    prompts_dir = tmp_path / "prompts_skills"
+    advanced_prompts_dir = tmp_path / "prompts_skills_advanced"
+    references_dir = tmp_path / "референсы"
+    prompts_dir.mkdir()
+    advanced_prompts_dir.mkdir()
+    references_dir.mkdir()
+    (advanced_prompts_dir / "01_prompt.md").write_text("prompt", encoding="utf-8")
+    (references_dir / "source.md").write_text("reference", encoding="utf-8")
+
+    assert find_references_dir(tmp_path) == references_dir.resolve()
+
+
+def test_tracker_converter_parses_tasks_only_from_line_starts() -> None:
+    tasks = parse_tasks(
+        """
+1. Read a name and print a greeting.
+
+2. Read two numbers and print sum.
+
+3. Read a number and classify it.
+
+4. Read n and print all values from 1 to n divisible by 3. Use a for loop.
+
+5. Read a string and print uppercase.
+
+[Extra] Ignore this block.
+"""
+    )
+
+    assert [task["number"] for task in tasks] == [1, 2, 3, 4, 5]
+    assert tasks[3]["text"] == "Read n and print all values from 1 to n divisible by 3. Use a for loop."
 
 
 def _canonical_style_from_prompt_text(prompt: str) -> str:
@@ -83,36 +363,9 @@ def test_saved_cc_lesson_template_matches_format_prompt_style() -> None:
     assert template.template_html.endswith("</div>")
 
 
-class FakeStructuredModel:
-    def __init__(self, schema: type[Any]) -> None:
-        self.schema = schema
-
-    def invoke(self, _messages: list[Any]) -> Any:
-        if self.schema is GeneratedMaterial:
-            return GeneratedMaterial(content=VALID_HTML, agent_notes=["generated"])
-        if self.schema is MaterialValidationDecision:
-            return MaterialValidationDecision(approved=True, passed_blocks=[])
-        if self.schema is ValidationControllerDecision:
-            return ValidationControllerDecision(approved=True, quality_score=4)
-        return self.schema(approved=True)
-
-
 class FakeChatModel:
-    def __init__(self) -> None:
-        self.schemas: list[type[Any]] = []
-
-    def with_structured_output(self, schema: type[Any]) -> FakeStructuredModel:
-        self.schemas.append(schema)
-        return FakeStructuredModel(schema)
-
-
-class FunctionCallingFakeChatModel:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def with_structured_output(self, schema: type[Any], **kwargs: Any) -> FakeStructuredModel:
-        self.calls.append({"schema": schema, "kwargs": kwargs})
-        return FakeStructuredModel(schema)
+    def with_structured_output(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("subagents must use create_agent(response_format=...), not direct with_structured_output")
 
 
 class FakeGraph:
@@ -120,14 +373,51 @@ class FakeGraph:
         self.responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
-    def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append(dict(state))
+    def invoke(self, state: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls.append({**dict(state), "_config": config})
         if not self.responses:
             raise AssertionError("FakeGraph has no more responses")
         return {"result": self.responses.pop(0)}
 
 
-def test_subagent_registry_builds_explicit_compiled_graphs() -> None:
+class MissingStructuredResponseGraph:
+    def invoke(self, _state: dict[str, Any], _config: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "messages": [AIMessage(content="plain raw response without structured output")],
+            "structured_response": None,
+        }
+
+
+class FakeCreatedAgent:
+    def __init__(self, schema: type[Any]) -> None:
+        self.schema = schema
+        self.calls: list[dict[str, Any]] = []
+
+    def invoke(self, state: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls.append({**dict(state), "_config": config})
+        if self.schema is GeneratedMaterial:
+            structured = GeneratedMaterial(content=VALID_HTML, agent_notes=["generated"])
+        elif self.schema is MaterialValidationDecision:
+            structured = MaterialValidationDecision(approved=True, passed_blocks=[])
+        elif self.schema is ValidationControllerDecision:
+            structured = ValidationControllerDecision(approved=True, quality_score=4)
+        else:
+            structured = self.schema()
+        return {
+            **state,
+            "structured_response": structured,
+            "messages": [AIMessage(content="raw model response")],
+        }
+
+
+def test_subagent_registry_builds_explicit_compiled_agents(monkeypatch: Any) -> None:
+    create_agent_calls: list[dict[str, Any]] = []
+
+    def fake_create_agent(**kwargs: Any) -> FakeCreatedAgent:
+        create_agent_calls.append(kwargs)
+        return FakeCreatedAgent(kwargs["response_format"])
+
+    monkeypatch.setattr(subagents_module, "create_agent", fake_create_agent)
     model = FakeChatModel()
 
     registry = build_subagent_registry(model)  # type: ignore[arg-type]
@@ -136,24 +426,76 @@ def test_subagent_registry_builds_explicit_compiled_graphs() -> None:
     for agent_type in ALL_SUBAGENT_TYPES:
         assert hasattr(registry[agent_type], "invoke")
     result = registry["TheoryMaterialAgent"].invoke({"system_prompt": "system", "prompt": "prompt"})
-    assert isinstance(result["result"], GeneratedMaterial)
-    assert GeneratedMaterial in model.schemas
-    assert PracticeTaskTemplateSet in model.schemas
-    assert PracticeTaskInstanceSet in model.schemas
-    assert SelfWorkAutocheckSet in model.schemas
-    assert CurrentControlAutocheckSet in model.schemas
-    assert IntermediateAssessmentArtifact in model.schemas
-    assert MaterialValidationDecision in model.schemas
-    assert ValidationControllerDecision in model.schemas
+    assert isinstance(result["structured_response"], GeneratedMaterial)
+    schemas = [call["response_format"] for call in create_agent_calls]
+    assert GeneratedMaterial in schemas
+    assert PracticeTaskTemplateSet in schemas
+    assert PracticeTaskInstanceSet in schemas
+    assert SelfWorkAutocheckSet in schemas
+    assert CurrentControlAutocheckSet in schemas
+    assert IntermediateAssessmentArtifact in schemas
+    assert MaterialValidationDecision in schemas
+    assert ValidationControllerDecision in schemas
+    assert all(call["tools"] is None for call in create_agent_calls)
+    assert all(call["state_schema"] is subagents_module.StructuredSubagentState for call in create_agent_calls)
 
 
-def test_subagent_registry_uses_function_calling_structured_output_when_supported() -> None:
-    model = FunctionCallingFakeChatModel()
+def test_structured_subagent_invoker_logs_raw_response_when_structured_response_is_missing() -> None:
+    stream = StringIO()
+    invoker = StructuredSubagentInvoker(
+        {"SpecificationQAAgent": MissingStructuredResponseGraph()},
+        trace=TraceLogger(enabled=True, stream=stream),
+    )
 
-    build_subagent_registry(model)  # type: ignore[arg-type]
+    try:
+        invoker.invoke(
+            "SpecificationQAAgent",
+            system="system",
+            prompt="prompt",
+            schema=GeneratedMaterial,
+        )
+    except StructuredSubagentError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected StructuredSubagentError")
 
-    assert model.calls
-    assert all(call["kwargs"].get("method") == "function_calling" for call in model.calls)
+    trace_output = stream.getvalue()
+    assert "plain raw response without structured output" in message
+    assert "subagent.structured_output.missing" in trace_output
+    assert "plain raw response without structured output" in trace_output
+
+
+def test_structured_subagent_invoker_invokes_graph_with_isolated_thread_id() -> None:
+    graph = FakeGraph([GeneratedMaterial(content=VALID_HTML, agent_notes=[])])
+    invoker = StructuredSubagentInvoker(
+        {"TheoryMaterialAgent": graph},
+        langchain_config={
+            "run_name": "ismart_generator_basic_8",
+            "tags": ["ismart_generator", "profile:basic", "class:8"],
+            "metadata": {"course_level": "basic", "course_class": "8"},
+        },
+    )
+
+    result = invoker.invoke(
+        "TheoryMaterialAgent",
+        system="system",
+        prompt="prompt",
+        schema=GeneratedMaterial,
+    )
+
+    assert result.content == VALID_HTML
+    assert len(graph.calls) == 1
+    call = graph.calls[0]
+    assert call["system_prompt"] == "system"
+    assert call["prompt"] == "prompt"
+    assert len(call["messages"]) == 1
+    assert isinstance(call["messages"][0], HumanMessage)
+    thread_id = call["_config"]["configurable"]["thread_id"]
+    assert thread_id.startswith("ismart-TheoryMaterialAgent-GeneratedMaterial-")
+    assert call["_config"]["run_name"] == "ismart_generator_basic_8.TheoryMaterialAgent"
+    assert "subagent:TheoryMaterialAgent" in call["_config"]["tags"]
+    assert call["_config"]["metadata"]["course_class"] == "8"
+    assert call["_config"]["metadata"]["subagent_type"] == "TheoryMaterialAgent"
 
 
 def test_generator_agent_does_not_import_old_generator_runtime() -> None:
@@ -615,9 +957,9 @@ class NamedFakeGraph(FakeGraph):
         self.name = name
         self.call_order = call_order
 
-    def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
+    def invoke(self, state: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
         self.call_order.append(self.name)
-        return super().invoke(state)
+        return super().invoke(state, config)
 
 
 class RaisingThenFakeGraph(FakeGraph):
@@ -626,8 +968,8 @@ class RaisingThenFakeGraph(FakeGraph):
         self.error = error
         self.raised = False
 
-    def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append(dict(state))
+    def invoke(self, state: dict[str, Any], config: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls.append({**dict(state), "_config": config})
         if not self.raised:
             self.raised = True
             raise self.error
@@ -1763,6 +2105,76 @@ def test_practice_worker_uses_template_variant_pipeline_and_writes_artifacts(tmp
     assert "city = 'Тула'\nprint(city)" not in result.content
     assert list((tmp_path / "tmp" / "practice").glob("*.practice_templates.json"))
     assert list((tmp_path / "tmp" / "practice").glob("*.practice_instances.json"))
+
+
+def test_practice_worker_ignores_validator_issues_targeting_internal_reference_fields(tmp_path: Path) -> None:
+    template_agent = FakeGraph([_practice_template_set()])
+    variant_agent = FakeGraph([_practice_instance_set()])
+    validator = FakeGraph(
+        [
+            MaterialValidationDecision(
+                approved=False,
+                issues=[
+                    "Learner-facing practice contains hidden_solution and teacher_explanation.",
+                ],
+                fix_instructions=[
+                    "Remove hidden_solution and teacher_explanation from practice_instances.",
+                ],
+                issues_by_block=[
+                    {
+                        "block_id": "#P1",
+                        "block_heading": "P1",
+                        "field_path": "practice_instances.tasks[P1].hidden_solution",
+                        "severity": "blocking",
+                        "issue": "hidden_solution is present.",
+                        "fix_instruction": "Remove hidden_solution.",
+                    },
+                    {
+                        "block_id": "#P1",
+                        "block_heading": "P1",
+                        "field_path": "practice_instances.tasks[P1].teacher_explanation",
+                        "severity": "blocking",
+                        "issue": "teacher_explanation is present.",
+                        "fix_instruction": "Remove teacher_explanation.",
+                    },
+                ],
+            )
+        ]
+    )
+    worker = MaterialWorker(
+        subagents={
+            "PracticeTaskTemplateAgent": template_agent,
+            "PracticeTaskVariantAgent": variant_agent,
+            "MaterialValidatorAgent": validator,
+        },
+        config=IsmartGenerationConfig(prompts_dir=tmp_path, output_root=tmp_path, max_generation_iterations=2),
+    )
+
+    result = worker.run(
+        task={
+            "course": {},
+            "module": {},
+            "lesson": {
+                "content_flags": {"practice": True},
+                "hours": {"practice": 1},
+                "practice_tasks": {"l1": [{"number": 1, "text": "Create a variable with a name and print it"}]},
+            },
+        },
+        spec=_practice_worker_spec(),
+        references={},
+        dependency_results=[],
+        attempts_dir=tmp_path / "tmp",
+    )
+
+    assert result.status == "approved"
+    assert result.iterations == 1
+    assert result.validation_issues == []
+    assert result.validation_issues_by_block == []
+    assert len(variant_agent.calls) == 1
+    assert result.generation_artifacts["practice_instances"]["tasks"][0]["hidden_solution"]
+    assert result.generation_artifacts["practice_instances"]["tasks"][0]["teacher_explanation"]
+    assert "hidden_solution" not in result.content
+    assert "teacher_explanation" not in result.content
 
 
 def test_practice_worker_regenerates_instances_after_semantic_failure(tmp_path: Path) -> None:

@@ -5,8 +5,11 @@ import html
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NotRequired, TypedDict
+from uuid import uuid4
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from .attempts import AttemptArtifactStore
@@ -497,6 +500,47 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _mentions_internal_practice_reference_field(value: Any) -> bool:
+    text = str(value or "").lower()
+    return "hidden_solution" in text or "teacher_explanation" in text
+
+
+def _is_internal_practice_reference_field_path(value: Any) -> bool:
+    path = str(value or "").lower()
+    return bool(re.search(r"(^|[.\[\]])(hidden_solution|teacher_explanation)($|[.\[\]])", path))
+
+
+def _filter_practice_internal_reference_field_issues(result: ValidationResult) -> ValidationResult:
+    kept_block_issues: list[dict[str, Any]] = []
+    removed_count = 0
+    for issue in result.issues_by_block:
+        if _is_internal_practice_reference_field_path(issue.get("field_path")):
+            removed_count += 1
+            continue
+        kept_block_issues.append(issue)
+    if removed_count == 0:
+        return result
+
+    issues = [issue for issue in result.issues if not _mentions_internal_practice_reference_field(issue)]
+    fix_instructions = [
+        instruction
+        for instruction in result.fix_instructions
+        if not _mentions_internal_practice_reference_field(instruction)
+    ]
+    blocking_block_issues = [
+        issue
+        for issue in kept_block_issues
+        if str(issue.get("severity") or "blocking") != "non_blocking"
+    ]
+    return ValidationResult(
+        approved=not issues and not blocking_block_issues,
+        issues=issues,
+        fix_instructions=fix_instructions,
+        issues_by_block=kept_block_issues,
+        passed_blocks=list(result.passed_blocks),
+    )
+
+
 def _controller_quality_score(data: dict[str, Any]) -> float:
     raw_score = data.get("quality_score", data.get("score"))
     if raw_score is None:
@@ -506,6 +550,144 @@ def _controller_quality_score(data: dict[str, Any]) -> float:
     except (TypeError, ValueError):
         return 0.0
     return min(5.0, max(0.0, score))
+
+
+def _message_to_raw_response(message: BaseMessage) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": getattr(message, "type", type(message).__name__),
+        "content": getattr(message, "content", ""),
+    }
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        payload["tool_calls"] = tool_calls
+    invalid_tool_calls = getattr(message, "invalid_tool_calls", None)
+    if invalid_tool_calls:
+        payload["invalid_tool_calls"] = invalid_tool_calls
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if additional_kwargs:
+        payload["additional_kwargs"] = additional_kwargs
+    response_metadata = getattr(message, "response_metadata", None)
+    if response_metadata:
+        payload["response_metadata"] = response_metadata
+    return payload
+
+
+def _raw_response_from_subagent_state(state: dict[str, Any]) -> dict[str, Any]:
+    messages = state.get("messages")
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if isinstance(message, AIMessage):
+                return _message_to_raw_response(message)
+        for message in reversed(messages):
+            if isinstance(message, BaseMessage):
+                return _message_to_raw_response(message)
+    return {
+        "state_keys": sorted(str(key) for key in state.keys()),
+        "structured_response_type": type(state.get("structured_response")).__name__,
+        "result_type": type(state.get("result")).__name__,
+    }
+
+
+def _raw_response_from_exception(exc: Exception) -> dict[str, Any]:
+    for attr in ("raw_response", "response", "ai_message", "message"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, BaseMessage):
+            return _message_to_raw_response(value)
+        if value is not None:
+            return {attr: value}
+    return {
+        "exception_type": type(exc).__name__,
+        "exception": str(exc),
+    }
+
+
+def _subagent_langchain_config(
+    base_config: Mapping[str, Any],
+    *,
+    thread_id: str,
+    agent_type: str,
+    schema: type[BaseModel],
+) -> dict[str, Any]:
+    config = dict(base_config or {})
+    base_run_name = str(config.get("run_name") or "ismart_generator")
+    config["run_name"] = f"{base_run_name}.{agent_type}"
+    config["tags"] = list(dict.fromkeys([*(config.get("tags") or []), f"subagent:{agent_type}"]))
+    config["metadata"] = {
+        **(config.get("metadata") or {}),
+        "subagent_type": agent_type,
+        "structured_schema": schema.__name__,
+    }
+    configurable = dict(config.get("configurable") or {})
+    configurable["thread_id"] = thread_id
+    config["configurable"] = configurable
+    return config
+
+
+class StructuredSubagentCallState(TypedDict):
+    agent_type: str
+    system: str
+    prompt: str
+    schema: type[BaseModel]
+    thread_id: str
+    langchain_config: NotRequired[dict[str, Any]]
+    structured_response: NotRequired[Any]
+    raw_response: NotRequired[Any]
+
+
+def _build_structured_subagent_call_graph(subagents: Mapping[str, Any]):
+    builder = StateGraph(StructuredSubagentCallState)
+
+    def route_node(state: StructuredSubagentCallState) -> dict[str, Any]:
+        agent_type = state.get("agent_type")
+        if agent_type not in subagents:
+            raise KeyError(f"Subagent is not registered: {agent_type}")
+        return {}
+
+    def route_to_subagent(state: StructuredSubagentCallState) -> str:
+        return str(state["agent_type"])
+
+    builder.add_node("route_subagent", route_node)
+    builder.add_edge(START, "route_subagent")
+    builder.add_conditional_edges(
+        "route_subagent",
+        route_to_subagent,
+        {agent_type: agent_type for agent_type in subagents},
+    )
+    for agent_type, subagent_graph in subagents.items():
+        builder.add_node(agent_type, _make_structured_subagent_node(agent_type, subagent_graph))
+        builder.add_edge(agent_type, END)
+    return builder.compile(name="ismart_structured_subagent_call_graph")
+
+
+def _make_structured_subagent_node(agent_type: str, subagent_graph: Any):
+    def subagent_node(state: StructuredSubagentCallState) -> dict[str, Any]:
+        schema = state["schema"]
+        prompt = state["prompt"]
+        child_state = subagent_graph.invoke(
+            {
+                "system_prompt": state["system"],
+                "prompt": prompt,
+                "messages": [HumanMessage(content=prompt)],
+            },
+            _subagent_langchain_config(
+                state.get("langchain_config") or {},
+                thread_id=state["thread_id"],
+                agent_type=agent_type,
+                schema=schema,
+            ),
+        )
+        raw_response = _raw_response_from_subagent_state(child_state) if isinstance(child_state, dict) else None
+        structured_response = None
+        if isinstance(child_state, dict):
+            structured_response = child_state.get("structured_response")
+            if structured_response is None:
+                structured_response = child_state.get("result")
+        return {
+            "structured_response": structured_response,
+            "raw_response": raw_response,
+        }
+
+    return subagent_node
 
 
 def _declares_multiple_valid_answers(*values: Any) -> bool:
@@ -543,8 +725,17 @@ def _declares_multiple_valid_answers(*values: Any) -> bool:
 
 
 class StructuredSubagentInvoker:
-    def __init__(self, subagents: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        subagents: Mapping[str, Any],
+        *,
+        trace: TraceLogger | None = None,
+        langchain_config: Mapping[str, Any] | None = None,
+    ) -> None:
         self.subagents = subagents
+        self.parent_graph = _build_structured_subagent_call_graph(subagents)
+        self.trace = trace or TraceLogger()
+        self.langchain_config = dict(langchain_config or {})
 
     def invoke(
         self,
@@ -554,14 +745,53 @@ class StructuredSubagentInvoker:
         prompt: str,
         schema: type[BaseModel],
     ) -> BaseModel:
-        graph = self.subagents.get(agent_type)
-        if graph is None:
+        if agent_type not in self.subagents:
             raise KeyError(f"Subagent is not registered: {agent_type}")
+        raw_response: Any = None
+        thread_id = f"ismart-{agent_type}-{schema.__name__}-{uuid4().hex}"
+        self.trace.log(
+            "subagent.invoke.start",
+            agent_type=agent_type,
+            schema=schema.__name__,
+            thread_id=thread_id,
+            prompt_chars=len(prompt),
+        )
         try:
-            state = graph.invoke({"system_prompt": system, "prompt": prompt})
+            state = self.parent_graph.invoke(
+                {
+                    "agent_type": agent_type,
+                    "system": system,
+                    "prompt": prompt,
+                    "schema": schema,
+                    "thread_id": thread_id,
+                    "langchain_config": dict(self.langchain_config),
+                },
+                self.langchain_config,
+            )
         except Exception as exc:
-            raise StructuredSubagentError(agent_type=agent_type, schema=schema, cause=exc) from exc
-        result = state.get("result") if isinstance(state, dict) else None
+            raw_response = _raw_response_from_exception(exc)
+            self.trace.log(
+                "subagent.structured_output.exception",
+                agent_type=agent_type,
+                schema=schema.__name__,
+                thread_id=thread_id,
+                raw_response=raw_response,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise StructuredSubagentError(
+                agent_type=agent_type,
+                schema=schema,
+                cause=exc,
+                raw_response=raw_response,
+            ) from exc
+        if isinstance(state, dict):
+            raw_response = state.get("raw_response") or _raw_response_from_subagent_state(state)
+            result = state.get("structured_response")
+            if result is None:
+                result = state.get("result")
+        else:
+            result = None
         if isinstance(result, schema):
             return result
         if isinstance(result, dict):
@@ -570,16 +800,53 @@ class StructuredSubagentInvoker:
                     return schema.model_validate(result)
                 return schema.parse_obj(result)
             except Exception as exc:
-                raise StructuredSubagentError(agent_type=agent_type, schema=schema, cause=exc) from exc
-        raise TypeError(f"Subagent {agent_type} returned unsupported structured result: {type(result)!r}")
+                self.trace.log(
+                    "subagent.structured_output.validation_error",
+                    agent_type=agent_type,
+                    schema=schema.__name__,
+                    thread_id=thread_id,
+                    raw_response=raw_response,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                raise StructuredSubagentError(
+                    agent_type=agent_type,
+                    schema=schema,
+                    cause=exc,
+                    raw_response=raw_response,
+                ) from exc
+        cause = TypeError(f"unsupported structured result: {type(result)!r}")
+        self.trace.log(
+            "subagent.structured_output.missing",
+            agent_type=agent_type,
+            schema=schema.__name__,
+            thread_id=thread_id,
+            raw_response=raw_response,
+            result_type=type(result).__name__,
+        )
+        raise StructuredSubagentError(
+            agent_type=agent_type,
+            schema=schema,
+            cause=cause,
+            raw_response=raw_response,
+        )
 
 
 class StructuredSubagentError(RuntimeError):
-    def __init__(self, *, agent_type: str, schema: type[BaseModel], cause: Exception) -> None:
+    def __init__(
+        self,
+        *,
+        agent_type: str,
+        schema: type[BaseModel],
+        cause: Exception,
+        raw_response: Any = None,
+    ) -> None:
         self.agent_type = agent_type
         self.schema = schema
         self.cause = cause
-        super().__init__(f"{agent_type} failed to return valid {schema.__name__}: {cause}")
+        self.raw_response = raw_response
+        raw_suffix = f"; raw_response={raw_response!r}" if raw_response is not None else ""
+        super().__init__(f"{agent_type} failed to return valid {schema.__name__}: {cause}{raw_suffix}")
 
 
 class MaterialWorker:
@@ -594,7 +861,11 @@ class MaterialWorker:
         self.config = config
         self.rule_validator = rule_validator or RuleValidator()
         self.trace = trace or TraceLogger()
-        self.invoker = StructuredSubagentInvoker(subagents)
+        self.invoker = StructuredSubagentInvoker(
+            subagents,
+            trace=self.trace,
+            langchain_config=config.langchain_config,
+        )
 
     def run(
         self,
@@ -2139,6 +2410,16 @@ class MaterialWorker:
             issues_by_block=_list_of_dicts(data.get("issues_by_block", [])),
             passed_blocks=_list_of_dicts(data.get("passed_blocks", [])),
         )
+        if spec.kind == "practice":
+            filtered_result = _filter_practice_internal_reference_field_issues(result)
+            if filtered_result != result:
+                self.trace.log(
+                    "worker.llm_validation.filtered_internal_reference_fields",
+                    kind=spec.kind,
+                    before_issues=result.issues,
+                    after_issues=filtered_result.issues,
+                )
+                result = filtered_result
         self.trace.log("worker.llm_validation.done", kind=spec.kind, approved=result.approved, issues=result.issues)
         return result
 
@@ -2816,7 +3097,11 @@ class PackageValidator:
         self.config = config
         self.rule_validator = rule_validator or RuleValidator()
         self.trace = trace or TraceLogger()
-        self.invoker = StructuredSubagentInvoker(subagents)
+        self.invoker = StructuredSubagentInvoker(
+            subagents,
+            trace=self.trace,
+            langchain_config=config.langchain_config,
+        )
 
     def validate(
         self,

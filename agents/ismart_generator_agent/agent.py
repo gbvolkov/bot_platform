@@ -6,7 +6,7 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -14,19 +14,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
-from langfuse import Langfuse
-from langfuse.langchain import CallbackHandler
-
-import config as root_config
 from agents.utils import ModelType, extract_text, get_llm
-from platform_utils.llm_logger import JSONFileTracer
 
 from .context import material_result_summary, task_identity
 from .contracts import IsmartGenerationConfig, IsmartGenerationResult
+from .observability import build_callback_handlers, langchain_config_from_runnable
+from .profiles import resolve_course_level
 from .runtime import run_ismart_task
 from .state import IsmartGeneratorAgentContext, IsmartGeneratorAgentState
 from .subagents import build_subagent_registry
-from .writer import safe_slug, write_batch_manifest
+from .task_skip import build_skipped_result, practice_task_count, skip_reason_for_task
+from .writer import safe_slug, write_batch_manifest, write_task_output
 
 
 LOG = logging.getLogger(__name__)
@@ -44,22 +42,17 @@ def initialize_agent(
     **_kwargs: Any,
 ):
     log_name = f"ismart_generator_agent_{time.strftime('%Y%m%d%H%M')}"
-    callback_handlers = [JSONFileTracer(f"./logs/{log_name}")]
-    if root_config.LANGFUSE_URL and len(root_config.LANGFUSE_URL) > 0:
-        _ = Langfuse(
-            public_key=root_config.LANGFUSE_PUBLIC,
-            secret_key=root_config.LANGFUSE_SECRET,
-            host=root_config.LANGFUSE_URL,
-        )
-        callback_handlers += [CallbackHandler()]
+    callback_handlers = build_callback_handlers(log_name)
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model=model_mode, provider=provider.value, temperature=0.2, streaming=streaming)
-    subagents = build_subagent_registry(llm)
+
+    def subagent_factory() -> Mapping[str, Any]:
+        llm = get_llm(model=model_mode, provider=provider.value, temperature=0.2, streaming=streaming)
+        return build_subagent_registry(llm)
 
     builder = StateGraph(IsmartGeneratorAgentState)
     builder.add_node("parse_request", create_parse_request_node())
-    builder.add_node("run_generation", create_run_generation_node(subagents))
+    builder.add_node("run_generation", create_run_generation_node(subagent_factory))
     builder.add_node("respond", respond_node)
 
     builder.add_edge(START, "parse_request")
@@ -101,7 +94,7 @@ def create_parse_request_node():
     return parse_request_node
 
 
-def create_run_generation_node(subagents: Mapping[str, Any]):
+def create_run_generation_node(subagent_factory: Callable[[], Mapping[str, Any]]):
     def run_generation_node(
         state: IsmartGeneratorAgentState,
         config: RunnableConfig,
@@ -111,8 +104,15 @@ def create_run_generation_node(subagents: Mapping[str, Any]):
             return {"phase": "respond"}
         try:
             context = _runtime_context(config, runtime)
-            generation_config = _build_generation_config(context)
-            results = run_tasks(state.get("tasks") or [], config=generation_config, subagents=subagents)
+            generation_config = _build_generation_config(
+                context,
+                langchain_config=langchain_config_from_runnable(config),
+            )
+            results = run_tasks(
+                state.get("tasks") or [],
+                config=generation_config,
+                subagent_factory=subagent_factory,
+            )
             public_results = [result.to_public_json() for result in results]
             return {
                 "results": public_results,
@@ -246,17 +246,42 @@ def run_tasks(
     tasks: list[dict[str, Any]],
     *,
     config: IsmartGenerationConfig,
-    subagents: Mapping[str, Any],
+    subagents: Mapping[str, Any] | None = None,
+    subagent_factory: Callable[[], Mapping[str, Any]] | None = None,
 ) -> list[IsmartGenerationResult]:
+    if subagents is None and subagent_factory is None:
+        raise ValueError("Either subagents or subagent_factory must be provided.")
     output_root = config.output_root
     if len(tasks) == 1:
         run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_identity(tasks[0])[0])}"
+        skip_reason = skip_reason_for_task(tasks[0])
+        if skip_reason:
+            result = build_skipped_result(task=tasks[0], output_dir=run_dir, reason=skip_reason)
+            write_task_output(
+                result=result,
+                output_dir=run_dir,
+                validation_reports={"package": result.package_validation},
+            )
+            if config.verbose:
+                task_id, lesson_number, lesson_title = task_identity(tasks[0])
+                course_level = resolve_course_level(tasks[0])
+                print(
+                    f"[ismart-generator-agent] single_task.skipped {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'lesson_title': lesson_title, 'course_level': course_level, 'resolved_profile': course_level, 'run_dir': str(run_dir), 'practice_task_count': practice_task_count(tasks[0]), 'reason': skip_reason}, ensure_ascii=False)}",
+                    flush=True,
+                )
+            return [result]
+        task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
         if config.verbose:
+            course_level = resolve_course_level(tasks[0])
             print(
-                f"[ismart-generator-agent] single_task.start {json.dumps({'run_dir': str(run_dir)}, ensure_ascii=False)}",
+                f"[ismart-generator-agent] single_task.start {json.dumps({'run_dir': str(run_dir), 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
                 flush=True,
             )
-        return [run_ismart_task(tasks[0], config, subagents=subagents, run_dir=run_dir)]
+            print(
+                f"[ismart-generator-agent] single_task.subagents.reset {json.dumps({'run_dir': str(run_dir)}, ensure_ascii=False)}",
+                flush=True,
+            )
+        return [run_ismart_task(tasks[0], config, subagents=task_subagents, run_dir=run_dir)]
 
     batch_dir = output_root / f"batch_{_timestamp()}"
     batch_dir.mkdir(parents=True, exist_ok=True)
@@ -269,25 +294,47 @@ def run_tasks(
     module_summaries: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for task in tasks:
         task_id, lesson_number, _ = task_identity(task)
+        course_level = resolve_course_level(task)
         if config.verbose:
             print(
-                f"[ismart-generator-agent] batch.task.start {json.dumps({'task_id': task_id, 'lesson_number': lesson_number}, ensure_ascii=False)}",
+                f"[ismart-generator-agent] batch.task.start {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
                 flush=True,
             )
         module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
         summaries = module_summaries.setdefault(module_key, {})
         run_dir = batch_dir / safe_slug(f"{lesson_number}-{task_id}")
+        skip_reason = skip_reason_for_task(task)
+        if skip_reason:
+            result = build_skipped_result(task=task, output_dir=run_dir, reason=skip_reason)
+            write_task_output(
+                result=result,
+                output_dir=run_dir,
+                validation_reports={"package": result.package_validation},
+            )
+            results.append(result)
+            if config.verbose:
+                print(
+                    f"[ismart-generator-agent] batch.task.skipped {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'course_level': course_level, 'resolved_profile': course_level, 'output_dir': str(run_dir), 'practice_task_count': practice_task_count(task), 'reason': skip_reason}, ensure_ascii=False)}",
+                    flush=True,
+                )
+            continue
+        task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
+        if config.verbose:
+            print(
+                f"[ismart-generator-agent] batch.task.subagents.reset {json.dumps({'task_id': task_id, 'lesson_number': lesson_number}, ensure_ascii=False)}",
+                flush=True,
+            )
         result = run_ismart_task(
             task,
             config,
-            subagents=subagents,
+            subagents=task_subagents,
             run_dir=run_dir,
             module_material_summaries=summaries,
         )
         results.append(result)
         if config.verbose:
             print(
-                f"[ismart-generator-agent] batch.task.done {json.dumps({'task_id': task_id, 'status': result.status, 'output_dir': result.output_dir}, ensure_ascii=False)}",
+                f"[ismart-generator-agent] batch.task.done {json.dumps({'task_id': task_id, 'course_level': result.course_level, 'resolved_profile': result.course_level, 'status': result.status, 'output_dir': result.output_dir}, ensure_ascii=False)}",
                 flush=True,
             )
         summaries[lesson_number] = [material_result_summary(material) for material in result.materials]
@@ -300,22 +347,47 @@ def run_tasks(
     return results
 
 
+def _build_task_subagents(
+    *,
+    subagents: Mapping[str, Any] | None,
+    subagent_factory: Callable[[], Mapping[str, Any]] | None,
+) -> Mapping[str, Any]:
+    if subagent_factory is not None:
+        return subagent_factory()
+    if subagents is not None:
+        return subagents
+    raise ValueError("Either subagents or subagent_factory must be provided.")
+
+
 def format_agent_response(results: list[IsmartGenerationResult]) -> str:
     if not results:
         return "iSMART generation finished: no tasks were selected."
-    overall = "approved" if all(result.status == "approved" for result in results) else "has_failures"
+    overall = _overall_response_status(results)
     lines = [f"iSMART generation finished: {overall}", f"Tasks: {len(results)}"]
     for result in results:
         material_statuses = ", ".join(f"{item.kind}={item.status}" for item in result.materials)
         package_issues = len(result.package_validation.issues)
+        skip_suffix = f"; skip reason: {result.skip_reason}" if result.skip_reason else ""
         lines.append(
-            f"- lesson {result.lesson_number} ({result.task_id}): {result.status}; "
-            f"materials: {material_statuses or 'none'}; package issues: {package_issues}; output: {result.output_dir}"
+            f"- lesson {result.lesson_number} ({result.task_id}, {result.course_level}): {result.status}; "
+            f"materials: {material_statuses or 'none'}; package issues: {package_issues}; output: {result.output_dir}{skip_suffix}"
         )
     return "\n".join(lines)
 
 
-def _build_generation_config(context: dict[str, Any]) -> IsmartGenerationConfig:
+def _overall_response_status(results: list[IsmartGenerationResult]) -> str:
+    if any(result.status not in {"approved", "skipped"} for result in results):
+        return "has_failures"
+    if any(result.status == "skipped" for result in results):
+        return "completed_with_skips"
+    return "approved"
+
+
+def _build_generation_config(
+    context: dict[str, Any],
+    *,
+    langchain_config: dict[str, Any] | None = None,
+) -> IsmartGenerationConfig:
     output_root = Path(str(context.get("output") or DEFAULT_OUTPUT_ROOT))
     return IsmartGenerationConfig(
         output_root=output_root,
@@ -324,6 +396,7 @@ def _build_generation_config(context: dict[str, Any]) -> IsmartGenerationConfig:
         max_reference_chars=_int_context(context, "max_reference_chars", 0),
         generation_target=_optional_str(context.get("generation_target")),
         verbose=bool(context.get("verbose", False)),
+        langchain_config=langchain_config or {},
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .contracts import MaterialSpec
+from .profiles import CourseLevel, normalize_course_level
 
 
 COMMON_PROMPT = "01_Общее_prompt_skill.md"
@@ -338,8 +339,102 @@ MATERIAL_SPEC_REGISTRY["current_control"] = replace(
 )
 
 
-def get_material_spec(kind: str) -> MaterialSpec:
+ADVANCED_PROMPT_ADDENDUMS: dict[str, str] = {
+    "theory": (
+        "Use the selected Python prompt/skill baseline for deeper conceptual explanation. "
+        "Cover the exact concepts and typical errors needed by L3 practice tasks when present, "
+        "without revealing practice solutions."
+    ),
+    "practice": (
+        "Use the selected Python practice prompt/skill baseline. L1, L2, and L3 tasks are allowed when they are present in "
+        "lesson.practice_tasks. Treat lesson.practice_tasks as the authoritative source for task count, order, level, type, "
+        "and checked skill. Do not add extra tasks to satisfy a general quota. For L3, preserve the independent-choice "
+        "nature of the task while still producing a concrete new variant and checkable outcome when the source supports it. "
+        "When the source task explicitly requires use of AI as a tool, include a learner-facing disclosure requirement: "
+        "what tool/query was used, what was changed manually, why the final solution is correct, and what limitations remain."
+    ),
+    "mr_theory": (
+        "Use the selected teacher-guidance prompt/skill baseline. Explain L3 teaching risks, expected learner "
+        "misconceptions, and how to support L3 reasoning without turning the guidance into solved practice answers."
+    ),
+    "mr_practice": (
+        "Use the selected teacher-guidance prompt/skill baseline. Include teacher-facing keys and explanations for L1/L2/L3 "
+        "tasks from authoritative_task_ids only. When AI-tool disclosure is required by the source, explain how the teacher "
+        "should check the disclosure without accepting copied code as sufficient work."
+    ),
+    "specification_qa": (
+        "Use the selected QA prompt/skill baseline. Validate against authoritative_task_ids and approved generation artifacts. "
+        "For L3 tasks, check source-faithful independence of approach and internal consistency, not basic-level simplification."
+    ),
+    "final_project": (
+        "Use the selected final-project prompt/skill baseline and rely on JSON/references for concrete project composition, "
+        "assessment criteria, and allowed tool use."
+    ),
+}
+
+
+ADVANCED_VALIDATION_POLICY_ADDENDUMS: dict[str, str] = {
+    "practice": """
+PRACTICE VALIDATION ADDENDUM:
+- L3 tasks are allowed when present in SOURCE CONTRACT FROM JSON.authoritative_task_ids. Do not reject a task merely because it requires independent choice of approach.
+- Task count, order, ids, and levels are defined by lesson.practice_tasks. Do not require extra tasks because of generic course quotas.
+- Validate L3 by source faithfulness, topic coverage, feasibility in Python 3, and a clear checking path. Do not downgrade L3 into step-by-step L1/L2 guidance.
+- Require AI-use disclosure only when the source task or prompt/skill references explicitly make AI an allowed or required tool for that task.
+- When AI-use disclosure is required, it should ask the learner to state the tool/query, manual changes, correctness rationale, and limitations; it must not accept copied AI code without explanation as a complete answer.
+""".strip(),
+    "specification_qa": """
+QA VALIDATION ADDENDUM:
+- Validate L3 and AI-tool tasks against approved structured artifacts and source task ids only.
+- Do not infer missing tasks from generic course quotas when all authoritative_task_ids are present.
+- For source-required AI-tool tasks, QA may include internal checks for disclosure quality, manual modification, correctness rationale, and limitations.
+""".strip(),
+}
+
+
+ADVANCED_CONTROLLER_POLICY_ADDENDUMS: dict[str, str] = {
+    "practice": """
+PRACTICE CONTROLLER ADDENDUM:
+- Overrule validator objections that treat L3 itself as too broad or too independent when the task remains feasible, topic-aligned, and checkable.
+- Overrule validator objections that demand extra practice tasks outside SOURCE CONTRACT FROM JSON.authoritative_task_ids.
+- Keep failed only when an L3 task is incoherent, impossible for the configured environment, contradicts the source, or lacks any meaningful checking path.
+""".strip(),
+    "specification_qa": """
+QA CONTROLLER ADDENDUM:
+- Overrule validator objections based on generic course task quotas rather than the current lesson's authoritative_task_ids.
+- Keep failed for QA only when keys/tests/disclosure checks contradict approved artifacts or source data.
+""".strip(),
+}
+
+
+def _advanced_spec(kind: str, spec: MaterialSpec) -> MaterialSpec:
+    prompt_addendum = spec.prompt_addendum
+    if extra := ADVANCED_PROMPT_ADDENDUMS.get(kind):
+        prompt_addendum = f"{prompt_addendum}\n\n{extra}" if prompt_addendum else extra
+    return replace(
+        spec,
+        course_level="advanced",
+        prompt_addendum=prompt_addendum,
+        validation_policy_addendum=ADVANCED_VALIDATION_POLICY_ADDENDUMS.get(kind, ""),
+        controller_policy_addendum=ADVANCED_CONTROLLER_POLICY_ADDENDUMS.get(kind, ""),
+    )
+
+
+ADVANCED_MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
+    kind: _advanced_spec(kind, spec)
+    for kind, spec in MATERIAL_SPEC_REGISTRY.items()
+}
+
+
+def material_spec_registry_for_level(course_level: str | None) -> dict[str, MaterialSpec]:
+    normalized = normalize_course_level(course_level) or "basic"
+    if normalized == "advanced":
+        return ADVANCED_MATERIAL_SPEC_REGISTRY
+    return MATERIAL_SPEC_REGISTRY
+
+
+def get_material_spec(kind: str, course_level: CourseLevel | str | None = None) -> MaterialSpec:
+    registry = material_spec_registry_for_level(course_level)
     try:
-        return MATERIAL_SPEC_REGISTRY[kind]
+        return registry[kind]
     except KeyError as exc:
         raise ValueError(f"Unknown material_kind: {kind}") from exc
