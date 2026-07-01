@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -9,6 +9,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from .contracts import default_data_dir, default_workspace_dir
 from .profiles import normalize_course_level
 
 
@@ -412,21 +413,15 @@ def bool_cell(sheet: Any, row: int, column: int) -> bool:
 
 
 def find_workspace_dir(workbook_path: Path) -> Path:
-    for candidate in workbook_path.parent.iterdir():
-        if candidate.is_dir() and (candidate / "prompts_skills").is_dir():
-            return candidate.resolve()
-    raise FileNotFoundError(
-        "Could not locate workspace dir with prompts_skills next to the tracker. "
-        "Pass --workspace-dir explicitly."
-    )
+    return default_workspace_dir().resolve()
 
 
 def find_references_dir(workspace_dir: Path) -> Path:
-    references_dir = workspace_dir / "референсы"
+    references_dir = workspace_dir / "refs"
     if references_dir.is_dir():
         return references_dir.resolve()
     raise FileNotFoundError(
-        "Could not locate Markdown references dir at workspace_dir/референсы. "
+        "Could not locate Markdown references dir at workspace_dir/refs. "
         "Pass --references-dir explicitly for a non-standard layout."
     )
 
@@ -434,7 +429,9 @@ def find_references_dir(workspace_dir: Path) -> Path:
 def default_output_path(workspace_dir: Path, sheet_name: str) -> Path:
     slug = re.sub(r"\W+", "_", sheet_name.lower(), flags=re.UNICODE).strip("_")
     slug = slug or "sheet"
-    return workspace_dir / f"generation_input_{slug}_from_tracker.json"
+    if workspace_dir.resolve() == default_workspace_dir().resolve():
+        return default_data_dir() / f"generation_input_{slug}_from_tracker.json"
+    return workspace_dir / "data" / f"generation_input_{slug}_from_tracker.json"
 
 
 def as_posix(path: Path) -> str:
@@ -450,7 +447,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Path to write generation JSON.")
     parser.add_argument(
         "--workspace-dir",
-        help="Workspace dir containing prompts_skills and Markdown references. Auto-detected by default.",
+        help="Generator workspace dir containing data/ and refs/. Defaults to data/ismart/generator.",
     )
     parser.add_argument(
         "--references-dir",
@@ -491,3 +488,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

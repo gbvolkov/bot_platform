@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-MaterialStatus = Literal["approved", "failed", "blocked_dependency"]
+MaterialStatus = Literal["approved", "failed", "blocked_dependency", "skipped", "skipped_dependency"]
 
 
 def utc_now_iso() -> str:
@@ -22,16 +22,24 @@ def repo_root() -> Path:
 
 
 def default_workspace_dir() -> Path:
-    docs_root = repo_root() / "docs" / "ismart"
-    for prompts_dir in docs_root.glob("**/prompts_skills"):
-        if prompts_dir.is_dir():
-            return prompts_dir.parent
-    return docs_root / "workspace"
+    return repo_root() / "data" / "ismart" / "generator"
+
+
+def default_prompts_root() -> Path:
+    return repo_root() / "agents" / "ismart_generator_agent" / "prompts_skills"
+
+
+def default_refs_dir() -> Path:
+    return default_workspace_dir() / "refs"
+
+
+def default_data_dir() -> Path:
+    return default_workspace_dir() / "data"
 
 
 @dataclass(frozen=True)
 class IsmartGenerationConfig:
-    prompts_dir: Path = field(default_factory=lambda: default_workspace_dir() / "prompts_skills")
+    prompts_dir: Path = field(default_factory=lambda: default_prompts_root() / "basic")
     output_root: Path = field(default_factory=lambda: default_workspace_dir() / "ismart_agent_outputs")
     course_level: Literal["basic", "advanced"] = "basic"
     model: str = "gpt-4o-mini"
@@ -170,10 +178,9 @@ class IsmartGenerationResult:
     reference_summary: dict[str, list[dict[str, Any]]]
     agents_called: list[str]
     prompt_files_used: list[str]
-    skip_reason: str | None = None
 
     def to_public_json(self) -> dict[str, Any]:
-        data = {
+        return {
             "task_id": self.task_id,
             "lesson_number": self.lesson_number,
             "lesson_title": self.lesson_title,
@@ -191,6 +198,3 @@ class IsmartGenerationResult:
             },
             "references": self.reference_summary,
         }
-        if self.skip_reason:
-            data["skip_reason"] = self.skip_reason
-        return data

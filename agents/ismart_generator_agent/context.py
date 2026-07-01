@@ -5,6 +5,7 @@ from typing import Any
 
 from .contracts import MaterialResult, MaterialSpec, ReferenceBundle, ValidationResult
 from .sources import compact_json
+from .task_skip import project_practice_source_text
 
 
 def select_references(spec: MaterialSpec, references: ReferenceBundle) -> dict[str, list[dict[str, Any]]]:
@@ -76,6 +77,19 @@ def _normalized_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]]:
                     "level": level.upper(),
                     "source_number": number,
                     "source_text": text,
+                }
+            )
+    if not normalized_tasks:
+        project_source_text = project_practice_source_text(task)
+        if project_source_text:
+            normalized_tasks.append(
+                {
+                    "id": "P1",
+                    "level": "PROJECT",
+                    "source_number": "project",
+                    "source_kind": "project_content",
+                    "project_title": str(lesson.get("title") or lesson.get("topic") or "").strip(),
+                    "source_text": project_source_text,
                 }
             )
     return normalized_tasks
@@ -291,6 +305,7 @@ def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[s
             "Generate exactly one student-facing task variant for each task in tasks, in the same order and with the same P id.",
             "The tasks list and authoritative_task_ids are the authoritative task count, ids, order, and levels for this practice material. lesson.difficulty.*.count is planning context only and must not be used to invent extra tasks such as P6 when no corresponding lesson.practice_tasks item exists.",
             "Treat source_text as an authoritative task pattern: preserve id, level, task_type, skill_target, and constraints, but do not treat source_text as mandatory final learner wording unless it explicitly says exact wording/value is required.",
+            "If a task has source_kind=project_content, source_text is the authoritative project assignment from lesson.content. Preserve the project goal, formula, required stages/features, checking expectations, and optional extension from that content instead of looking for lesson.practice_tasks.",
             "Create a new concrete variant of the same pattern: use different scenario, variable names, literals, input data, expected output, and code shape from theory, Markdown references, and dependency materials unless the source explicitly requires exact values.",
             "Treat subject entities inside source_text, such as 'favorite color' and 'favorite animal', as slot examples unless the source explicitly requires exact entities. Replacing them with parallel subject entities is allowed when the checked skill, number/type of variables, operation, and output structure are preserved.",
             "Do not replace the task pattern with a different skill or task type.",
@@ -455,8 +470,9 @@ INTERMEDIATE VALIDATION POLICY:
 
     return """
 PRACTICE VALIDATION POLICY:
-- Practice generation is template-based. lesson.practice_tasks defines the authoritative pattern: P id, level, task type, target skill, and constraints. It is not necessarily the final learner wording.
-- SOURCE CONTRACT FROM JSON.authoritative_task_ids is the authoritative task set for learner-facing practice. Do not require tasks outside that list because of lesson.difficulty.*.count, module totals, reference examples, or generic L1/L2 proportions. A mismatch between difficulty counts and lesson.practice_tasks is a source-data warning, not permission to invent P6/P7.
+- Practice generation is template-based. SOURCE CONTRACT FROM JSON.tasks defines the authoritative pattern: P id, level, task type, target skill, and constraints. For ordinary practice it is derived from lesson.practice_tasks; for project practice it may be derived from lesson.content with source_kind=project_content. It is not necessarily the final learner wording.
+- SOURCE CONTRACT FROM JSON.authoritative_task_ids is the authoritative task set for learner-facing practice. Do not require tasks outside that list because of lesson.difficulty.*.count, module totals, reference examples, or generic L1/L2 proportions. A mismatch between difficulty counts and SOURCE CONTRACT tasks is a source-data warning, not permission to invent P6/P7.
+- If SOURCE CONTRACT tasks have source_kind=project_content, validate the practice as one coherent project assignment based on lesson.content: project goal, formula/calculation, learner steps, testing expectations, required condition/extension, and deliverable.
 - Approve a new task variant when it preserves the source pattern but uses different scenario, variable names, literals, input/output data, and code shape from theory, Markdown references, and dependency materials.
 - Reject direct copying from theory/references/dependencies when the copied content becomes the learner-facing practice task, starter code, test data, or expected output without an explicit source requirement.
 - Do not require the practice task to preserve source_text verbatim. Require pattern faithfulness, not textual identity.
@@ -876,6 +892,7 @@ TEMPLATE RULES:
 - Do not create templates for tasks that are not present in SOURCE CONTRACT. Task count is defined by SOURCE CONTRACT, not by external norms or reference examples.
 - Extract task_type, skill_target, invariants, slots_to_fill, constraints, and test_policy from source_text, JSON context, prompt/skill files, and Markdown references.
 - Treat lesson.practice_tasks as a pattern source, not necessarily as final learner wording.
+- If SOURCE CONTRACT task has source_kind=project_content, treat lesson.content project text as the authoritative project pattern and build the template from the project goal, formula, work stages, required features, checking expectations, and optional extension.
 - Do not invent final scenario values, variable names, concrete inputs, concrete outputs, or final code unless the source explicitly requires exact values; put such needs into slots_to_fill/constraints/test_policy.
 - Preserve exact values only when the source clearly requires exact values or exact wording.
 """.strip()
@@ -938,6 +955,7 @@ VARIANT RULES:
 - Do not add task instances outside PracticeTaskTemplate ids. The number of practice tasks is defined by the input task templates.
 - Preserve the template's level, task_type, skill_target, and invariants.
 - Generate a new concrete scenario and new values: variable names, literals, input data, expected output, and code shape must differ from theory, Markdown references, and dependency materials unless the source explicitly requires exact values.
+- For templates derived from source_kind=project_content, generate one complete project-practice instance that preserves the source project requirements: user input, formula/calculation, output, testing work, required conditional/extension steps, and expected deliverable. Do not split it into unrelated small P tasks and do not ignore the introductory project context.
 - Subject entities in source_text are slot examples unless explicitly marked exact. You may replace them with parallel entities when the checked skill, number/type of variables, output operation, and constraints remain the same.
 - Do not change the task into another skill or task type.
 - Treat source_text/source task as internal pattern evidence. Never copy it into scenario, student_condition, input_requirements, or output_requirements, and never label learner-facing text as "source task", "from JSON", or "as in the lesson task".

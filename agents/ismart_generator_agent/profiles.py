@@ -5,12 +5,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
-from .contracts import IsmartGenerationConfig, default_workspace_dir
+from .contracts import IsmartGenerationConfig, default_prompts_root
 
 
 CourseLevel = Literal["basic", "advanced"]
 DEFAULT_COURSE_LEVEL: CourseLevel = "basic"
-ADVANCED_PROMPTS_DIRNAME = "prompts_skills_advanced"
+BASIC_PROMPTS_DIRNAME = "basic"
+ADVANCED_PROMPTS_DIRNAME = "advanced"
 
 
 def normalize_course_level(value: Any) -> CourseLevel | None:
@@ -116,9 +117,11 @@ def langchain_config_for_task(base_config: dict[str, Any] | None, task: dict[str
 
 
 def prompts_dir_for_level(level: CourseLevel, *, base_prompts_dir: Path | None = None) -> Path:
-    base = base_prompts_dir or default_workspace_dir() / "prompts_skills"
+    base = base_prompts_dir or default_prompts_root() / BASIC_PROMPTS_DIRNAME
     if base.name == ADVANCED_PROMPTS_DIRNAME:
-        base = base.parent / "prompts_skills"
+        base = base.parent / BASIC_PROMPTS_DIRNAME
+    if base.name == "prompts_skills":
+        base = default_prompts_root() / BASIC_PROMPTS_DIRNAME
     if level == "advanced":
         return base.parent / ADVANCED_PROMPTS_DIRNAME
     return base

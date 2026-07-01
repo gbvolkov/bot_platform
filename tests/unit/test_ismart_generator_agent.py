@@ -69,8 +69,9 @@ from agents.ismart_generator_agent.subagents import (
 )
 from agents.ismart_generator_agent.task_skip import (
     NO_PRACTICE_TASKS_SKIP_REASON,
+    build_skipped_material,
     practice_task_count,
-    skip_reason_for_task,
+    practice_material_skip_reason,
 )
 from agents.ismart_generator_agent.workers import (
     HTML_TEMPLATE_PATH,
@@ -125,53 +126,152 @@ def test_langfuse_agent_name_uses_profile_and_class() -> None:
     assert langfuse_agent_name_for_task(basic_task) == "ismart_generator_basic_8_lesson_1"
 
 
-def test_practice_lesson_without_practice_tasks_is_skippable() -> None:
+def test_practice_lesson_without_practice_tasks_is_material_skippable() -> None:
     task = _profile_task()
     task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+    spec = get_material_spec("practice")
 
     assert practice_task_count(task) == 0
-    assert skip_reason_for_task(task) == NO_PRACTICE_TASKS_SKIP_REASON
+    assert practice_material_skip_reason(task, spec) == NO_PRACTICE_TASKS_SKIP_REASON
 
 
-def test_run_tasks_skips_practice_lesson_without_llm(tmp_path: Path) -> None:
+def test_project_practice_with_empty_practice_tasks_is_not_skipped() -> None:
     task = _profile_task()
+    task["lesson"]["content_flags"] = {"practice": True, "project": True}
     task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+    task["lesson"]["content"] = {
+        "general": "Start a project. Read input numbers, calculate a formula, print the result.",
+        "audience_specific": "Project theme: potion. Add a threshold message and test several values.",
+    }
+    spec = get_material_spec("practice")
 
-    def fail_subagent_factory() -> Mapping[str, Any]:
-        raise AssertionError("subagents should not be built for skipped lessons")
+    assert practice_task_count(task) == 0
+    assert practice_material_skip_reason(task, spec) is None
+
+
+def test_project_flag_adds_practice_material_plan_without_task_rows() -> None:
+    task = _profile_task()
+    task["lesson"]["content_flags"] = {"practice": False, "project": True}
+    task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+    task["lesson"]["content"] = {"general": "Project work with input, formula, output, and testing."}
+
+    assert [spec.kind for spec in build_material_plan(task)] == ["practice", "specification_qa"]
+
+
+def test_run_tasks_does_not_skip_whole_lesson_when_practice_tasks_are_empty(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    task = _profile_task()
+    task["lesson"]["content_flags"] = {"theory": True, "practice": True}
+    task["lesson"]["hours"] = {"theory": 1, "practice": 1}
+    task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_ismart_task(
+        task: dict[str, Any],
+        config: IsmartGenerationConfig,
+        *,
+        subagents: Mapping[str, Any],
+        run_dir: Path,
+        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> IsmartGenerationResult:
+        calls.append({"task": task, "subagents": subagents, "run_dir": run_dir})
+        practice_spec = get_material_spec("practice")
+        practice = build_skipped_material(
+            spec=practice_spec,
+            status="skipped",
+            reason=NO_PRACTICE_TASKS_SKIP_REASON,
+        )
+        theory = MaterialResult(
+            kind="theory",
+            material_type="Theory",
+            agent_type="TheoryMaterialAgent",
+            status="approved",
+            iterations=1,
+            content=VALID_HTML,
+            prompt_files=(),
+        )
+        return IsmartGenerationResult(
+            task_id=str(task["task_id"]),
+            lesson_number=str(task["lesson"]["lesson_number"]),
+            lesson_title=str(task["lesson"]["title"]),
+            course_level="basic",
+            status="completed_with_skips",
+            output_dir=str(run_dir),
+            materials=[theory, practice],
+            package_validation=ValidationResult(approved=True),
+            reference_summary={},
+            agents_called=["TheoryMaterialAgent"],
+            prompt_files_used=[],
+        )
+
+    monkeypatch.setattr(agent_module, "run_ismart_task", fake_run_ismart_task)
 
     results = agent_module.run_tasks(
         [task],
         config=IsmartGenerationConfig(output_root=tmp_path),
-        subagent_factory=fail_subagent_factory,
+        subagent_factory=lambda: {"fake": object()},
     )
 
     assert len(results) == 1
-    assert results[0].status == "skipped"
-    assert results[0].skip_reason == NO_PRACTICE_TASKS_SKIP_REASON
-    result_path = Path(results[0].output_dir) / "result.json"
-    manifest_path = Path(results[0].output_dir) / "manifest.json"
-    assert result_path.exists()
-    assert manifest_path.exists()
-    assert json.loads(result_path.read_text(encoding="utf-8"))["status"] == "skipped"
-    assert json.loads(manifest_path.read_text(encoding="utf-8"))["skip_reason"] == NO_PRACTICE_TASKS_SKIP_REASON
+    assert calls
+    assert results[0].status == "completed_with_skips"
+    assert [material.status for material in results[0].materials] == ["approved", "skipped"]
 
 
-def test_sequential_runner_skips_empty_practice_lesson_and_writes_manifest(
+def test_sequential_runner_logs_material_skip_and_writes_manifest(
     tmp_path: Path,
     monkeypatch: Any,
     capsys: Any,
 ) -> None:
     task = _profile_task()
+    task["lesson"]["content_flags"] = {"theory": True, "practice": True}
+    task["lesson"]["hours"] = {"theory": 1, "practice": 1}
     task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
     input_path = tmp_path / "input.json"
     input_path.write_text(json.dumps([task], ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(sequential_runner, "build_callback_handlers", lambda _log_name: [])
-    monkeypatch.setattr(
-        sequential_runner,
-        "get_llm",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("LLM should not be called")),
-    )
+    monkeypatch.setattr(sequential_runner, "get_llm", lambda *args, **kwargs: object())
+    monkeypatch.setattr(sequential_runner, "build_subagent_registry", lambda _llm: {"fake": object()})
+
+    def fake_run_ismart_task(
+        task: dict[str, Any],
+        config: IsmartGenerationConfig,
+        *,
+        subagents: Mapping[str, Any],
+        run_dir: Path,
+        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> IsmartGenerationResult:
+        practice = build_skipped_material(
+            spec=get_material_spec("practice"),
+            status="skipped",
+            reason=NO_PRACTICE_TASKS_SKIP_REASON,
+        )
+        theory = MaterialResult(
+            kind="theory",
+            material_type="Theory",
+            agent_type="TheoryMaterialAgent",
+            status="approved",
+            iterations=1,
+            content=VALID_HTML,
+            prompt_files=(),
+        )
+        return IsmartGenerationResult(
+            task_id=str(task["task_id"]),
+            lesson_number=str(task["lesson"]["lesson_number"]),
+            lesson_title=str(task["lesson"]["title"]),
+            course_level="basic",
+            status="completed_with_skips",
+            output_dir=str(run_dir),
+            materials=[theory, practice],
+            package_validation=ValidationResult(approved=True),
+            reference_summary={},
+            agents_called=["TheoryMaterialAgent"],
+            prompt_files_used=[],
+        )
+
+    monkeypatch.setattr(sequential_runner, "run_ismart_task", fake_run_ismart_task)
 
     exit_code = sequential_runner.main(
         [
@@ -186,18 +286,23 @@ def test_sequential_runner_skips_empty_practice_lesson_and_writes_manifest(
 
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert '"event": "task.skipped"' in captured.out
+    assert '"event": "task.start"' in captured.out
+    assert '"event": "task.done"' in captured.out
+    assert '"event": "task.material_skipped"' in captured.out
     manifest = json.loads((tmp_path / "out" / "skip-run" / "sequential_manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "completed_with_skips"
-    assert manifest["skipped_count"] == 1
-    assert manifest["tasks"][0]["status"] == "skipped"
-    assert manifest["tasks"][0]["skip_reason"] == NO_PRACTICE_TASKS_SKIP_REASON
+    assert manifest["completed_with_skips_count"] == 1
+    assert manifest["tasks"][0]["status"] == "completed_with_skips"
+    assert manifest["tasks"][0]["skipped_materials"] == [
+        {"kind": "practice", "status": "skipped", "reason": NO_PRACTICE_TASKS_SKIP_REASON}
+    ]
 
 
 def test_profile_config_selects_sibling_prompt_directory(tmp_path: Path) -> None:
-    basic_dir = tmp_path / "prompts_skills"
-    advanced_dir = tmp_path / "prompts_skills_advanced"
-    basic_dir.mkdir()
+    prompts_root = tmp_path / "prompts_skills"
+    basic_dir = prompts_root / "basic"
+    advanced_dir = prompts_root / "advanced"
+    basic_dir.mkdir(parents=True)
     advanced_dir.mkdir()
 
     config = IsmartGenerationConfig(prompts_dir=basic_dir, output_root=tmp_path)
@@ -212,7 +317,7 @@ def test_profile_config_selects_sibling_prompt_directory(tmp_path: Path) -> None
 
 
 def test_material_plan_uses_advanced_registry_when_task_is_advanced(tmp_path: Path) -> None:
-    config = IsmartGenerationConfig(prompts_dir=tmp_path / "prompts_skills", output_root=tmp_path, course_level="advanced")
+    config = IsmartGenerationConfig(prompts_dir=tmp_path / "prompts_skills" / "basic", output_root=tmp_path, course_level="advanced")
 
     specs = build_material_plan(_profile_task(lesson_level="advanced"), config)
     practice = next(spec for spec in specs if spec.kind == "practice")
@@ -222,9 +327,10 @@ def test_material_plan_uses_advanced_registry_when_task_is_advanced(tmp_path: Pa
 
 
 def test_prompt_isolation_reads_only_resolved_profile_files(tmp_path: Path) -> None:
-    basic_dir = tmp_path / "prompts_skills"
-    advanced_dir = tmp_path / "prompts_skills_advanced"
-    basic_dir.mkdir()
+    prompts_root = tmp_path / "prompts_skills"
+    basic_dir = prompts_root / "basic"
+    advanced_dir = prompts_root / "advanced"
+    basic_dir.mkdir(parents=True)
     advanced_dir.mkdir()
     spec = get_material_spec("practice", course_level="advanced")
     for name in spec.prompt_files:
@@ -308,13 +414,8 @@ def test_tracker_converter_detects_course_level_from_workbook_name() -> None:
 
 
 def test_tracker_converter_uses_fixed_references_dir(tmp_path: Path) -> None:
-    prompts_dir = tmp_path / "prompts_skills"
-    advanced_prompts_dir = tmp_path / "prompts_skills_advanced"
-    references_dir = tmp_path / "референсы"
-    prompts_dir.mkdir()
-    advanced_prompts_dir.mkdir()
+    references_dir = tmp_path / "refs"
     references_dir.mkdir()
-    (advanced_prompts_dir / "01_prompt.md").write_text("prompt", encoding="utf-8")
     (references_dir / "source.md").write_text("reference", encoding="utf-8")
 
     assert find_references_dir(tmp_path) == references_dir.resolve()
@@ -498,6 +599,35 @@ def test_structured_subagent_invoker_invokes_graph_with_isolated_thread_id() -> 
     assert call["_config"]["metadata"]["subagent_type"] == "TheoryMaterialAgent"
 
 
+def test_runtime_skips_empty_practice_material_but_generates_qa(tmp_path: Path) -> None:
+    task = _profile_task()
+    task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
+    task["lesson"]["content_flags"] = {"practice": True}
+    task["lesson"]["hours"] = {"practice": 1}
+    subagents = {
+        "SpecificationQAAgent": FakeGraph([GeneratedMaterial(content=VALID_HTML, agent_notes=[])]),
+        "MaterialValidatorAgent": FakeGraph([MaterialValidationDecision(approved=True, passed_blocks=[])]),
+    }
+
+    result = IsmartGeneratorRuntime(
+        config=IsmartGenerationConfig(output_root=tmp_path, max_generation_iterations=1),
+        subagents=subagents,
+    ).run_task(task, run_dir=tmp_path / "run")
+
+    assert result.status == "completed_with_skips"
+    assert [(material.kind, material.status) for material in result.materials] == [
+        ("practice", "skipped"),
+        ("specification_qa", "approved"),
+    ]
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "completed_with_skips"
+    practice = next(material for material in manifest["materials"] if material["kind"] == "practice")
+    qa = next(material for material in manifest["materials"] if material["kind"] == "specification_qa")
+    assert practice["status"] == "skipped"
+    assert practice["file"] is None
+    assert qa["file"] == "02_specification-qa.html"
+
+
 def test_generator_agent_does_not_import_old_generator_runtime() -> None:
     package_dir = Path("agents/ismart_generator_agent")
     for path in package_dir.glob("*.py"):
@@ -608,8 +738,7 @@ def test_self_work_structured_validation_does_not_receive_rendered_source_paths(
         '<style>.x{}</style><div class="cc-lesson">'
         "<h2>Задания</h2><p>Работа.</p>"
         '<h2 id="sources">Источники</h2>'
-        "<ul><li><code>docs/ismart/Материалы для ИИ-агентов/"
-        "рабочая область агента/референсы/Шаблоны.md</code></li></ul>"
+        "<ul><li><code>data/ismart/generator/refs/Шаблоны.md</code></li></ul>"
         "<h2>Итоги</h2><p>Готово.</p></div>"
     )
     autocheck = FakeGraph([_self_work_autocheck_set()])
@@ -640,9 +769,9 @@ def test_self_work_structured_validation_does_not_receive_rendered_source_paths(
     )
 
     assert result.status == "approved"
-    assert "docs/ismart" in result.content
+    assert "data/ismart/generator/refs" in result.content
     assert ".md" in result.content
-    assert "docs/ismart" not in validator.calls[0]["prompt"]
+    assert "data/ismart/generator/refs" not in validator.calls[0]["prompt"]
     assert "VALIDATION TARGET MODE:\nstructured_artifacts" in validator.calls[0]["prompt"]
     assert "RENDERED HTML IS NOT INCLUDED" in validator.calls[0]["prompt"]
 
@@ -764,7 +893,7 @@ def test_practice_validation_prompt_allows_visible_expected_stdout() -> None:
 
 
 def test_prompt_skills_do_not_recommend_faulty_code_markers() -> None:
-    prompts_dir = Path("docs/ismart/Материалы для ИИ-агентов/рабочая область агента/prompts_skills")
+    prompts_dir = Path("agents/ismart_generator_agent/prompts_skills/basic")
     practice_prompt = (prompts_dir / "03_Практика_prompt_skill.md").read_text(encoding="utf-8")
     formatting_prompt = (prompts_dir / "08_Форматирование_заданий_курса_prompt.md").read_text(encoding="utf-8")
     combined = f"{practice_prompt}\n{formatting_prompt}"
@@ -921,6 +1050,34 @@ def test_practice_source_contract_is_template_variant_based() -> None:
     assert "level, source task, condition" not in rules
     assert "PracticeTaskTemplateAgent" in " ".join(contract["pipeline"])
     assert "PracticeTaskVariantAgent" in " ".join(contract["pipeline"])
+
+
+def test_project_practice_source_contract_uses_lesson_content_when_task_rows_are_empty() -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "lesson": {
+            "title": "Formula project",
+            "content_flags": {"practice": True, "project": True},
+            "hours": {"practice": 2},
+            "content": {
+                "general": "Project setup: read ingredient numbers and calculate effect by formula.",
+                "audience_specific": "Theme: pet potion. Print the effect and add a strong-potion message.",
+            },
+            "practice_tasks": {"l1": [], "l2": [], "l3": []},
+        }
+    }
+
+    contract = source_contract_for_spec(task, spec)
+    task_contract = contract["tasks"][0]
+    rules = " ".join(contract["generation_rules"])
+
+    assert contract["authoritative_task_ids"] == ["P1"]
+    assert contract["required_task_count"] == 1
+    assert task_contract["level"] == "PROJECT"
+    assert task_contract["source_kind"] == "project_content"
+    assert "Project setup" in task_contract["source_text"]
+    assert "pet potion" in task_contract["source_text"]
+    assert "source_kind=project_content" in rules
 
 
 def test_practice_variant_prompt_requires_single_file_for_deterministic_fix_tasks() -> None:

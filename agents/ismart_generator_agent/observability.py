@@ -19,12 +19,13 @@ def build_callback_handlers(log_name: str) -> list[Any]:
     handlers: list[Any] = [JSONFileTracer(f"./logs/{log_name}")]
     if root_config.LANGFUSE_URL and len(root_config.LANGFUSE_URL) > 0:
         try:
-            Langfuse(
+            langfuse = Langfuse(
                 public_key=root_config.LANGFUSE_PUBLIC,
                 secret_key=root_config.LANGFUSE_SECRET,
                 host=root_config.LANGFUSE_URL,
             )
-            handlers.append(CallbackHandler())
+            lf_handler = CallbackHandler()
+            handlers += [lf_handler]
         except Exception as exc:  # noqa: BLE001
             LOG.warning("Langfuse initialisation failed: %s", exc)
     return handlers

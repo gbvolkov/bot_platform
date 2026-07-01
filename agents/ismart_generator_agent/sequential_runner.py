@@ -17,8 +17,8 @@ from .observability import build_callback_handlers
 from .profiles import resolve_course_level
 from .runtime import run_ismart_task
 from .subagents import build_subagent_registry
-from .task_skip import build_skipped_result, practice_task_count, skip_reason_for_task
-from .writer import safe_slug, write_json, write_task_output
+from .task_skip import SKIPPED_MATERIAL_STATUSES, practice_task_count
+from .writer import safe_slug, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-reference-chars", type=int, default=0)
     parser.add_argument("--provider", default=ModelType.GPT.value, help="Model provider value or enum name.")
     parser.add_argument("--model-mode", choices=("base", "mini", "nano"), default="base")
-    parser.add_argument("--prompts-dir", help="Prompt/skill directory. Defaults to iSMART workspace prompts_skills.")
+    parser.add_argument("--prompts-dir", help="Prompt/skill directory. Defaults to agents/ismart_generator_agent/prompts_skills/basic.")
     parser.add_argument("--run-name", help="Name of the run directory under --output.")
     parser.add_argument("--verbose", action="store_true", help="Print detailed generation trace.")
     parser.add_argument("--dry-run", action="store_true", help="Only print selected tasks; do not call the LLM.")
@@ -118,35 +118,6 @@ def main(argv: list[str] | None = None) -> int:
         run_dir = batch_dir / safe_slug(f"{index:03d}-{lesson_number}-{task_id}")
         module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
         summaries = module_summaries.setdefault(module_key, {})
-        skip_reason = skip_reason_for_task(task)
-        if skip_reason:
-            result = build_skipped_result(task=task, output_dir=run_dir, reason=skip_reason)
-            write_task_output(
-                result=result,
-                output_dir=run_dir,
-                validation_reports={"package": result.package_validation},
-            )
-            manifest["tasks"].append(manifest_entry_from_result(index, result))
-            print(
-                json.dumps(
-                    {
-                        "event": "task.skipped",
-                        "index": index,
-                        "task_id": task_id,
-                        "lesson_number": lesson_number,
-                        "lesson_title": lesson_title,
-                        "course_level": course_level,
-                        "resolved_profile": course_level,
-                        "output_dir": str(run_dir),
-                        "practice_task_count": practice_task_count(task),
-                        "reason": skip_reason,
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            write_runner_manifest(batch_dir, manifest)
-            continue
 
         print(
             json.dumps(
@@ -212,7 +183,27 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 flush=True,
             )
-            if args.stop_on_failure and result.status != "approved":
+            for material in result.materials:
+                if material.status in SKIPPED_MATERIAL_STATUSES:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "task.material_skipped",
+                                "index": index,
+                                "task_id": task_id,
+                                "lesson_number": lesson_number,
+                                "course_level": result.course_level,
+                                "resolved_profile": result.course_level,
+                                "material_kind": material.kind,
+                                "material_status": material.status,
+                                "reason": _material_skip_reason(material),
+                                "output_dir": result.output_dir,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+            if args.stop_on_failure and result.status not in {"approved", "completed_with_skips"}:
                 manifest["status"] = "stopped_on_failure"
                 write_runner_manifest(batch_dir, manifest)
                 return 1
@@ -315,6 +306,7 @@ def manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> di
                 "status": material.status,
                 "iterations": material.iterations,
                 "validation_issues": list(material.validation_issues),
+                **({"skip_reason": _material_skip_reason(material)} if material.status in SKIPPED_MATERIAL_STATUSES else {}),
             }
             for material in result.materials
         ],
@@ -323,8 +315,17 @@ def manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> di
             "issues": result.package_validation.issues,
         },
     }
-    if result.skip_reason:
-        entry["skip_reason"] = result.skip_reason
+    skipped_materials = [
+        {
+            "kind": material.kind,
+            "status": material.status,
+            "reason": _material_skip_reason(material),
+        }
+        for material in result.materials
+        if material.status in SKIPPED_MATERIAL_STATUSES
+    ]
+    if skipped_materials:
+        entry["skipped_materials"] = skipped_materials
         entry["practice_task_count"] = 0
     return entry
 
@@ -337,9 +338,9 @@ def write_runner_manifest(batch_dir: Path, manifest: dict[str, Any]) -> None:
 def overall_status(entries: list[dict[str, Any]]) -> str:
     if any(entry.get("status") == "error" for entry in entries):
         return "has_errors"
-    if any(entry.get("status") not in {"approved", "skipped"} for entry in entries):
+    if any(entry.get("status") not in {"approved", "skipped", "completed_with_skips"} for entry in entries):
         return "has_failures"
-    if any(entry.get("status") == "skipped" for entry in entries):
+    if any(entry.get("status") in {"skipped", "completed_with_skips"} for entry in entries):
         return "completed_with_skips"
     return "approved"
 
@@ -349,12 +350,25 @@ def update_runner_manifest_counts(manifest: dict[str, Any]) -> None:
     manifest["generated_count"] = sum(1 for entry in entries if entry.get("status") not in {"skipped", "error"})
     manifest["approved_count"] = sum(1 for entry in entries if entry.get("status") == "approved")
     manifest["skipped_count"] = sum(1 for entry in entries if entry.get("status") == "skipped")
+    manifest["completed_with_skips_count"] = sum(1 for entry in entries if entry.get("status") == "completed_with_skips")
+    manifest["skipped_material_count"] = sum(len(entry.get("skipped_materials") or []) for entry in entries)
     manifest["error_count"] = sum(1 for entry in entries if entry.get("status") == "error")
-    manifest["failed_count"] = sum(1 for entry in entries if entry.get("status") not in {"approved", "skipped", "error"})
+    manifest["failed_count"] = sum(
+        1 for entry in entries if entry.get("status") not in {"approved", "skipped", "completed_with_skips", "error"}
+    )
 
 
 def successful_overall_status(status: str) -> bool:
     return status in {"approved", "completed_with_skips"}
+
+
+def _material_skip_reason(material: Any) -> str:
+    artifacts = getattr(material, "generation_artifacts", None) or {}
+    reason = artifacts.get("skip_reason")
+    if reason:
+        return str(reason)
+    notes = getattr(material, "agent_notes", None) or []
+    return str(notes[0]) if notes else ""
 
 
 def print_selected_tasks(tasks: list[dict[str, Any]]) -> None:
@@ -367,7 +381,6 @@ def print_selected_tasks(tasks: list[dict[str, Any]]) -> None:
                     "lesson_title": task_identity(task)[2],
                     "course_level": resolve_course_level(task),
                     "resolved_profile": resolve_course_level(task),
-                    "skip_reason": skip_reason_for_task(task),
                     "practice_task_count": practice_task_count(task),
                 }
                 for task in tasks

@@ -7,6 +7,7 @@ from typing import Any
 
 from .contracts import IsmartGenerationResult, MaterialResult, ValidationResult
 from .context import task_identity
+from .task_skip import SKIPPED_MATERIAL_STATUSES
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -51,6 +52,8 @@ def write_task_output(
     output_dir.mkdir(parents=True, exist_ok=True)
     material_files: dict[str, str] = {}
     for index, material in enumerate(result.materials, start=1):
+        if material.status in SKIPPED_MATERIAL_STATUSES:
+            continue
         filename = material_filename(index, material)
         (output_dir / filename).write_text(material.content, encoding="utf-8")
         material_files[material.kind] = filename
@@ -78,8 +81,6 @@ def write_task_output(
         },
         "references": result.reference_summary,
     }
-    if result.skip_reason:
-        manifest["skip_reason"] = result.skip_reason
     write_json(output_dir / "manifest.json", manifest)
     write_json(output_dir / "result.json", result.to_public_json())
 
@@ -104,6 +105,13 @@ def write_batch_manifest(batch_dir: Path, results: list[IsmartGenerationResult])
             "status": _batch_status(results),
             "task_count": len(results),
             "skipped_count": sum(1 for item in results if item.status == "skipped"),
+            "completed_with_skips_count": sum(1 for item in results if item.status == "completed_with_skips"),
+            "skipped_material_count": sum(
+                1
+                for result in results
+                for material in result.materials
+                if material.status in SKIPPED_MATERIAL_STATUSES
+            ),
             "tasks": [
                 {
                     "task_id": item.task_id,
@@ -113,7 +121,6 @@ def write_batch_manifest(batch_dir: Path, results: list[IsmartGenerationResult])
                     "resolved_profile": item.course_level,
                     "status": item.status,
                     "output_dir": item.output_dir,
-                    **({"skip_reason": item.skip_reason} if item.skip_reason else {}),
                 }
                 for item in results
             ],
@@ -122,8 +129,8 @@ def write_batch_manifest(batch_dir: Path, results: list[IsmartGenerationResult])
 
 
 def _batch_status(results: list[IsmartGenerationResult]) -> str:
-    if any(item.status not in {"approved", "skipped"} for item in results):
+    if any(item.status not in {"approved", "skipped", "completed_with_skips"} for item in results):
         return "has_failures"
-    if any(item.status == "skipped" for item in results):
+    if any(item.status in {"skipped", "completed_with_skips"} for item in results):
         return "completed_with_skips"
     return "approved"

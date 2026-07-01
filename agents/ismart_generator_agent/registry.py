@@ -377,7 +377,7 @@ ADVANCED_VALIDATION_POLICY_ADDENDUMS: dict[str, str] = {
     "practice": """
 PRACTICE VALIDATION ADDENDUM:
 - L3 tasks are allowed when present in SOURCE CONTRACT FROM JSON.authoritative_task_ids. Do not reject a task merely because it requires independent choice of approach.
-- Task count, order, ids, and levels are defined by lesson.practice_tasks. Do not require extra tasks because of generic course quotas.
+- Task count, order, ids, and levels are defined by SOURCE CONTRACT FROM JSON.tasks. For ordinary practice this comes from lesson.practice_tasks; for project practice it can come from lesson.content with source_kind=project_content. Do not require extra tasks because of generic course quotas.
 - Validate L3 by source faithfulness, topic coverage, feasibility in Python 3, and a clear checking path. Do not downgrade L3 into step-by-step L1/L2 guidance.
 - Require AI-use disclosure only when the source task or prompt/skill references explicitly make AI an allowed or required tool for that task.
 - When AI-use disclosure is required, it should ask the learner to state the tool/query, manual changes, correctness rationale, and limitations; it must not accept copied AI code without explanation as a complete answer.

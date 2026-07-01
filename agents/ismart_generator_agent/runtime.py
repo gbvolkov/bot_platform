@@ -14,6 +14,12 @@ from .contracts import (
 from .planner import build_material_plan
 from .profiles import config_for_task_profile, resolve_course_level
 from .sources import ReferenceLoader, reference_summary
+from .task_skip import (
+    SKIPPED_MATERIAL_STATUSES,
+    build_skipped_material,
+    dependency_skip_reason,
+    practice_material_skip_reason,
+)
 from .trace import TraceLogger
 from .validators import RuleValidator
 from .workers import MaterialWorker, PackageValidator
@@ -106,6 +112,37 @@ class IsmartGeneratorRuntime:
 
         for spec in specs:
             dependencies = self._dependency_results(spec.dependency_kinds, specs, materials)
+            skip_reason = practice_material_skip_reason(task, spec)
+            skip_status = "skipped"
+            if skip_reason is None:
+                skip_reason = dependency_skip_reason(spec, dependencies)
+                skip_status = "skipped_dependency"
+            if skip_reason is not None:
+                material = build_skipped_material(
+                    spec=spec,
+                    status=skip_status,
+                    reason=skip_reason,
+                    dependency_results=dependencies,
+                )
+                materials.append(material)
+                validation_reports[spec.kind] = ValidationResult(
+                    approved=True,
+                    passed_blocks=[
+                        {
+                            "block_id": spec.kind,
+                            "block_heading": spec.material_type,
+                            "reason": skip_reason,
+                        }
+                    ],
+                )
+                self.trace.log(
+                    "material.skipped",
+                    kind=spec.kind,
+                    status=material.status,
+                    reason=skip_reason,
+                    dependencies=[{"kind": item.kind, "status": item.status} for item in dependencies],
+                )
+                continue
             self.trace.log(
                 "material.start",
                 kind=spec.kind,
@@ -159,6 +196,34 @@ class IsmartGeneratorRuntime:
                     validation_reports=validation_reports,
                     package_validator_called=False,
                 )
+
+        if any(item.status in SKIPPED_MATERIAL_STATUSES for item in materials):
+            package_validation = ValidationResult(
+                approved=True,
+                passed_blocks=[
+                    {
+                        "block_id": "package",
+                        "block_heading": "Package",
+                        "reason": "package validation skipped because one or more materials were intentionally skipped",
+                    }
+                ],
+            )
+            self.trace.log(
+                "package.skipped_due_to_material_skips",
+                skipped=[{"kind": item.kind, "status": item.status} for item in materials if item.status in SKIPPED_MATERIAL_STATUSES],
+            )
+            return self._finish_task(
+                task_id=task_id,
+                lesson_number=lesson_number,
+                lesson_title=lesson_title,
+                course_level=course_level,
+                output_dir=output_dir,
+                materials=materials,
+                references=references,
+                package_validation=package_validation,
+                validation_reports=validation_reports,
+                package_validator_called=False,
+            )
 
         self.trace.log("package.start", material_count=len(materials))
         package_validation = package_validator.validate(
@@ -319,6 +384,8 @@ class IsmartGeneratorRuntime:
             return "failed"
         if any(item.status == "blocked_dependency" for item in materials):
             return "failed"
+        if any(item.status in SKIPPED_MATERIAL_STATUSES for item in materials):
+            return "completed_with_skips"
         return "approved"
 
     def _agents_called(self, materials: list[MaterialResult], *, package_validator_called: bool) -> list[str]:

@@ -23,8 +23,7 @@ from .profiles import resolve_course_level
 from .runtime import run_ismart_task
 from .state import IsmartGeneratorAgentContext, IsmartGeneratorAgentState
 from .subagents import build_subagent_registry
-from .task_skip import build_skipped_result, practice_task_count, skip_reason_for_task
-from .writer import safe_slug, write_batch_manifest, write_task_output
+from .writer import safe_slug, write_batch_manifest
 
 
 LOG = logging.getLogger(__name__)
@@ -254,22 +253,6 @@ def run_tasks(
     output_root = config.output_root
     if len(tasks) == 1:
         run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_identity(tasks[0])[0])}"
-        skip_reason = skip_reason_for_task(tasks[0])
-        if skip_reason:
-            result = build_skipped_result(task=tasks[0], output_dir=run_dir, reason=skip_reason)
-            write_task_output(
-                result=result,
-                output_dir=run_dir,
-                validation_reports={"package": result.package_validation},
-            )
-            if config.verbose:
-                task_id, lesson_number, lesson_title = task_identity(tasks[0])
-                course_level = resolve_course_level(tasks[0])
-                print(
-                    f"[ismart-generator-agent] single_task.skipped {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'lesson_title': lesson_title, 'course_level': course_level, 'resolved_profile': course_level, 'run_dir': str(run_dir), 'practice_task_count': practice_task_count(tasks[0]), 'reason': skip_reason}, ensure_ascii=False)}",
-                    flush=True,
-                )
-            return [result]
         task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
         if config.verbose:
             course_level = resolve_course_level(tasks[0])
@@ -303,21 +286,6 @@ def run_tasks(
         module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
         summaries = module_summaries.setdefault(module_key, {})
         run_dir = batch_dir / safe_slug(f"{lesson_number}-{task_id}")
-        skip_reason = skip_reason_for_task(task)
-        if skip_reason:
-            result = build_skipped_result(task=task, output_dir=run_dir, reason=skip_reason)
-            write_task_output(
-                result=result,
-                output_dir=run_dir,
-                validation_reports={"package": result.package_validation},
-            )
-            results.append(result)
-            if config.verbose:
-                print(
-                    f"[ismart-generator-agent] batch.task.skipped {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'course_level': course_level, 'resolved_profile': course_level, 'output_dir': str(run_dir), 'practice_task_count': practice_task_count(task), 'reason': skip_reason}, ensure_ascii=False)}",
-                    flush=True,
-                )
-            continue
         task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
         if config.verbose:
             print(
@@ -367,18 +335,17 @@ def format_agent_response(results: list[IsmartGenerationResult]) -> str:
     for result in results:
         material_statuses = ", ".join(f"{item.kind}={item.status}" for item in result.materials)
         package_issues = len(result.package_validation.issues)
-        skip_suffix = f"; skip reason: {result.skip_reason}" if result.skip_reason else ""
         lines.append(
             f"- lesson {result.lesson_number} ({result.task_id}, {result.course_level}): {result.status}; "
-            f"materials: {material_statuses or 'none'}; package issues: {package_issues}; output: {result.output_dir}{skip_suffix}"
+            f"materials: {material_statuses or 'none'}; package issues: {package_issues}; output: {result.output_dir}"
         )
     return "\n".join(lines)
 
 
 def _overall_response_status(results: list[IsmartGenerationResult]) -> str:
-    if any(result.status not in {"approved", "skipped"} for result in results):
+    if any(result.status not in {"approved", "skipped", "completed_with_skips"} for result in results):
         return "has_failures"
-    if any(result.status == "skipped" for result in results):
+    if any(result.status in {"skipped", "completed_with_skips"} for result in results):
         return "completed_with_skips"
     return "approved"
 

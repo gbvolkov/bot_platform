@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .contracts import IsmartGenerationConfig, ReferenceBundle, ReferenceDocument, repo_root
+from .contracts import IsmartGenerationConfig, ReferenceBundle, ReferenceDocument, default_refs_dir, repo_root
 from .registry import REFERENCE_FIELDS
 from .trace import TraceLogger
 
@@ -99,7 +99,7 @@ class ReferenceLoader:
                     base = repo_root() / base
                 resolved = base / candidate
             else:
-                resolved = self.config.prompts_dir.parent / candidate
+                resolved = default_refs_dir() / candidate
         resolved = resolved.resolve()
         if not resolved.exists():
             raise FileNotFoundError(f"Markdown reference not found: {raw_path} -> {resolved}")

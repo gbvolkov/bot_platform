@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from .contracts import MaterialResult, MaterialSpec, ValidationResult
+from .task_skip import SKIPPED_MATERIAL_STATUSES
 
 
 class RuleValidator:
@@ -31,7 +32,7 @@ class RuleValidator:
             if material is None:
                 issues.append(f"отсутствует материал: {spec.kind}")
                 continue
-            if material.status != "approved":
+            if material.status != "approved" and material.status not in SKIPPED_MATERIAL_STATUSES:
                 issues.append(f"материал {spec.kind} имеет статус {material.status}")
 
         for spec in specs:

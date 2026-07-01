@@ -52,6 +52,7 @@ from .schemas import (
     ValidationControllerDecision,
 )
 from .sources import read_prompt_files
+from .task_skip import SKIPPED_MATERIAL_STATUSES
 from .trace import TraceLogger
 from .validators import RuleValidator
 
@@ -886,7 +887,11 @@ class MaterialWorker:
             dependency_kinds=list(spec.dependency_kinds),
             dependencies=[{"kind": item.kind, "status": item.status} for item in dependency_results],
         )
-        blocked = [item for item in dependency_results if item.status != "approved"]
+        blocked = [
+            item
+            for item in dependency_results
+            if item.status != "approved" and item.status not in SKIPPED_MATERIAL_STATUSES
+        ]
         if blocked:
             issues = [f"dependency {item.kind} has status {item.status}" for item in blocked]
             self.trace.log("worker.blocked_dependency", kind=spec.kind, issues=issues)
