@@ -16,7 +16,7 @@ from langgraph.runtime import Runtime
 
 from agents.utils import ModelType, extract_text, get_llm
 
-from .context import material_result_summary, task_identity
+from .context import task_identity
 from .contracts import IsmartGenerationConfig, IsmartGenerationResult
 from .observability import build_callback_handlers, langchain_config_from_runnable
 from .profiles import resolve_course_level
@@ -274,7 +274,6 @@ def run_tasks(
             flush=True,
         )
     results: list[IsmartGenerationResult] = []
-    module_summaries: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for task in tasks:
         task_id, lesson_number, _ = task_identity(task)
         course_level = resolve_course_level(task)
@@ -283,8 +282,6 @@ def run_tasks(
                 f"[ismart-generator-agent] batch.task.start {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
                 flush=True,
             )
-        module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
-        summaries = module_summaries.setdefault(module_key, {})
         run_dir = batch_dir / safe_slug(f"{lesson_number}-{task_id}")
         task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
         if config.verbose:
@@ -297,7 +294,6 @@ def run_tasks(
             config,
             subagents=task_subagents,
             run_dir=run_dir,
-            module_material_summaries=summaries,
         )
         results.append(result)
         if config.verbose:
@@ -305,7 +301,6 @@ def run_tasks(
                 f"[ismart-generator-agent] batch.task.done {json.dumps({'task_id': task_id, 'course_level': result.course_level, 'resolved_profile': result.course_level, 'status': result.status, 'output_dir': result.output_dir}, ensure_ascii=False)}",
                 flush=True,
             )
-        summaries[lesson_number] = [material_result_summary(material) for material in result.materials]
     write_batch_manifest(batch_dir, results)
     if config.verbose:
         print(

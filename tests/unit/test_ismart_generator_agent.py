@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.ismart_generator_agent import agent as agent_module
 from agents.ismart_generator_agent import cli
+from agents.ismart_generator_agent import practice_guidance
 from agents.ismart_generator_agent import sequential_runner
 from agents.ismart_generator_agent.context import (
     build_intermediate_assessment_artifact_prompt,
@@ -53,6 +54,7 @@ from agents.ismart_generator_agent.schemas import (
     MaterialValidationDecision,
     ValidationControllerDecision,
     PackageValidationDecision,
+    PracticeGuidanceArtifact,
     PracticeTaskInstance,
     PracticeTaskInstanceSet,
     PracticeTaskTemplate,
@@ -174,7 +176,6 @@ def test_run_tasks_does_not_skip_whole_lesson_when_practice_tasks_are_empty(
         *,
         subagents: Mapping[str, Any],
         run_dir: Path,
-        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
     ) -> IsmartGenerationResult:
         calls.append({"task": task, "subagents": subagents, "run_dir": run_dir})
         practice_spec = get_material_spec("practice")
@@ -241,7 +242,6 @@ def test_sequential_runner_logs_material_skip_and_writes_manifest(
         *,
         subagents: Mapping[str, Any],
         run_dir: Path,
-        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
     ) -> IsmartGenerationResult:
         practice = build_skipped_material(
             spec=get_material_spec("practice"),
@@ -296,6 +296,87 @@ def test_sequential_runner_logs_material_skip_and_writes_manifest(
     assert manifest["tasks"][0]["skipped_materials"] == [
         {"kind": "practice", "status": "skipped", "reason": NO_PRACTICE_TASKS_SKIP_REASON}
     ]
+
+
+def test_sequential_runner_can_preserve_source_index_after_filtering(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    task_one = _profile_task()
+    task_one["task_id"] = "lesson-1"
+    task_one["lesson"]["lesson_number"] = 1
+    task_one["lesson"]["title"] = "L1"
+    task_two = json.loads(json.dumps(task_one))
+    task_two["task_id"] = "lesson-2"
+    task_two["lesson"]["lesson_number"] = 2
+    task_two["lesson"]["title"] = "L2"
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps([task_one, task_two], ensure_ascii=False), encoding="utf-8")
+    existing_run_dir = tmp_path / "out" / "rerun"
+    existing_run_dir.mkdir(parents=True)
+    (existing_run_dir / "sequential_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "has_errors",
+                "task_count": 2,
+                "tasks": [
+                    {"index": 1, "task_id": "lesson-1", "lesson_number": "1", "status": "approved"},
+                    {"index": 2, "task_id": "lesson-2", "lesson_number": "2", "status": "error"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sequential_runner, "build_callback_handlers", lambda _log_name: [])
+    monkeypatch.setattr(sequential_runner, "get_llm", lambda *args, **kwargs: object())
+    monkeypatch.setattr(sequential_runner, "build_subagent_registry", lambda _llm: {"fake": object()})
+
+    def fake_run_ismart_task(
+        task: dict[str, Any],
+        config: IsmartGenerationConfig,
+        *,
+        subagents: Mapping[str, Any],
+        run_dir: Path,
+    ) -> IsmartGenerationResult:
+        return IsmartGenerationResult(
+            task_id=str(task["task_id"]),
+            lesson_number=str(task["lesson"]["lesson_number"]),
+            lesson_title=str(task["lesson"]["title"]),
+            course_level="basic",
+            status="approved",
+            output_dir=str(run_dir),
+            materials=[],
+            package_validation=ValidationResult(approved=True),
+            reference_summary={},
+            agents_called=[],
+            prompt_files_used=[],
+        )
+
+    monkeypatch.setattr(sequential_runner, "run_ismart_task", fake_run_ismart_task)
+
+    exit_code = sequential_runner.main(
+        [
+            "--input",
+            str(input_path),
+            "--lesson-number",
+            "2",
+            "--output",
+            str(tmp_path / "out"),
+            "--run-name",
+            "rerun",
+            "--preserve-source-index",
+        ]
+    )
+
+    assert exit_code == 0
+    manifest = json.loads((tmp_path / "out" / "rerun" / "sequential_manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["tasks"]) == 2
+    assert manifest["tasks"][0]["task_id"] == "lesson-1"
+    assert manifest["tasks"][0]["status"] == "approved"
+    assert manifest["tasks"][1]["index"] == 2
+    assert manifest["tasks"][1]["status"] == "approved"
+    assert manifest["tasks"][1]["output_dir"].endswith("002-2-lesson-2")
 
 
 def test_profile_config_selects_sibling_prompt_directory(tmp_path: Path) -> None:
@@ -365,7 +446,6 @@ def test_run_tasks_uses_fresh_subagents_per_task(monkeypatch: Any, tmp_path: Pat
         *,
         subagents: Mapping[str, Any],
         run_dir: Path,
-        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
     ) -> IsmartGenerationResult:
         received_subagents.append(subagents)  # type: ignore[arg-type]
         return IsmartGenerationResult(
@@ -532,6 +612,7 @@ def test_subagent_registry_builds_explicit_compiled_agents(monkeypatch: Any) -> 
     assert GeneratedMaterial in schemas
     assert PracticeTaskTemplateSet in schemas
     assert PracticeTaskInstanceSet in schemas
+    assert PracticeGuidanceArtifact in schemas
     assert SelfWorkAutocheckSet in schemas
     assert CurrentControlAutocheckSet in schemas
     assert IntermediateAssessmentArtifact in schemas
@@ -597,6 +678,222 @@ def test_structured_subagent_invoker_invokes_graph_with_isolated_thread_id() -> 
     assert "subagent:TheoryMaterialAgent" in call["_config"]["tags"]
     assert call["_config"]["metadata"]["course_class"] == "8"
     assert call["_config"]["metadata"]["subagent_type"] == "TheoryMaterialAgent"
+
+
+def test_practice_guidance_input_uses_structured_practice_without_raw_html_or_hidden_fields(tmp_path: Path) -> None:
+    ref_path = tmp_path / "requirements.md"
+    ref_path.write_text("Требования к практике", encoding="utf-8")
+    result = {
+        "task_id": "lesson-1",
+        "lesson_number": "1",
+        "lesson_title": "Переменные",
+        "course_level": "basic",
+        "status": "approved",
+        "references": {
+            "requirements": [
+                {
+                    "path": "requirements.md",
+                    "resolved_path": str(ref_path),
+                    "sha": "secret-sha",
+                    "truncated": False,
+                }
+            ]
+        },
+        "materials": [
+            {
+                "kind": "practice",
+                "type": "Материалы занятия — практика",
+                "status": "approved",
+                "prompt_files": ["03_Практика_prompt_skill.md"],
+                "content": "<style>.practice{}</style><div class=\"cc-lesson\">RAW PRACTICE HTML</div>",
+                "generation_artifacts": {
+                    "practice_templates": {
+                        "tasks": [
+                            {
+                                "id": "P1",
+                                "source_text": "Напишите программу.",
+                                "skill_target": "variables",
+                                "invariants": ["uses print"],
+                                "constraints": ["Python"],
+                                "test_policy": "manual",
+                            }
+                        ]
+                    },
+                    "practice_instances": {
+                        "lesson_goal": "Научиться выводить текст.",
+                        "lesson_objectives": ["Запустить программу."],
+                        "tasks": [
+                            {
+                                "id": "P1",
+                                "template_id": "P1",
+                                "level": "L1",
+                                "task_type": "write",
+                                "scenario": "Greeting",
+                                "student_condition": "Выведите приветствие.",
+                                "starter_code": "print('Hello')",
+                                "faulty_code": "print('secret broken code'",
+                                "input_requirements": "нет",
+                                "output_requirements": "Hello",
+                                "runtime_tests": [{"input": "", "expected_output": "Hello\n"}],
+                                "hidden_solution": "print('Hello')",
+                                "teacher_explanation": "Ключ",
+                            }
+                        ],
+                    },
+                },
+            },
+            {
+                "kind": "theory",
+                "type": "Материалы занятия — теория",
+                "status": "approved",
+                "content": "<style>.theory{}</style><div><h2>Переменные</h2><p>Текст теории.</p></div>",
+            },
+        ],
+    }
+
+    payload = practice_guidance.build_practice_guidance_input(
+        lesson_output_dir=tmp_path,
+        result=result,
+        attempt=1,
+        previous_artifact=None,
+        previous_validation=None,
+    )
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["practice_tasks"][0]["id"] == "P1"
+    assert payload["practice_tasks"][0]["source_template"]["skill_target"] == "variables"
+    assert payload["theory_brief_source"]["sections"][0]["heading"] == "Переменные"
+    assert payload["references"]["requirements"][0]["content"] == "Требования к практике"
+    assert "RAW PRACTICE HTML" not in serialized
+    assert "<style>" not in serialized
+    assert "hidden_solution" not in serialized
+    assert "teacher_explanation" not in serialized
+    assert "secret-sha" not in serialized
+    assert "secret broken code" not in serialized
+    assert payload["source_warnings"][0]["code"] == "raw_faulty_code_omitted"
+
+
+def test_practice_guidance_postprocess_updates_existing_result_and_manifest(tmp_path: Path) -> None:
+    result = {
+        "task_id": "lesson-1",
+        "lesson_number": "1",
+        "lesson_title": "Переменные",
+        "course_level": "basic",
+        "status": "approved",
+        "agents_called": [],
+        "prompt_files_used": [],
+        "references": {},
+        "materials": [
+            {
+                "kind": "practice",
+                "type": "Материалы занятия — практика",
+                "status": "approved",
+                "prompt_files": [],
+                "content": "<style>.practice{}</style><div class=\"cc-lesson\">RAW PRACTICE HTML</div>",
+                "generation_artifacts": {
+                    "practice_templates": {"tasks": []},
+                    "practice_instances": {
+                        "lesson_goal": "Цель",
+                        "lesson_objectives": ["Задача"],
+                        "tasks": [
+                            {
+                                "id": "P1",
+                                "template_id": "P1",
+                                "level": "L1",
+                                "task_type": "write",
+                                "scenario": "Greeting",
+                                "student_condition": "Выведите приветствие.",
+                                "starter_code": "print('Hello')",
+                                "input_requirements": "нет",
+                                "output_requirements": "Hello",
+                                "runtime_tests": [{"input": "", "expected_output": "Hello\n"}],
+                                "hidden_solution": "print('Hello')",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+    manifest = {
+        "task_id": "lesson-1",
+        "lesson_number": "1",
+        "lesson_title": "Переменные",
+        "course_level": "basic",
+        "status": "approved",
+        "agents_called": [],
+        "prompt_files_used": [],
+        "materials": [
+            {
+                "kind": "practice",
+                "type": "Материалы занятия — практика",
+                "status": "approved",
+                "file": "01_practice.html",
+            }
+        ],
+    }
+    (tmp_path / "result.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "01_practice.html").write_text(result["materials"][0]["content"], encoding="utf-8")
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    for name in get_material_spec("practice_guidance").prompt_files:
+        (prompt_dir / name).write_text(f"prompt {name}", encoding="utf-8")
+    artifact = PracticeGuidanceArtifact(
+        header={"work_title": "Указания к практической работе № 1", "topic": "Переменные", "lesson_number": "1"},
+        goals={"goal": "Выполнить практическую работу.", "objectives": ["Запустить код."]},
+        methodical_guidance={
+            "problem_statement": "Выполните задания.",
+            "environment": "Python IDE",
+            "stages": [
+                {
+                    "id": "stage-1",
+                    "level": "L1",
+                    "title": "Вывод текста",
+                    "source_task_ids": ["P1"],
+                    "algorithm_steps": ["Откройте редактор.", "Запустите код."],
+                    "worked_example": {"task_statement": "Выведите пример.", "code_cell": "print('Example')"},
+                    "module_tasks": [
+                        {
+                            "task_id": "P1",
+                            "level": "L1",
+                            "student_condition": "Выведите приветствие.",
+                            "code_cell": "print('Hello')",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    guidance_graph = FakeGraph([artifact])
+    validator_graph = FakeGraph([MaterialValidationDecision(approved=True)])
+
+    result_payload = practice_guidance.run_practice_guidance_postprocess(
+        lesson_output_dir=tmp_path,
+        config=IsmartGenerationConfig(
+            prompts_dir=prompt_dir,
+            output_root=tmp_path,
+            max_generation_iterations=1,
+        ),
+        subagents={
+            "PracticeGuidanceArtifactAgent": guidance_graph,
+            "MaterialValidatorAgent": validator_graph,
+        },
+    )
+
+    assert result_payload["status"] == "approved"
+    assert result_payload["file"] == "02_practice-guidance.html"
+    updated_result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    updated_manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    guidance_material = next(item for item in updated_result["materials"] if item["kind"] == "practice_guidance")
+    assert guidance_material["status"] == "approved"
+    assert "practice_guidance_input" in guidance_material["generation_artifacts"]
+    assert updated_manifest["materials"][-1]["file"] == "02_practice-guidance.html"
+    assert (tmp_path / "02_practice-guidance.html").exists()
+    assert (tmp_path / "validation_reports" / "practice-guidance.json").exists()
+    assert "RAW PRACTICE HTML" not in guidance_graph.calls[0]["prompt"]
+    assert "hidden_solution" not in guidance_graph.calls[0]["prompt"]
+    assert "VALIDATION TARGET MODE:\nstructured_artifacts" in validator_graph.calls[0]["prompt"]
 
 
 def test_runtime_skips_empty_practice_material_but_generates_qa(tmp_path: Path) -> None:

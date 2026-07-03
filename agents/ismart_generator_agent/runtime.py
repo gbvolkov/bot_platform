@@ -32,13 +32,11 @@ def run_ismart_task(
     *,
     subagents: Mapping[str, Any],
     run_dir: str | Path | None = None,
-    module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
 ) -> IsmartGenerationResult:
     runtime = IsmartGeneratorRuntime(config=config, subagents=subagents)
     return runtime.run_task(
         task,
         run_dir=Path(run_dir) if run_dir is not None else None,
-        module_material_summaries=module_material_summaries,
     )
 
 
@@ -71,7 +69,6 @@ class IsmartGeneratorRuntime:
         task: dict[str, Any],
         *,
         run_dir: Path | None = None,
-        module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
     ) -> IsmartGenerationResult:
         task_id, lesson_number, lesson_title = task_identity(task)
         course_level = resolve_course_level(task)
@@ -154,7 +151,6 @@ class IsmartGeneratorRuntime:
                 spec=spec,
                 references=references,
                 dependency_results=dependencies,
-                module_material_summaries=module_material_summaries,
                 attempts_dir=attempts_dir,
             )
             materials.append(material)
@@ -305,7 +301,6 @@ class IsmartGeneratorRuntime:
         materials: list[MaterialResult],
         package_validation: ValidationResult,
         validation_reports: dict[str, ValidationResult],
-        module_material_summaries: dict[str, list[dict[str, Any]]] | None,
         attempts_dir: Path,
     ) -> ValidationResult:
         current_validation = package_validation
@@ -327,7 +322,6 @@ class IsmartGeneratorRuntime:
                     spec=spec,
                     references=references,
                     dependency_results=dependencies,
-                    module_material_summaries=module_material_summaries,
                     initial_previous_issues=current_validation.issues,
                     attempts_dir=attempts_dir,
                 )

@@ -11,7 +11,7 @@ from typing import Any
 from agents.utils import ModelType, get_llm
 
 from .agent import load_payload_from_path_or_text, load_payload_from_url, tasks_from_payload
-from .context import material_result_summary, task_identity
+from .context import task_identity
 from .contracts import IsmartGenerationConfig, IsmartGenerationResult
 from .observability import build_callback_handlers
 from .profiles import resolve_course_level
@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-mode", choices=("base", "mini", "nano"), default="base")
     parser.add_argument("--prompts-dir", help="Prompt/skill directory. Defaults to agents/ismart_generator_agent/prompts_skills/basic.")
     parser.add_argument("--run-name", help="Name of the run directory under --output.")
+    parser.add_argument(
+        "--preserve-source-index",
+        action="store_true",
+        help="Use the task index from the full input JSON for output folder names after filtering.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print detailed generation trace.")
     parser.add_argument("--dry-run", action="store_true", help="Only print selected tasks; do not call the LLM.")
     parser.add_argument("--stop-on-error", action="store_true", help="Stop after the first exception.")
@@ -58,7 +63,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     payload = load_payload_from_url(args.input_url) if args.input_url else load_payload_from_path_or_text(args.input)
-    tasks = select_tasks(tasks_from_payload(payload), args)
+    all_tasks = tasks_from_payload(payload)
+    source_indexes = {id(task): index for index, task in enumerate(all_tasks, start=1)}
+    tasks = select_tasks(all_tasks, args)
     if args.limit is not None:
         tasks = tasks[: args.limit]
 
@@ -72,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     output_root = Path(args.output)
     batch_dir = output_root / (args.run_name or f"sequential_{timestamp()}")
     batch_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = batch_dir / "sequential_manifest.json"
 
     config = IsmartGenerationConfig(
         prompts_dir=Path(args.prompts_dir) if args.prompts_dir else IsmartGenerationConfig().prompts_dir,
@@ -98,26 +106,31 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    manifest: dict[str, Any] = {
+    manifest: dict[str, Any] = _load_existing_manifest(manifest_path) if args.preserve_source_index else {}
+    if not isinstance(manifest.get("tasks"), list):
+        manifest["tasks"] = []
+    manifest.update({
         "status": "running",
-        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "started_at": manifest.get("started_at") or datetime.now().isoformat(timespec="seconds"),
+        "last_rerun_started_at": datetime.now().isoformat(timespec="seconds") if args.preserve_source_index else None,
         "output_dir": str(batch_dir),
         "input": args.input,
         "input_url": args.input_url,
         "provider": provider.value,
         "model_mode": args.model_mode,
-        "task_count": len(tasks),
-        "tasks": [],
-    }
+        "task_count": manifest.get("task_count") or len(tasks),
+        "selected_task_count": len(tasks),
+    })
+    if not args.preserve_source_index:
+        manifest["last_rerun_started_at"] = None
+        manifest["tasks"] = []
     write_runner_manifest(batch_dir, manifest)
 
-    module_summaries: dict[str, dict[str, list[dict[str, Any]]]] = {}
-    for index, task in enumerate(tasks, start=1):
+    for selected_index, task in enumerate(tasks, start=1):
+        index = source_indexes.get(id(task), selected_index) if args.preserve_source_index else selected_index
         task_id, lesson_number, lesson_title = task_identity(task)
         course_level = resolve_course_level(task)
         run_dir = batch_dir / safe_slug(f"{index:03d}-{lesson_number}-{task_id}")
-        module_key = str((task.get("module") or {}).get("title") or (task.get("lesson") or {}).get("module") or "")
-        summaries = module_summaries.setdefault(module_key, {})
 
         print(
             json.dumps(
@@ -162,11 +175,9 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 subagents=subagents,
                 run_dir=run_dir,
-                module_material_summaries=summaries,
             )
-            summaries[lesson_number] = [material_result_summary(material) for material in result.materials]
             entry = manifest_entry_from_result(index, result)
-            manifest["tasks"].append(entry)
+            upsert_manifest_entry(manifest, entry, replace=args.preserve_source_index)
             print(
                 json.dumps(
                     {
@@ -224,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
                 "output_dir": str(run_dir),
                 "error": str(exc),
             }
-            manifest["tasks"].append(error_entry)
+            upsert_manifest_entry(manifest, error_entry, replace=args.preserve_source_index)
             write_json(run_dir / "error.json", error_entry)
             print(
                 json.dumps(
@@ -333,6 +344,31 @@ def manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> di
 def write_runner_manifest(batch_dir: Path, manifest: dict[str, Any]) -> None:
     update_runner_manifest_counts(manifest)
     write_json(batch_dir / "sequential_manifest.json", manifest)
+
+
+def _load_existing_manifest(manifest_path: Path) -> dict[str, Any]:
+    if not manifest_path.exists():
+        return {}
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def upsert_manifest_entry(manifest: dict[str, Any], entry: dict[str, Any], *, replace: bool) -> None:
+    tasks = manifest.setdefault("tasks", [])
+    if not replace:
+        tasks.append(entry)
+        return
+    for index, existing in enumerate(tasks):
+        if (
+            str(existing.get("task_id") or "") == str(entry.get("task_id") or "")
+            and str(existing.get("lesson_number") or "") == str(entry.get("lesson_number") or "")
+        ):
+            tasks[index] = entry
+            return
+    tasks.append(entry)
 
 
 def overall_status(entries: list[dict[str, Any]]) -> str:

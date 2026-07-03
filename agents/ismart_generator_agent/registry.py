@@ -17,6 +17,7 @@ SELF_WORK_PROMPT = "04_Самостоятельная_prompt_skill.md"
 INTERMEDIATE_PROMPT = "05_Промежуточная_prompt_skill.md"
 FINAL_PROJECT_PROMPT = "06_Итоговая_prompt_skill.md"
 TEACHER_GUIDANCE_PROMPT = "07_Методические_указания_prompt_skill.md"
+PRACTICE_GUIDANCE_PROMPT = "09_Указания_к_практической_работе_prompt_skill.md"
 
 REFERENCE_FIELDS = (
     "requirements",
@@ -109,6 +110,34 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "В HTML не печатай символы "
             "backslash+n как текст; если expected_output заканчивается \\n, покажи содержимое stdout в <pre><code> с реальным "
             "переводом строки перед </code></pre>, а рядом можно текстом указать «stdout завершается переводом строки»."
+        ),
+    ),
+    "practice_guidance": MaterialSpec(
+        kind="practice_guidance",
+        material_type="Указания к практической работе",
+        agent_type="PracticeGuidanceAgent",
+        prompt_files=_files(PRACTICE_GUIDANCE_PROMPT),
+        validator_kind="practice_guidance",
+        dependency_kinds=("practice",),
+        reference_fields=("requirements", "reference_examples", "goals_and_tasks", "donor_materials", "template_descriptions"),
+        json_field_labels=("approved practice_instances", "approved theory public_sections", "references"),
+        prompt_addendum=(
+            "Создай отдельный материал указаний к практической работе по PracticeGuidanceInput. "
+            "Не используй raw HTML и не реконструируй практические задания. Основной источник заданий - "
+            "approved practice_instances/practice_tasks из входной структуры. Раздел краткой теории строится "
+            "по approved theory public_sections, если они есть, иначе по references с отметкой requires_check. "
+            "Не показывай внутренние поля решений/пояснений, corrected code, внутренние имена полей, JSON/process wording, SHA, "
+            "локальные пути или служебные данные. Возвращай только PracticeGuidanceArtifact."
+        ),
+        validation_policy_addendum=(
+            "Validate practice_guidance against structured PracticeGuidanceArtifact and PracticeGuidanceInput only. "
+            "Do not validate raw HTML. Reject learner-facing leakage of keys, internal answer/explanation fields, "
+            "corrected code, internal field names, JSON/process wording, SHA, or local paths. "
+            "Approve only if module_tasks correspond to PracticeGuidanceInput.practice_tasks and worked examples do not replace module tasks."
+        ),
+        controller_policy_addendum=(
+            "Overrule validator objections about rendered HTML structure for practice_guidance; HTML is deterministic renderer output. "
+            "Keep blocking issues only for semantic artifact defects, missing approved practice tasks, or learner-facing key leakage."
         ),
     ),
     "mr_theory": MaterialSpec(

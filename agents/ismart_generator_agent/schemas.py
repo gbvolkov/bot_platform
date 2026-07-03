@@ -147,6 +147,95 @@ class PracticeTaskInstanceSet(BaseModel):
     agent_notes: list[str] = Field(default_factory=list)
 
 
+class PracticeGuidanceHeader(BaseModel):
+    """Student-facing header for practice guidance."""
+
+    work_title: str = Field(..., min_length=1)
+    topic: str = Field(..., min_length=1)
+    lesson_number: str = ""
+    audience: str = ""
+
+
+class PracticeGuidanceGoals(BaseModel):
+    goal: str = Field(..., min_length=1)
+    objectives: list[str] = Field(default_factory=list)
+
+
+class PracticeGuidanceTheorySection(BaseModel):
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    used_in_stage_ids: list[str] = Field(default_factory=list)
+
+
+class PracticeGuidanceTheoryBrief(BaseModel):
+    intro: str = ""
+    sections: list[PracticeGuidanceTheorySection] = Field(default_factory=list)
+
+
+class PracticeGuidanceBeforeStart(BaseModel):
+    steps: list[str] = Field(default_factory=list)
+    checkpoint: str = ""
+
+
+class PracticeGuidanceWorkedExample(BaseModel):
+    task_statement: str = Field(..., min_length=1)
+    code_cell: str = ""
+    commentary: str = ""
+    output_analysis: str = ""
+    interpretation: str = ""
+    reference_values: list[str] = Field(default_factory=list)
+
+
+class PracticeGuidanceModuleTask(BaseModel):
+    task_id: str = Field(..., min_length=1)
+    level: str = ""
+    student_condition: str = Field(..., min_length=1)
+    code_cell: str = ""
+    input_requirements: str = ""
+    output_requirements: str = ""
+    checks: list[str] = Field(default_factory=list)
+    manual_checks: list[str] = Field(default_factory=list)
+
+
+class PracticeGuidanceStage(BaseModel):
+    id: str = Field(..., min_length=1)
+    level: str = ""
+    title: str = Field(..., min_length=1)
+    source_task_ids: list[str] = Field(default_factory=list)
+    stage_goal: str = ""
+    algorithm_steps: list[str] = Field(default_factory=list)
+    worked_example: PracticeGuidanceWorkedExample
+    module_tasks: list[PracticeGuidanceModuleTask] = Field(default_factory=list)
+
+
+class PracticeGuidanceMethodicalGuidance(BaseModel):
+    problem_statement: str = ""
+    environment: str = ""
+    before_start: PracticeGuidanceBeforeStart = Field(default_factory=PracticeGuidanceBeforeStart)
+    stages: list[PracticeGuidanceStage] = Field(default_factory=list)
+
+
+class PracticeGuidanceResultRequirements(BaseModel):
+    deliverable: str = ""
+    criteria: list[str] = Field(default_factory=list)
+
+
+class PracticeGuidanceArtifact(BaseModel):
+    """Structured output returned by PracticeGuidanceArtifactAgent."""
+
+    header: PracticeGuidanceHeader
+    goals: PracticeGuidanceGoals
+    theory_brief: PracticeGuidanceTheoryBrief = Field(default_factory=PracticeGuidanceTheoryBrief)
+    methodical_guidance: PracticeGuidanceMethodicalGuidance
+    result_requirements: PracticeGuidanceResultRequirements = Field(
+        default_factory=PracticeGuidanceResultRequirements
+    )
+    self_check_questions: list[str] = Field(default_factory=list)
+    requires_check: list[str] = Field(default_factory=list)
+    consistency_notes: list[str] = Field(default_factory=list)
+    agent_notes: list[str] = Field(default_factory=list)
+
+
 class SelfWorkTaskCheck(BaseModel):
     """Internal checking artifact for one independent self-work task."""
 

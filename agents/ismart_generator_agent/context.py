@@ -616,6 +616,7 @@ def generation_artifacts_for_validation(
 
 PRIMARY_STRUCTURED_ARTIFACT_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
     "practice": ("practice_templates", "practice_instances"),
+    "practice_guidance": ("practice_guidance_input", "practice_guidance_artifact"),
     "self_work": ("self_work_autocheck",),
     "current_control": ("current_control_autocheck",),
     "intermediate": ("intermediate_assessment",),
@@ -761,7 +762,6 @@ def build_generation_prompt(
     previous_content: str,
     previous_issues: list[str],
     previous_validation: ValidationResult | None = None,
-    module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
     generation_artifacts: dict[str, Any] | None = None,
 ) -> str:
     previous_validation_payload = (
@@ -800,9 +800,6 @@ MARKDOWN REFERENCES CONTENT:
 
 DEPENDENCY MATERIALRESULT OBJECTS:
 {compact_json([material_result_summary(item) for item in dependencies])}
-
-MODULE MATERIAL SUMMARIES:
-{compact_json(module_material_summaries or {})}
 
 GENERATION ARTIFACTS FOR THIS MATERIAL:
 {compact_json(generation_artifacts or {})}

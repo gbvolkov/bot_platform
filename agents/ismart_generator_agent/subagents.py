@@ -17,6 +17,7 @@ from .schemas import (
     IntermediateAssessmentArtifact,
     MaterialValidationDecision,
     PackageValidationDecision,
+    PracticeGuidanceArtifact,
     PracticeTaskInstanceSet,
     PracticeTaskTemplateSet,
     SelfWorkAutocheckSet,
@@ -44,6 +45,7 @@ VALIDATION_AGENT_TYPES: tuple[str, ...] = (
 PRACTICE_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
     "PracticeTaskTemplateAgent",
     "PracticeTaskVariantAgent",
+    "PracticeGuidanceArtifactAgent",
 )
 
 SELF_WORK_PIPELINE_AGENT_TYPES: tuple[str, ...] = (
@@ -113,6 +115,11 @@ def build_subagent_registry(model: BaseChatModel) -> Mapping[str, Any]:
         name="PracticeTaskVariantAgent",
         model=model,
         schema=PracticeTaskInstanceSet,
+    )
+    registry["PracticeGuidanceArtifactAgent"] = _build_structured_subagent(
+        name="PracticeGuidanceArtifactAgent",
+        model=model,
+        schema=PracticeGuidanceArtifact,
     )
     registry["SelfWorkAutocheckAgent"] = _build_structured_subagent(
         name="SelfWorkAutocheckAgent",
