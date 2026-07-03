@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NotRequired, TypedDict
+
+from langgraph.graph import END, START, StateGraph
 
 from .context import task_identity
 from .contracts import (
@@ -12,6 +14,7 @@ from .contracts import (
     ValidationResult,
 )
 from .planner import build_material_plan
+from .practice_guidance import run_practice_guidance_material
 from .profiles import config_for_task_profile, resolve_course_level
 from .sources import ReferenceLoader, reference_summary
 from .task_skip import (
@@ -24,6 +27,19 @@ from .trace import TraceLogger
 from .validators import RuleValidator
 from .workers import MaterialWorker, PackageValidator
 from .writer import default_run_name, write_task_output
+
+
+class LessonTaskGraphState(TypedDict, total=False):
+    task: dict[str, Any]
+    task_id: str
+    lesson_number: str
+    lesson_title: str
+    course_level: str
+    output_dir: str
+    current_material_index: int
+    package_validator_called: bool
+    result: dict[str, Any]
+    stop_generation: NotRequired[bool]
 
 
 def run_ismart_task(
@@ -50,19 +66,6 @@ class IsmartGeneratorRuntime:
         self.config = config
         self.subagents = subagents
         self.trace = TraceLogger(enabled=config.verbose)
-        self.rule_validator = RuleValidator()
-        self.worker = MaterialWorker(
-            subagents=subagents,
-            config=self.config,
-            rule_validator=self.rule_validator,
-            trace=self.trace,
-        )
-        self.package_validator = PackageValidator(
-            subagents=subagents,
-            config=self.config,
-            rule_validator=self.rule_validator,
-            trace=self.trace,
-        )
 
     def run_task(
         self,
@@ -70,44 +73,92 @@ class IsmartGeneratorRuntime:
         *,
         run_dir: Path | None = None,
     ) -> IsmartGenerationResult:
-        task_id, lesson_number, lesson_title = task_identity(task)
-        course_level = resolve_course_level(task)
-        task_config = config_for_task_profile(self.config, task)
-        rule_validator = RuleValidator()
-        worker = MaterialWorker(
-            subagents=self.subagents,
-            config=task_config,
-            rule_validator=rule_validator,
-            trace=self.trace,
-        )
-        package_validator = PackageValidator(
-            subagents=self.subagents,
-            config=task_config,
-            rule_validator=rule_validator,
-            trace=self.trace,
-        )
-        output_dir = run_dir or self._new_run_dir(task)
-        attempts_dir = output_dir / "tmp"
-        attempts_dir.mkdir(parents=True, exist_ok=True)
-        self.trace.log(
-            "task.start",
-            task_id=task_id,
-            lesson_number=lesson_number,
-            lesson_title=lesson_title,
-            course_level=course_level,
-            prompts_dir=str(task_config.prompts_dir),
-        )
-        specs = build_material_plan(task, task_config)
-        self.trace.log(
-            "planner.done",
-            course_level=course_level,
-            material_plan=[{"kind": spec.kind, "agent": spec.agent_type, "prompt_files": list(spec.prompt_files)} for spec in specs],
-        )
-        references = ReferenceLoader(task_config, trace=self.trace).load(task)
-        materials: list[MaterialResult] = []
-        validation_reports: dict[str, ValidationResult] = {}
+        result_box: dict[str, IsmartGenerationResult] = {}
+        graph = self._build_lesson_task_graph(result_box)
+        graph.invoke({"task": task, "output_dir": str(run_dir) if run_dir is not None else None})
+        result = result_box.get("result")
+        if not isinstance(result, IsmartGenerationResult):
+            raise RuntimeError("LessonTaskGraph finished without IsmartGenerationResult.")
+        return result
 
-        for spec in specs:
+    def _build_lesson_task_graph(self, result_box: dict[str, IsmartGenerationResult]):
+        rule_validator = RuleValidator()
+        runtime_data: dict[str, Any] = {}
+
+        def init_task_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            task = state["task"]
+            task_id, lesson_number, lesson_title = task_identity(task)
+            course_level = resolve_course_level(task)
+            task_config = config_for_task_profile(self.config, task)
+            output_dir_value = state.get("output_dir")
+            output_dir = Path(output_dir_value) if output_dir_value is not None else self._new_run_dir(task)
+            attempts_dir = output_dir / "tmp"
+            attempts_dir.mkdir(parents=True, exist_ok=True)
+            runtime_data.update(
+                {
+                    "task_config": task_config,
+                    "output_dir": output_dir,
+                    "attempts_dir": attempts_dir,
+                    "materials": [],
+                    "validation_reports": {},
+                    "package_validator_called": False,
+                }
+            )
+            self.trace.log(
+                "task.start",
+                task_id=task_id,
+                lesson_number=lesson_number,
+                lesson_title=lesson_title,
+                course_level=course_level,
+                prompts_dir=str(task_config.prompts_dir),
+            )
+            return {
+                "task_id": task_id,
+                "lesson_number": lesson_number,
+                "lesson_title": lesson_title,
+                "course_level": course_level,
+                "output_dir": str(output_dir),
+                "current_material_index": 0,
+                "package_validator_called": False,
+                "stop_generation": False,
+            }
+
+        def plan_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            task = state["task"]
+            task_config = runtime_data["task_config"]
+            specs = build_material_plan(task, task_config)
+            runtime_data["specs"] = specs
+            self.trace.log(
+                "planner.done",
+                course_level=state["course_level"],
+                material_plan=[
+                    {"kind": spec.kind, "agent": spec.agent_type, "prompt_files": list(spec.prompt_files)}
+                    for spec in specs
+                ],
+            )
+            return {}
+
+        def load_references_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            references = ReferenceLoader(runtime_data["task_config"], trace=self.trace).load(state["task"])
+            runtime_data["references"] = references
+            return {}
+
+        def route_material_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            return {}
+
+        def route_next_material(state: LessonTaskGraphState) -> str:
+            if int(state.get("current_material_index") or 0) < len(runtime_data.get("specs") or []):
+                return "run_material"
+            return "package_validation"
+
+        def run_material_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            task = state["task"]
+            specs = runtime_data["specs"]
+            spec = specs[int(state.get("current_material_index") or 0)]
+            task_config = runtime_data["task_config"]
+            attempts_dir = runtime_data["attempts_dir"]
+            materials = list(runtime_data.get("materials") or [])
+            validation_reports = dict(runtime_data.get("validation_reports") or {})
             dependencies = self._dependency_results(spec.dependency_kinds, specs, materials)
             skip_reason = practice_material_skip_reason(task, spec)
             skip_status = "skipped"
@@ -121,8 +172,7 @@ class IsmartGeneratorRuntime:
                     reason=skip_reason,
                     dependency_results=dependencies,
                 )
-                materials.append(material)
-                validation_reports[spec.kind] = ValidationResult(
+                validation = ValidationResult(
                     approved=True,
                     passed_blocks=[
                         {
@@ -139,110 +189,193 @@ class IsmartGeneratorRuntime:
                     reason=skip_reason,
                     dependencies=[{"kind": item.kind, "status": item.status} for item in dependencies],
                 )
-                continue
-            self.trace.log(
-                "material.start",
-                kind=spec.kind,
-                agent=spec.agent_type,
-                dependencies=[{"kind": item.kind, "status": item.status} for item in dependencies],
-            )
-            material = worker.run(
-                task=task,
-                spec=spec,
-                references=references,
-                dependency_results=dependencies,
-                attempts_dir=attempts_dir,
-            )
+            else:
+                self.trace.log(
+                    "material.start",
+                    kind=spec.kind,
+                    agent=spec.agent_type,
+                    dependencies=[{"kind": item.kind, "status": item.status} for item in dependencies],
+                )
+                if spec.kind == "practice_guidance":
+                    material = run_practice_guidance_material(
+                        task=task,
+                        spec=spec,
+                        config=task_config,
+                        subagents=self.subagents,
+                        references=runtime_data["references"],
+                        materials=materials,
+                        output_dir=runtime_data["output_dir"],
+                        attempts_dir=attempts_dir,
+                        trace=self.trace,
+                        rule_validator=rule_validator,
+                    )
+                else:
+                    worker = MaterialWorker(
+                        subagents=self.subagents,
+                        config=task_config,
+                        rule_validator=rule_validator,
+                        trace=self.trace,
+                    )
+                    material = worker.run(
+                        task=task,
+                        spec=spec,
+                        references=runtime_data["references"],
+                        dependency_results=dependencies,
+                        attempts_dir=attempts_dir,
+                    )
+                self.trace.log(
+                    "material.done",
+                    kind=material.kind,
+                    status=material.status,
+                    iterations=material.iterations,
+                    content_chars=len(material.content),
+                    issues=material.validation_issues,
+                )
+                validation = ValidationResult(
+                    approved=material.status == "approved",
+                    issues=list(material.validation_issues),
+                    fix_instructions=list(material.validation_issues),
+                    issues_by_block=list(material.validation_issues_by_block),
+                    passed_blocks=list(material.validation_passed_blocks),
+                )
+
             materials.append(material)
-            self.trace.log(
-                "material.done",
-                kind=material.kind,
-                status=material.status,
-                iterations=material.iterations,
-                content_chars=len(material.content),
-                issues=material.validation_issues,
-            )
-            validation_reports[spec.kind] = ValidationResult(
-                approved=material.status == "approved",
-                issues=list(material.validation_issues),
-                fix_instructions=list(material.validation_issues),
-                issues_by_block=list(material.validation_issues_by_block),
-                passed_blocks=list(material.validation_passed_blocks),
-            )
+            validation_reports[spec.kind] = validation
+            runtime_data["materials"] = materials
+            runtime_data["validation_reports"] = validation_reports
+            result_update: dict[str, Any] = {
+                "current_material_index": int(state.get("current_material_index") or 0) + 1,
+            }
             if material.status == "failed":
                 package_validation = ValidationResult.fail(
-                    [f"material {material.kind} failed after {material.iterations} generation/validation attempts; execution stopped"]
+                    [
+                        f"material {material.kind} failed after {material.iterations} generation/validation attempts; execution stopped"
+                    ]
                 )
                 validation_reports["package"] = package_validation
+                runtime_data["package_validation"] = package_validation
+                runtime_data["validation_reports"] = validation_reports
+                runtime_data["package_validator_called"] = False
                 self.trace.log(
                     "task.fail_fast",
                     kind=material.kind,
                     iterations=material.iterations,
                     issues=material.validation_issues,
                 )
-                return self._finish_task(
-                    task_id=task_id,
-                    lesson_number=lesson_number,
-                    lesson_title=lesson_title,
-                    course_level=course_level,
-                    output_dir=output_dir,
-                    materials=materials,
-                    references=references,
-                    package_validation=package_validation,
-                    validation_reports=validation_reports,
-                    package_validator_called=False,
-                )
-
-        if any(item.status in SKIPPED_MATERIAL_STATUSES for item in materials):
-            package_validation = ValidationResult(
-                approved=True,
-                passed_blocks=[
+                result_update.update(
                     {
-                        "block_id": "package",
-                        "block_heading": "Package",
-                        "reason": "package validation skipped because one or more materials were intentionally skipped",
+                        "package_validator_called": False,
+                        "stop_generation": True,
                     }
-                ],
+                )
+            return result_update
+
+        def route_after_material(state: LessonTaskGraphState) -> str:
+            return "finish_task" if state.get("stop_generation") else "route_material"
+
+        def package_validation_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            materials = list(runtime_data.get("materials") or [])
+            validation_reports = dict(runtime_data.get("validation_reports") or {})
+            if any(item.status in SKIPPED_MATERIAL_STATUSES for item in materials):
+                package_validation = ValidationResult(
+                    approved=True,
+                    passed_blocks=[
+                        {
+                            "block_id": "package",
+                            "block_heading": "Package",
+                            "reason": "package validation skipped because one or more materials were intentionally skipped",
+                        }
+                    ],
+                )
+                self.trace.log(
+                    "package.skipped_due_to_material_skips",
+                    skipped=[
+                        {"kind": item.kind, "status": item.status}
+                        for item in materials
+                        if item.status in SKIPPED_MATERIAL_STATUSES
+                    ],
+                )
+                validation_reports["package"] = package_validation
+                runtime_data["package_validation"] = package_validation
+                runtime_data["validation_reports"] = validation_reports
+                runtime_data["package_validator_called"] = False
+                return {
+                    "package_validator_called": False,
+                }
+
+            self.trace.log("package.start", material_count=len(materials))
+            package_validator = PackageValidator(
+                subagents=self.subagents,
+                config=runtime_data["task_config"],
+                rule_validator=rule_validator,
+                trace=self.trace,
             )
-            self.trace.log(
-                "package.skipped_due_to_material_skips",
-                skipped=[{"kind": item.kind, "status": item.status} for item in materials if item.status in SKIPPED_MATERIAL_STATUSES],
-            )
-            return self._finish_task(
-                task_id=task_id,
-                lesson_number=lesson_number,
-                lesson_title=lesson_title,
-                course_level=course_level,
-                output_dir=output_dir,
+            package_validation = package_validator.validate(
+                task=state["task"],
+                specs=runtime_data["specs"],
                 materials=materials,
-                references=references,
-                package_validation=package_validation,
-                validation_reports=validation_reports,
-                package_validator_called=False,
+                attempts_dir=runtime_data["attempts_dir"],
             )
+            if not package_validation.approved:
+                self.trace.log("package.advisory_not_blocking", issues=package_validation.issues)
+            validation_reports["package"] = package_validation
+            runtime_data["package_validation"] = package_validation
+            runtime_data["validation_reports"] = validation_reports
+            runtime_data["package_validator_called"] = True
+            return {
+                "package_validator_called": True,
+            }
 
-        self.trace.log("package.start", material_count=len(materials))
-        package_validation = package_validator.validate(
-            task=task,
-            specs=specs,
-            materials=materials,
-            attempts_dir=attempts_dir,
-        )
-        if not package_validation.approved:
-            self.trace.log("package.advisory_not_blocking", issues=package_validation.issues)
+        def finish_task_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            result = self._finish_task(
+                task_id=state["task_id"],
+                lesson_number=state["lesson_number"],
+                lesson_title=state["lesson_title"],
+                course_level=state["course_level"],
+                output_dir=runtime_data["output_dir"],
+                materials=list(runtime_data.get("materials") or []),
+                references=runtime_data["references"],
+                package_validation=runtime_data["package_validation"],
+                validation_reports=dict(runtime_data.get("validation_reports") or {}),
+                package_validator_called=bool(runtime_data.get("package_validator_called")),
+            )
+            result_box["result"] = result
+            return {
+                "result": result.to_public_json(),
+                "output_dir": result.output_dir,
+            }
 
-        return self._finish_task(
-            task_id=task_id,
-            lesson_number=lesson_number,
-            lesson_title=lesson_title,
-            course_level=course_level,
-            output_dir=output_dir,
-            materials=materials,
-            references=references,
-            package_validation=package_validation,
-            validation_reports=validation_reports,
-            package_validator_called=True,
+        builder = StateGraph(LessonTaskGraphState)
+        builder.add_node("init_task", init_task_node)
+        builder.add_node("plan", plan_node)
+        builder.add_node("load_references", load_references_node)
+        builder.add_node("route_material", route_material_node)
+        builder.add_node("run_material", run_material_node)
+        builder.add_node("package_validation", package_validation_node)
+        builder.add_node("finish_task", finish_task_node)
+        builder.add_edge(START, "init_task")
+        builder.add_edge("init_task", "plan")
+        builder.add_edge("plan", "load_references")
+        builder.add_edge("load_references", "route_material")
+        builder.add_conditional_edges(
+            "route_material",
+            route_next_material,
+            {
+                "run_material": "run_material",
+                "package_validation": "package_validation",
+            },
         )
+        builder.add_conditional_edges(
+            "run_material",
+            route_after_material,
+            {
+                "route_material": "route_material",
+                "finish_task": "finish_task",
+            },
+        )
+        builder.add_edge("package_validation", "finish_task")
+        builder.add_edge("finish_task", END)
+        return builder.compile(name="ismart_lesson_task_graph")
 
     def _finish_task(
         self,

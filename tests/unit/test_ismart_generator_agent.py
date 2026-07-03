@@ -6,6 +6,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Mapping
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.ismart_generator_agent import agent as agent_module
@@ -88,6 +89,7 @@ from agents.ismart_generator_agent.workers import (
 )
 from agents.ismart_generator_agent.trace import TraceLogger
 from agents.ismart_generator_agent.tracker_converter import detect_course_level, find_references_dir, parse_tasks
+from agents.ismart_generator_agent.writer import write_task_output
 
 
 VALID_HTML = '<style>.x{}</style><div class="cc-lesson"><h2 id="concepts">Concepts</h2><p>ok</p></div>'
@@ -157,7 +159,7 @@ def test_project_flag_adds_practice_material_plan_without_task_rows() -> None:
     task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
     task["lesson"]["content"] = {"general": "Project work with input, formula, output, and testing."}
 
-    assert [spec.kind for spec in build_material_plan(task)] == ["practice", "specification_qa"]
+    assert [spec.kind for spec in build_material_plan(task)] == ["practice", "practice_guidance", "specification_qa"]
 
 
 def test_run_tasks_does_not_skip_whole_lesson_when_practice_tasks_are_empty(
@@ -232,46 +234,50 @@ def test_sequential_runner_logs_material_skip_and_writes_manifest(
     task["lesson"]["practice_tasks"] = {"l1": [], "l2": [], "l3": []}
     input_path = tmp_path / "input.json"
     input_path.write_text(json.dumps([task], ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(sequential_runner, "build_callback_handlers", lambda _log_name: [])
-    monkeypatch.setattr(sequential_runner, "get_llm", lambda *args, **kwargs: object())
-    monkeypatch.setattr(sequential_runner, "build_subagent_registry", lambda _llm: {"fake": object()})
+    calls: list[dict[str, Any]] = []
 
-    def fake_run_ismart_task(
-        task: dict[str, Any],
-        config: IsmartGenerationConfig,
-        *,
-        subagents: Mapping[str, Any],
-        run_dir: Path,
-    ) -> IsmartGenerationResult:
-        practice = build_skipped_material(
-            spec=get_material_spec("practice"),
-            status="skipped",
-            reason=NO_PRACTICE_TASKS_SKIP_REASON,
-        )
-        theory = MaterialResult(
-            kind="theory",
-            material_type="Theory",
-            agent_type="TheoryMaterialAgent",
-            status="approved",
-            iterations=1,
-            content=VALID_HTML,
-            prompt_files=(),
-        )
-        return IsmartGenerationResult(
-            task_id=str(task["task_id"]),
-            lesson_number=str(task["lesson"]["lesson_number"]),
-            lesson_title=str(task["lesson"]["title"]),
-            course_level="basic",
-            status="completed_with_skips",
-            output_dir=str(run_dir),
-            materials=[theory, practice],
-            package_validation=ValidationResult(approved=True),
-            reference_summary={},
-            agents_called=["TheoryMaterialAgent"],
-            prompt_files_used=[],
-        )
+    class FakeSequentialGraph:
+        def invoke(
+            self,
+            state: dict[str, Any],
+            config: dict[str, Any],
+            *,
+            context: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"state": state, "config": config, "context": context})
+            request = context or {}
+            out_dir = Path(request["output"]) / request["run_name"]
+            out_dir.mkdir(parents=True)
+            entry = {
+                "index": 1,
+                "task_id": "profile-test",
+                "lesson_number": "1",
+                "lesson_title": "Profile test",
+                "course_level": "basic",
+                "resolved_profile": "basic",
+                "status": "completed_with_skips",
+                "output_dir": str(out_dir / "001-1-profile-test"),
+                "skipped_materials": [
+                    {"kind": "practice", "status": "skipped", "reason": NO_PRACTICE_TASKS_SKIP_REASON}
+                ],
+            }
+            (out_dir / "sequential_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "status": "completed_with_skips",
+                        "completed_with_skips_count": 1,
+                        "tasks": [entry],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            print(json.dumps({"event": "task.start"}, ensure_ascii=False))
+            print(json.dumps({"event": "task.done"}, ensure_ascii=False))
+            print(json.dumps({"event": "task.material_skipped"}, ensure_ascii=False))
+            return {"task_entries": [entry], "results": [{"status": "completed_with_skips"}]}
 
-    monkeypatch.setattr(sequential_runner, "run_ismart_task", fake_run_ismart_task)
+    monkeypatch.setattr(sequential_runner, "initialize_agent", lambda **_kwargs: FakeSequentialGraph())
 
     exit_code = sequential_runner.main(
         [
@@ -285,6 +291,9 @@ def test_sequential_runner_logs_material_skip_and_writes_manifest(
     )
 
     assert exit_code == 0
+    assert calls[0]["state"] == {"messages": []}
+    assert calls[0]["context"]["input"] == str(input_path)
+    assert calls[0]["context"]["run_name"] == "skip-run"
     captured = capsys.readouterr()
     assert '"event": "task.start"' in captured.out
     assert '"event": "task.done"' in captured.out
@@ -328,32 +337,37 @@ def test_sequential_runner_can_preserve_source_index_after_filtering(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(sequential_runner, "build_callback_handlers", lambda _log_name: [])
-    monkeypatch.setattr(sequential_runner, "get_llm", lambda *args, **kwargs: object())
-    monkeypatch.setattr(sequential_runner, "build_subagent_registry", lambda _llm: {"fake": object()})
+    calls: list[dict[str, Any]] = []
 
-    def fake_run_ismart_task(
-        task: dict[str, Any],
-        config: IsmartGenerationConfig,
-        *,
-        subagents: Mapping[str, Any],
-        run_dir: Path,
-    ) -> IsmartGenerationResult:
-        return IsmartGenerationResult(
-            task_id=str(task["task_id"]),
-            lesson_number=str(task["lesson"]["lesson_number"]),
-            lesson_title=str(task["lesson"]["title"]),
-            course_level="basic",
-            status="approved",
-            output_dir=str(run_dir),
-            materials=[],
-            package_validation=ValidationResult(approved=True),
-            reference_summary={},
-            agents_called=[],
-            prompt_files_used=[],
-        )
+    class FakeSequentialGraph:
+        def invoke(
+            self,
+            state: dict[str, Any],
+            config: dict[str, Any],
+            *,
+            context: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            calls.append({"state": state, "config": config, "context": context})
+            request = context or {}
+            out_dir = Path(request["output"]) / request["run_name"]
+            out_dir.mkdir(parents=True, exist_ok=True)
+            tasks = [
+                {"index": 1, "task_id": "lesson-1", "lesson_number": "1", "status": "approved"},
+                {
+                    "index": 2,
+                    "task_id": "lesson-2",
+                    "lesson_number": "2",
+                    "status": "approved",
+                    "output_dir": str(out_dir / "002-2-lesson-2"),
+                },
+            ]
+            (out_dir / "sequential_manifest.json").write_text(
+                json.dumps({"status": "approved", "tasks": tasks}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return {"task_entries": tasks, "results": [{"status": "approved"}]}
 
-    monkeypatch.setattr(sequential_runner, "run_ismart_task", fake_run_ismart_task)
+    monkeypatch.setattr(sequential_runner, "initialize_agent", lambda **_kwargs: FakeSequentialGraph())
 
     exit_code = sequential_runner.main(
         [
@@ -370,6 +384,9 @@ def test_sequential_runner_can_preserve_source_index_after_filtering(
     )
 
     assert exit_code == 0
+    assert calls[0]["state"] == {"messages": []}
+    assert calls[0]["context"]["lesson_numbers"] == ["2"]
+    assert calls[0]["context"]["preserve_source_index"] is True
     manifest = json.loads((tmp_path / "out" / "rerun" / "sequential_manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["tasks"]) == 2
     assert manifest["tasks"][0]["task_id"] == "lesson-1"
@@ -474,6 +491,31 @@ def test_run_tasks_uses_fresh_subagents_per_task(monkeypatch: Any, tmp_path: Pat
     assert len(factory_results) == 2
     assert received_subagents == factory_results
     assert received_subagents[0] is not received_subagents[1]
+
+
+def test_write_task_output_removes_stale_error_json(tmp_path: Path) -> None:
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    (output_dir / "error.json").write_text('{"status":"error"}', encoding="utf-8")
+    result = IsmartGenerationResult(
+        task_id="lesson-1",
+        lesson_number="1",
+        lesson_title="Lesson",
+        course_level="basic",
+        status="approved",
+        output_dir=str(output_dir),
+        materials=[],
+        package_validation=ValidationResult(approved=True),
+        reference_summary={},
+        agents_called=[],
+        prompt_files_used=[],
+    )
+
+    write_task_output(result=result, output_dir=output_dir, validation_reports={})
+
+    assert not (output_dir / "error.json").exists()
+    assert (output_dir / "manifest.json").exists()
+    assert (output_dir / "result.json").exists()
 
 
 def test_advanced_registry_does_not_add_per_lesson_practice_quota_rule() -> None:
@@ -678,6 +720,7 @@ def test_structured_subagent_invoker_invokes_graph_with_isolated_thread_id() -> 
     assert "subagent:TheoryMaterialAgent" in call["_config"]["tags"]
     assert call["_config"]["metadata"]["course_class"] == "8"
     assert call["_config"]["metadata"]["subagent_type"] == "TheoryMaterialAgent"
+    assert call["_config"]["metadata"]["structured_schema"] == "GeneratedMaterial"
 
 
 def test_practice_guidance_input_uses_structured_practice_without_raw_html_or_hidden_fields(tmp_path: Path) -> None:
@@ -688,6 +731,7 @@ def test_practice_guidance_input_uses_structured_practice_without_raw_html_or_hi
         "lesson_number": "1",
         "lesson_title": "Переменные",
         "course_level": "basic",
+        "audience": "8-9 классы",
         "status": "approved",
         "references": {
             "requirements": [
@@ -761,9 +805,12 @@ def test_practice_guidance_input_uses_structured_practice_without_raw_html_or_hi
     serialized = json.dumps(payload, ensure_ascii=False)
 
     assert payload["practice_tasks"][0]["id"] == "P1"
+    assert payload["task_meta"]["audience"] == "8-9 классы"
     assert payload["practice_tasks"][0]["source_template"]["skill_target"] == "variables"
     assert payload["theory_brief_source"]["sections"][0]["heading"] == "Переменные"
     assert payload["references"]["requirements"][0]["content"] == "Требования к практике"
+    assert payload["previous_lessons_context"] == []
+    assert payload["previous_lessons_context_policy"]["available"] is False
     assert "RAW PRACTICE HTML" not in serialized
     assert "<style>" not in serialized
     assert "hidden_solution" not in serialized
@@ -771,6 +818,92 @@ def test_practice_guidance_input_uses_structured_practice_without_raw_html_or_hi
     assert "secret-sha" not in serialized
     assert "secret broken code" not in serialized
     assert payload["source_warnings"][0]["code"] == "raw_faulty_code_omitted"
+
+
+def test_practice_guidance_schema_rejects_empty_required_sections() -> None:
+    with pytest.raises(Exception):
+        PracticeGuidanceArtifact(
+            header={
+                "work_title": "Указания",
+                "topic": "Тема",
+                "lesson_number": "1",
+                "audience": "Обучающиеся 8–9 классов",
+            },
+            goals={"goal": "Цель", "objectives": ["Выполнить практику."]},
+            methodical_guidance={
+                "stages": [
+                    {
+                        "id": "stage-1",
+                        "title": "Этап",
+                        "worked_example": {"task_statement": "Пример."},
+                    }
+                ]
+            },
+            result_requirements={"deliverable": "", "criteria": []},
+            self_check_questions=[],
+        )
+
+
+def test_practice_guidance_input_uses_previous_lessons_context_when_provided(tmp_path: Path) -> None:
+    result = {
+        "task_id": "lesson-2",
+        "lesson_number": "2",
+        "lesson_title": "Условия",
+        "course_level": "basic",
+        "status": "approved",
+        "references": {},
+        "materials": [
+            {
+                "kind": "practice",
+                "type": "Материалы занятия — практика",
+                "status": "approved",
+                "prompt_files": [],
+                "generation_artifacts": {
+                    "practice_templates": {"tasks": []},
+                    "practice_instances": {
+                        "lesson_goal": "Использовать условия.",
+                        "lesson_objectives": [],
+                        "tasks": [
+                            {
+                                "id": "P1",
+                                "template_id": "P1",
+                                "level": "L1",
+                                "task_type": "write",
+                                "scenario": "Check",
+                                "student_condition": "Проверьте условие.",
+                            }
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+
+    payload = practice_guidance.build_practice_guidance_input(
+        lesson_output_dir=tmp_path,
+        result=result,
+        attempt=1,
+        previous_artifact=None,
+        previous_validation=None,
+        previous_lessons_context=[
+            {
+                "lesson_number": 1,
+                "lesson_title": "Переменные",
+                "summary": "Ученики выводили значения переменных.",
+                "materials": [{"kind": "theory", "status": "approved", "summary": "print и переменные"}],
+            }
+        ],
+    )
+
+    assert payload["previous_lessons_context_policy"]["available"] is True
+    assert payload["previous_lessons_context"] == [
+        {
+            "lesson_number": "1",
+            "lesson_title": "Переменные",
+            "summary": "Ученики выводили значения переменных.",
+            "materials": [{"kind": "theory", "status": "approved", "summary": "print и переменные"}],
+        }
+    ]
 
 
 def test_practice_guidance_postprocess_updates_existing_result_and_manifest(tmp_path: Path) -> None:
@@ -840,7 +973,12 @@ def test_practice_guidance_postprocess_updates_existing_result_and_manifest(tmp_
     for name in get_material_spec("practice_guidance").prompt_files:
         (prompt_dir / name).write_text(f"prompt {name}", encoding="utf-8")
     artifact = PracticeGuidanceArtifact(
-        header={"work_title": "Указания к практической работе № 1", "topic": "Переменные", "lesson_number": "1"},
+        header={
+            "work_title": "Указания к практической работе № 1",
+            "topic": "Переменные",
+            "lesson_number": "1",
+            "audience": "Обучающиеся 8–9 классов",
+        },
         goals={"goal": "Выполнить практическую работу.", "objectives": ["Запустить код."]},
         methodical_guidance={
             "problem_statement": "Выполните задания.",
@@ -864,6 +1002,15 @@ def test_practice_guidance_postprocess_updates_existing_result_and_manifest(tmp_
                 }
             ],
         },
+        result_requirements={
+            "deliverable": "Рабочий код для задания P1.",
+            "criteria": ["Код запускается без ошибок.", "Вывод соответствует условию."],
+        },
+        self_check_questions=[
+            "Что должна вывести программа?",
+            "Запускается ли код без ошибок?",
+            "Совпадает ли вывод с условием?",
+        ],
     )
     guidance_graph = FakeGraph([artifact])
     validator_graph = FakeGraph([MaterialValidationDecision(approved=True)])
@@ -914,6 +1061,7 @@ def test_runtime_skips_empty_practice_material_but_generates_qa(tmp_path: Path) 
     assert result.status == "completed_with_skips"
     assert [(material.kind, material.status) for material in result.materials] == [
         ("practice", "skipped"),
+        ("practice_guidance", "skipped_dependency"),
         ("specification_qa", "approved"),
     ]
     manifest = json.loads((tmp_path / "run" / "manifest.json").read_text(encoding="utf-8"))
@@ -922,13 +1070,27 @@ def test_runtime_skips_empty_practice_material_but_generates_qa(tmp_path: Path) 
     qa = next(material for material in manifest["materials"] if material["kind"] == "specification_qa")
     assert practice["status"] == "skipped"
     assert practice["file"] is None
-    assert qa["file"] == "02_specification-qa.html"
+    guidance = next(material for material in manifest["materials"] if material["kind"] == "practice_guidance")
+    assert guidance["status"] == "skipped_dependency"
+    assert guidance["file"] is None
+    assert qa["file"] == "03_specification-qa.html"
 
 
 def test_generator_agent_does_not_import_old_generator_runtime() -> None:
     package_dir = Path("agents/ismart_generator_agent")
     for path in package_dir.glob("*.py"):
         assert "generators.ismart_materials_agent" not in path.read_text(encoding="utf-8")
+
+
+def test_cli_entrypoints_do_not_create_subagents_or_call_runtime_directly() -> None:
+    for path in (
+        Path("agents/ismart_generator_agent/cli.py"),
+        Path("agents/ismart_generator_agent/sequential_runner.py"),
+    ):
+        source = path.read_text(encoding="utf-8")
+        assert "build_subagent_registry" not in source
+        assert "run_ismart_task" not in source
+        assert "get_llm" not in source
 
 
 def test_worker_retries_with_previous_content_and_controller_score_accepts(tmp_path: Path) -> None:
@@ -4673,8 +4835,14 @@ class FakeCompiledAgent:
         self.status = status
         self.calls: list[dict[str, Any]] = []
 
-    def invoke(self, state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append({"state": state, "config": config})
+    def invoke(
+        self,
+        state: dict[str, Any],
+        config: dict[str, Any],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append({"state": state, "config": config, "context": context})
         return {
             "messages": [AIMessage(content=f"done: {self.status}")],
             "results": [{"status": self.status, "output_dir": "out"}],
@@ -4703,13 +4871,33 @@ def test_cli_runs_langgraph_agent_with_configurable_context(monkeypatch: Any, ca
     stdout = capsys.readouterr().out
     assert "done: approved" in stdout
     call = fake_agent.calls[0]
+    request = call["context"]
     configurable = call["config"]["configurable"]
-    assert configurable["input"] == "task.json"
-    assert configurable["output"] == "docs/generated output"
-    assert configurable["lesson_number"] == "3"
-    assert configurable["max_generation_iterations"] == 5
-    assert configurable["verbose"] is True
+    assert call["state"] == {"messages": []}
+    assert request["input"] == "task.json"
+    assert request["output"] == "docs/generated output"
+    assert request["lesson_number"] == "3"
+    assert request["max_generation_iterations"] == 5
+    assert request["verbose"] is True
     assert "thread_id" in configurable
+
+
+def test_generation_config_reads_previous_lessons_context_from_runtime_context(tmp_path: Path) -> None:
+    config = agent_module._build_generation_config(
+        {
+            "output": str(tmp_path),
+            "previous_lessons_context": [
+                {"lesson_number": 1, "lesson_title": "Переменные", "summary": "Вводная практика."}
+            ],
+        },
+        langchain_config={"callbacks": ["callback"]},
+    )
+
+    assert config.output_root == tmp_path
+    assert config.previous_lessons_context == [
+        {"lesson_number": 1, "lesson_title": "Переменные", "summary": "Вводная практика."}
+    ]
+    assert config.langchain_config == {"callbacks": ["callback"]}
 
 
 def test_cli_returns_nonzero_for_failed_generation(monkeypatch: Any, capsys: Any) -> None:

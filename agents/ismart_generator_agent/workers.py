@@ -607,7 +607,7 @@ def _subagent_langchain_config(
     *,
     thread_id: str,
     agent_type: str,
-    schema: type[BaseModel],
+    schema_name: str,
 ) -> dict[str, Any]:
     config = dict(base_config or {})
     base_run_name = str(config.get("run_name") or "ismart_generator")
@@ -616,7 +616,7 @@ def _subagent_langchain_config(
     config["metadata"] = {
         **(config.get("metadata") or {}),
         "subagent_type": agent_type,
-        "structured_schema": schema.__name__,
+        "structured_schema": schema_name,
     }
     configurable = dict(config.get("configurable") or {})
     configurable["thread_id"] = thread_id
@@ -628,14 +628,17 @@ class StructuredSubagentCallState(TypedDict):
     agent_type: str
     system: str
     prompt: str
-    schema: type[BaseModel]
+    schema_name: str
     thread_id: str
-    langchain_config: NotRequired[dict[str, Any]]
     structured_response: NotRequired[Any]
     raw_response: NotRequired[Any]
 
 
-def _build_structured_subagent_call_graph(subagents: Mapping[str, Any]):
+def _build_structured_subagent_call_graph(
+    subagents: Mapping[str, Any],
+    langchain_config: Mapping[str, Any] | None = None,
+):
+    base_langchain_config = dict(langchain_config or {})
     builder = StateGraph(StructuredSubagentCallState)
 
     def route_node(state: StructuredSubagentCallState) -> dict[str, Any]:
@@ -655,14 +658,24 @@ def _build_structured_subagent_call_graph(subagents: Mapping[str, Any]):
         {agent_type: agent_type for agent_type in subagents},
     )
     for agent_type, subagent_graph in subagents.items():
-        builder.add_node(agent_type, _make_structured_subagent_node(agent_type, subagent_graph))
+        builder.add_node(
+            agent_type,
+            _make_structured_subagent_node(
+                agent_type,
+                subagent_graph,
+                base_langchain_config,
+            ),
+        )
         builder.add_edge(agent_type, END)
     return builder.compile(name="ismart_structured_subagent_call_graph")
 
 
-def _make_structured_subagent_node(agent_type: str, subagent_graph: Any):
+def _make_structured_subagent_node(
+    agent_type: str,
+    subagent_graph: Any,
+    langchain_config: Mapping[str, Any],
+):
     def subagent_node(state: StructuredSubagentCallState) -> dict[str, Any]:
-        schema = state["schema"]
         prompt = state["prompt"]
         child_state = subagent_graph.invoke(
             {
@@ -671,10 +684,10 @@ def _make_structured_subagent_node(agent_type: str, subagent_graph: Any):
                 "messages": [HumanMessage(content=prompt)],
             },
             _subagent_langchain_config(
-                state.get("langchain_config") or {},
+                langchain_config,
                 thread_id=state["thread_id"],
                 agent_type=agent_type,
-                schema=schema,
+                schema_name=state["schema_name"],
             ),
         )
         raw_response = _raw_response_from_subagent_state(child_state) if isinstance(child_state, dict) else None
@@ -734,9 +747,9 @@ class StructuredSubagentInvoker:
         langchain_config: Mapping[str, Any] | None = None,
     ) -> None:
         self.subagents = subagents
-        self.parent_graph = _build_structured_subagent_call_graph(subagents)
         self.trace = trace or TraceLogger()
         self.langchain_config = dict(langchain_config or {})
+        self.parent_graph = _build_structured_subagent_call_graph(subagents, self.langchain_config)
 
     def invoke(
         self,
@@ -763,9 +776,8 @@ class StructuredSubagentInvoker:
                     "agent_type": agent_type,
                     "system": system,
                     "prompt": prompt,
-                    "schema": schema,
+                    "schema_name": schema.__name__,
                     "thread_id": thread_id,
-                    "langchain_config": dict(self.langchain_config),
                 },
                 self.langchain_config,
             )

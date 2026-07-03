@@ -8,22 +8,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
-from agents.utils import ModelType, extract_text, get_llm
+from agents.utils import ModelType, get_llm
 
 from .context import task_identity
 from .contracts import IsmartGenerationConfig, IsmartGenerationResult
 from .observability import build_callback_handlers, langchain_config_from_runnable
 from .profiles import resolve_course_level
 from .runtime import run_ismart_task
-from .state import IsmartGeneratorAgentContext, IsmartGeneratorAgentState
+from .state import GeneratorRunRequest, IsmartGeneratorAgentContext, IsmartGeneratorAgentState
 from .subagents import build_subagent_registry
-from .writer import safe_slug, write_batch_manifest
+from .task_skip import SKIPPED_MATERIAL_STATUSES
+from .writer import safe_slug, write_batch_manifest, write_json
 
 
 LOG = logging.getLogger(__name__)
@@ -45,13 +46,12 @@ def initialize_agent(
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
 
-    def subagent_factory() -> Mapping[str, Any]:
-        llm = get_llm(model=model_mode, provider=provider.value, temperature=0.2, streaming=streaming)
-        return build_subagent_registry(llm)
+    llm = get_llm(model=model_mode, provider=provider.value, temperature=0.2, streaming=streaming)
+    subagents = build_subagent_registry(llm)
 
     builder = StateGraph(IsmartGeneratorAgentState)
     builder.add_node("parse_request", create_parse_request_node())
-    builder.add_node("run_generation", create_run_generation_node(subagent_factory))
+    builder.add_node("run_generation", create_run_generation_node(subagents))
     builder.add_node("respond", respond_node)
 
     builder.add_edge(START, "parse_request")
@@ -78,14 +78,12 @@ def create_parse_request_node():
         runtime: Runtime[IsmartGeneratorAgentContext],
     ) -> dict[str, Any]:
         try:
-            context = _runtime_context(config, runtime)
+            context = _request_context(state, config, runtime)
             payload = _load_payload(context, state)
-            tasks = filter_tasks(
-                tasks_from_payload(payload),
-                task_id=_optional_str(context.get("task_id")),
-                lesson_number=_optional_str(context.get("lesson_number")),
-            )
-            return {"payload": payload, "tasks": tasks, "phase": "run_generation"}
+            all_tasks = tasks_from_payload(payload)
+            task_records = select_task_records(all_tasks, context)
+            tasks = [record["task"] for record in task_records]
+            return {"payload": payload, "tasks": tasks, "task_records": task_records, "phase": "run_generation"}
         except Exception as exc:  # noqa: BLE001 - graph response should carry concise failures.
             LOG.exception("Failed to parse iSMART generator request")
             return {"error": str(exc), "phase": "respond"}
@@ -93,7 +91,7 @@ def create_parse_request_node():
     return parse_request_node
 
 
-def create_run_generation_node(subagent_factory: Callable[[], Mapping[str, Any]]):
+def create_run_generation_node(subagents: Mapping[str, Any]):
     def run_generation_node(
         state: IsmartGeneratorAgentState,
         config: RunnableConfig,
@@ -102,19 +100,30 @@ def create_run_generation_node(subagent_factory: Callable[[], Mapping[str, Any]]
         if state.get("error"):
             return {"phase": "respond"}
         try:
-            context = _runtime_context(config, runtime)
+            context = _request_context(state, config, runtime)
             generation_config = _build_generation_config(
                 context,
                 langchain_config=langchain_config_from_runnable(config),
             )
-            results = run_tasks(
-                state.get("tasks") or [],
+            run_payload = run_task_records(
+                state.get("task_records") or [
+                    {"task": task, "source_index": index}
+                    for index, task in enumerate(state.get("tasks") or [], start=1)
+                ],
                 config=generation_config,
-                subagent_factory=subagent_factory,
+                subagents=subagents,
+                run_name=_optional_str(context.get("run_name")),
+                preserve_source_index=bool(context.get("preserve_source_index", False)),
+                stop_on_error=bool(context.get("stop_on_error", False)),
+                stop_on_failure=bool(context.get("stop_on_failure", False)),
+                write_sequential_manifest=bool(context.get("run_name") or context.get("preserve_source_index")),
             )
+            results = run_payload["results"]
             public_results = [result.to_public_json() for result in results]
             return {
                 "results": public_results,
+                "task_entries": run_payload.get("task_entries") or [],
+                "batch_manifest_path": run_payload.get("manifest_path"),
                 "output_text": format_agent_response(results),
                 "phase": "respond",
             }
@@ -158,12 +167,32 @@ def _runtime_context(
         "max_generation_iterations",
         "max_package_repair_iterations",
         "max_reference_chars",
+        "prompts_dir",
         "generation_target",
         "verbose",
+        "run_name",
+        "preserve_source_index",
+        "stop_on_error",
+        "stop_on_failure",
+        "from_lesson",
+        "to_lesson",
+        "limit",
+        "lesson_numbers",
+        "task_ids",
+        "previous_lessons_context",
+        "previous_lesson_context",
     ):
         if key in configurable and key not in context:
             context[key] = configurable[key]
     return context
+
+
+def _request_context(
+    state: IsmartGeneratorAgentState,
+    config: RunnableConfig,
+    runtime: Runtime[IsmartGeneratorAgentContext],
+) -> dict[str, Any]:
+    return _runtime_context(config, runtime)
 
 
 def _load_payload(context: dict[str, Any], state: IsmartGeneratorAgentState) -> Any:
@@ -172,17 +201,7 @@ def _load_payload(context: dict[str, Any], state: IsmartGeneratorAgentState) -> 
     if context.get("input"):
         return load_payload_from_path_or_text(str(context["input"]))
 
-    message_text = _last_human_text(state.get("messages") or [])
-    if message_text:
-        return load_payload_from_path_or_text(message_text)
-    raise ValueError("Provide input JSON via context.input, context.input_url, or the latest human message.")
-
-
-def _last_human_text(messages: list[Any]) -> str:
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage) or getattr(message, "type", "") == "human":
-            return extract_text(message).strip()
-    return ""
+    raise ValueError("Provide input JSON via runtime.context input or input_url.")
 
 
 def load_payload_from_path_or_text(value: str) -> Any:
@@ -239,6 +258,40 @@ def filter_tasks(
     if (task_id or lesson_number) and not result:
         raise ValueError("No tasks matched selector.")
     return result
+
+
+def select_task_records(tasks: list[dict[str, Any]], context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    lesson_numbers = _string_set(context.get("lesson_numbers"))
+    task_ids = _string_set(context.get("task_ids"))
+    single_lesson = _optional_str(context.get("lesson_number"))
+    single_task = _optional_str(context.get("task_id"))
+    if single_lesson:
+        lesson_numbers.add(single_lesson)
+    if single_task:
+        task_ids.add(single_task)
+    from_lesson = _optional_int(context.get("from_lesson"))
+    to_lesson = _optional_int(context.get("to_lesson"))
+    limit = _optional_int(context.get("limit"))
+
+    records: list[dict[str, Any]] = []
+    for source_index, task in enumerate(tasks, start=1):
+        task_id, lesson_number, _ = task_identity(task)
+        if lesson_numbers and lesson_number not in lesson_numbers:
+            continue
+        if task_ids and task_id not in task_ids:
+            continue
+        lesson_as_int = _optional_int(lesson_number)
+        if from_lesson is not None and (lesson_as_int is None or lesson_as_int < from_lesson):
+            continue
+        if to_lesson is not None and (lesson_as_int is None or lesson_as_int > to_lesson):
+            continue
+        records.append({"task": task, "source_index": source_index})
+        if limit is not None and len(records) >= limit:
+            break
+
+    if (lesson_numbers or task_ids or from_lesson is not None or to_lesson is not None) and not records:
+        raise ValueError("No tasks matched selector.")
+    return records
 
 
 def run_tasks(
@@ -310,6 +363,202 @@ def run_tasks(
     return results
 
 
+def run_task_records(
+    task_records: list[dict[str, Any]],
+    *,
+    config: IsmartGenerationConfig,
+    subagents: Mapping[str, Any],
+    run_name: str | None = None,
+    preserve_source_index: bool = False,
+    stop_on_error: bool = False,
+    stop_on_failure: bool = False,
+    write_sequential_manifest: bool = False,
+) -> dict[str, Any]:
+    output_root = config.output_root
+    if run_name:
+        batch_dir = output_root / run_name
+        use_batch_dir = True
+    elif len(task_records) > 1:
+        batch_dir = output_root / f"batch_{_timestamp()}"
+        use_batch_dir = True
+    else:
+        batch_dir = output_root
+        use_batch_dir = False
+
+    if use_batch_dir:
+        batch_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = batch_dir / "sequential_manifest.json" if write_sequential_manifest else None
+    manifest: dict[str, Any] = {
+        "status": "running",
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "output_dir": str(batch_dir),
+        "task_count": len(task_records),
+        "selected_task_count": len(task_records),
+        "tasks": [],
+    }
+    if manifest_path:
+        _write_runner_manifest(manifest_path, manifest)
+        print(
+            json.dumps(
+                {
+                    "event": "sequential.start",
+                    "output_dir": str(batch_dir),
+                    "task_count": len(task_records),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+
+    results: list[IsmartGenerationResult] = []
+    task_entries: list[dict[str, Any]] = []
+    for selected_index, record in enumerate(task_records, start=1):
+        task = record["task"]
+        source_index = int(record.get("source_index") or selected_index)
+        output_index = source_index if preserve_source_index else selected_index
+        task_id, lesson_number, lesson_title = task_identity(task)
+        course_level = resolve_course_level(task)
+        if use_batch_dir:
+            run_dir = batch_dir / safe_slug(f"{output_index:03d}-{lesson_number}-{task_id}")
+        else:
+            run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_id)}"
+
+        if config.verbose:
+            print(
+                json.dumps(
+                    {
+                        "event": "task.start",
+                        "index": output_index,
+                        "task_id": task_id,
+                        "lesson_number": lesson_number,
+                        "lesson_title": lesson_title,
+                        "course_level": course_level,
+                        "resolved_profile": course_level,
+                        "output_dir": str(run_dir),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+        try:
+            result = run_ismart_task(task, config, subagents=subagents, run_dir=run_dir)
+            results.append(result)
+            entry = _manifest_entry_from_result(output_index, result)
+            task_entries.append(entry)
+            if config.verbose or write_sequential_manifest:
+                print(
+                    json.dumps(
+                        {
+                            "event": "task.done",
+                            "index": output_index,
+                            "task_id": task_id,
+                            "lesson_number": lesson_number,
+                            "course_level": result.course_level,
+                            "resolved_profile": result.course_level,
+                            "status": result.status,
+                            "output_dir": result.output_dir,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                for material in result.materials:
+                    if material.status in SKIPPED_MATERIAL_STATUSES:
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "task.material_skipped",
+                                    "index": output_index,
+                                    "task_id": task_id,
+                                    "lesson_number": lesson_number,
+                                    "course_level": result.course_level,
+                                    "resolved_profile": result.course_level,
+                                    "material_kind": material.kind,
+                                    "material_status": material.status,
+                                    "reason": _material_skip_reason(material),
+                                    "output_dir": result.output_dir,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+            if stop_on_failure and result.status not in {"approved", "completed_with_skips"}:
+                if manifest_path:
+                    manifest["tasks"] = task_entries
+                    manifest["status"] = "stopped_on_failure"
+                    manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                    _write_runner_manifest(manifest_path, manifest)
+                break
+        except Exception as exc:  # noqa: BLE001 - batch graph should isolate per-task failures when requested.
+            entry = {
+                "index": output_index,
+                "task_id": task_id,
+                "lesson_number": lesson_number,
+                "lesson_title": lesson_title,
+                "course_level": course_level,
+                "resolved_profile": course_level,
+                "status": "error",
+                "output_dir": str(run_dir),
+                "error": str(exc),
+            }
+            task_entries.append(entry)
+            write_json(run_dir / "error.json", entry)
+            if config.verbose or write_sequential_manifest:
+                print(
+                    json.dumps(
+                        {
+                            "event": "task.error",
+                            "index": output_index,
+                            "task_id": task_id,
+                            "lesson_number": lesson_number,
+                            "course_level": course_level,
+                            "resolved_profile": course_level,
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+            if stop_on_error:
+                if manifest_path:
+                    manifest["tasks"] = task_entries
+                    manifest["status"] = "stopped_on_error"
+                    manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                    _write_runner_manifest(manifest_path, manifest)
+                break
+            if not write_sequential_manifest:
+                raise
+        finally:
+            if manifest_path:
+                manifest["tasks"] = task_entries
+                _write_runner_manifest(manifest_path, manifest)
+
+    if use_batch_dir and not write_sequential_manifest:
+        write_batch_manifest(batch_dir, results)
+    if manifest_path:
+        manifest["tasks"] = task_entries
+        manifest["status"] = _overall_entries_status(task_entries)
+        manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        _write_runner_manifest(manifest_path, manifest)
+        print(
+            json.dumps(
+                {
+                    "event": "sequential.done",
+                    "status": manifest["status"],
+                    "output_dir": str(batch_dir),
+                    "manifest": str(manifest_path),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    return {
+        "results": results,
+        "task_entries": task_entries,
+        "manifest_path": str(manifest_path) if manifest_path else None,
+    }
+
+
 def _build_task_subagents(
     *,
     subagents: Mapping[str, Any] | None,
@@ -320,6 +569,84 @@ def _build_task_subagents(
     if subagents is not None:
         return subagents
     raise ValueError("Either subagents or subagent_factory must be provided.")
+
+
+def _manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "index": index,
+        "task_id": result.task_id,
+        "lesson_number": result.lesson_number,
+        "lesson_title": result.lesson_title,
+        "course_level": result.course_level,
+        "resolved_profile": result.course_level,
+        "status": result.status,
+        "output_dir": result.output_dir,
+        "materials": [
+            {
+                "kind": material.kind,
+                "status": material.status,
+                "iterations": material.iterations,
+                "validation_issues": list(material.validation_issues),
+                **(
+                    {"skip_reason": _material_skip_reason(material)}
+                    if material.status in SKIPPED_MATERIAL_STATUSES
+                    else {}
+                ),
+            }
+            for material in result.materials
+        ],
+        "package_validation": {
+            "approved": result.package_validation.approved,
+            "issues": result.package_validation.issues,
+        },
+    }
+    skipped_materials = [
+        {
+            "kind": material.kind,
+            "status": material.status,
+            "reason": _material_skip_reason(material),
+        }
+        for material in result.materials
+        if material.status in SKIPPED_MATERIAL_STATUSES
+    ]
+    if skipped_materials:
+        entry["skipped_materials"] = skipped_materials
+    return entry
+
+
+def _write_runner_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    _update_runner_manifest_counts(manifest)
+    write_json(path, manifest)
+
+
+def _update_runner_manifest_counts(manifest: dict[str, Any]) -> None:
+    entries = manifest.get("tasks") or []
+    manifest["generated_count"] = sum(1 for entry in entries if entry.get("status") not in {"skipped", "error"})
+    manifest["approved_count"] = sum(1 for entry in entries if entry.get("status") == "approved")
+    manifest["skipped_count"] = sum(1 for entry in entries if entry.get("status") == "skipped")
+    manifest["completed_with_skips_count"] = sum(1 for entry in entries if entry.get("status") == "completed_with_skips")
+    manifest["skipped_material_count"] = sum(len(entry.get("skipped_materials") or []) for entry in entries)
+    manifest["error_count"] = sum(1 for entry in entries if entry.get("status") == "error")
+    manifest["failed_count"] = sum(
+        1 for entry in entries if entry.get("status") not in {"approved", "skipped", "completed_with_skips", "error"}
+    )
+
+
+def _overall_entries_status(entries: list[dict[str, Any]]) -> str:
+    if any(entry.get("status") == "error" for entry in entries):
+        return "has_errors"
+    if any(entry.get("status") not in {"approved", "skipped", "completed_with_skips"} for entry in entries):
+        return "has_failures"
+    if any(entry.get("status") in {"skipped", "completed_with_skips"} for entry in entries):
+        return "completed_with_skips"
+    return "approved"
+
+
+def _material_skip_reason(material: MaterialResult) -> str:
+    reason = (material.generation_artifacts or {}).get("skip_reason")
+    if reason:
+        return str(reason)
+    return str(material.agent_notes[0]) if material.agent_notes else ""
 
 
 def format_agent_response(results: list[IsmartGenerationResult]) -> str:
@@ -352,6 +679,7 @@ def _build_generation_config(
 ) -> IsmartGenerationConfig:
     output_root = Path(str(context.get("output") or DEFAULT_OUTPUT_ROOT))
     return IsmartGenerationConfig(
+        prompts_dir=Path(str(context["prompts_dir"])) if context.get("prompts_dir") else IsmartGenerationConfig().prompts_dir,
         output_root=output_root,
         max_generation_iterations=_int_context(context, "max_generation_iterations", 3),
         max_package_repair_iterations=_int_context(context, "max_package_repair_iterations", 2),
@@ -359,7 +687,26 @@ def _build_generation_config(
         generation_target=_optional_str(context.get("generation_target")),
         verbose=bool(context.get("verbose", False)),
         langchain_config=langchain_config or {},
+        previous_lessons_context=_context_list_of_dicts(
+            context.get("previous_lessons_context", context.get("previous_lesson_context"))
+        ),
     )
+
+
+def _context_list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, dict):
+        return [dict(value)]
+    if not isinstance(value, list):
+        return [{"content": str(value)}]
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            result.append(dict(item))
+        elif item is not None and str(item).strip():
+            result.append({"content": str(item)})
+    return result
 
 
 def _int_context(context: dict[str, Any], key: str, default: int) -> int:
@@ -367,6 +714,23 @@ def _int_context(context: dict[str, Any], key: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _string_set(value: Any) -> set[str]:
+    if value is None or value == "":
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        return {str(item) for item in value if str(item).strip()}
+    return {str(value)}
 
 
 def _optional_str(value: Any) -> str | None:

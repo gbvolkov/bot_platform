@@ -1,27 +1,146 @@
 ---
 skill_id: practice_guidance_generation
-source_data: "PracticeGuidanceInput"
-source_level: "approved lesson output"
+source_data: PracticeGuidanceInput
+source_level: approved lesson output
+profile: advanced
 ---
 
 # Указания к практической работе: prompt/skill
 
 ## Назначение
-Отдельный ученический материал с пошаговыми указаниями к уже подготовленной практике продвинутого уровня.
 
-## Входные данные
-- Получай только `PracticeGuidanceInput`.
-- Не используй raw HTML практики или теории.
-- Основной источник по заданиям: `approved_materials.practice.practice_instances` и `practice_tasks`.
-- Теоретический блок строится по `theory_brief_source.sections` и references.
+Сгенерируй отдельный ученический материал "Указания к практической работе" для одного занятия Python-трека.
 
-## Правила
-1. Не меняй и не реконструируй практические задания.
-2. `module_tasks` строятся только по `practice_tasks`.
-3. Для каждого этапа создай алгоритм выполнения и один аналогичный разобранный пример.
-4. Разобранный пример должен быть похожим по методу, но не должен подменять задания модуля.
-5. L3 допускается только если соответствующие L3 tasks есть в approved practice.
-6. Для L3 сохраняй самостоятельность выбора подхода: алгоритм общий, без готового решения задания модуля.
-7. Не показывай ключи, исправленный код, внутренние поля решений/пояснений, внутренние имена полей, JSON/process wording, SHA или локальные пути.
-8. Если не хватает теории, референса или реперного значения, запиши это в `requires_check`, не выдумывай.
-9. Верни только structured output `PracticeGuidanceArtifact`.
+Это не сами практические задания и не методические рекомендации для преподавателя. Материал объясняет ученику:
+
+- зачем выполняется практика;
+- что нужно вспомнить перед выполнением;
+- как разобрать аналогичный пример;
+- как пошагово выполнить уже утвержденные задания практики;
+- какой результат должен получиться;
+- как этот результат связан с дальнейшим обучением.
+
+## Источник истины
+
+Получай только `PracticeGuidanceInput`.
+
+Не используй raw HTML практики, raw HTML теории, manifest целиком, result целиком, локальные пути, SHA, внутренние логи и validation retry logs.
+
+Практические задания не создаются заново. Основной источник заданий:
+
+- `practice_tasks[]`;
+- `approved_materials.practice.practice_instances`;
+- `approved_materials.practice.practice_templates`.
+
+Краткая теория строится по:
+
+- `theory_brief_source.sections[]`, если они есть;
+- `references.requirements[]`;
+- `references.reference_examples[]`;
+- `references.goals_and_tasks[]`;
+- `references.donor_materials[]`;
+- `references.template_descriptions[]`.
+
+Связка с предыдущими занятиями строится только по:
+
+- `previous_lessons_context[]`.
+
+Если `previous_lessons_context[]` пустой, не пиши "на прошлом занятии", "ранее вы изучили", "вспомните занятие N" и любые другие ссылки на предыдущие занятия. В этом случае готовь указания автономно, без выдуманной ретроспективы.
+
+Если `previous_lessons_context[]` непустой, используй его для коротких явных связок: "на занятии N вы...", "вспомните, как...". Не добавляй сведения о прошлых занятиях из предположений.
+
+## Обязательная структура документа
+
+Верни structured output `PracticeGuidanceArtifact`.
+
+Заполни структуру так:
+
+1. `header`
+   - `work_title`: название вида "Указания к практической работе N" или близкое по смыслу.
+   - `topic`: тема занятия из `task_meta`, `practice_instances.lesson_goal`, references или входных данных.
+   - `lesson_number`: номер занятия из `task_meta.lesson_number`.
+   - `audience`: обязательное непустое поле. Бери значение из `task_meta.audience`.
+
+2. `goals`
+   - `goal`: цель работы.
+   - `objectives[]`: операциональные задачи ученика: "проектирует", "реализует", "тестирует", "отлаживает", "оптимизирует", "объясняет".
+   - Цель и задачи связывай с `practice_instances.lesson_goal`, `practice_instances.lesson_objectives`, `practice_tasks[]`, `references.goals_and_tasks[]`.
+
+3. `theory_brief`
+   - Это краткая актуализация, а не полный пересказ теории.
+   - Включай только инструменты, необходимые для выполнения текущей практики.
+   - Если `previous_lessons_context[]` непустой, добавь короткую связь с предыдущими занятиями.
+   - Если теоретических данных недостаточно, не выдумывай; оставь компактный блок по доступным references и добавь конкретный пункт в `requires_check`.
+
+4. `methodical_guidance`
+   - `problem_statement`: зачем выполняется практика и какой учебный результат ожидается.
+   - `environment`: Python 3, редактор платформы, стандартная библиотека. Сторонние библиотеки допускаются только если они явно указаны во входе.
+   - `before_start.steps[]`: что проверить перед началом.
+   - `before_start.checkpoint`: короткий контроль готовности.
+   - `stages[]`: этапы выполнения практики.
+
+5. `stages[]`
+   - Строй этапы по уровням и методической близости задач.
+   - `source_task_ids[]` должны ссылаться только на id из `practice_tasks[]`.
+   - Не добавляй новые P-id.
+   - Не удаляй и не переименовывай P-id.
+   - Не меняй порядок и смысл утвержденных задач.
+   - Для advanced используй L3 только если L3-задачи есть во входе.
+
+6. `worked_example`
+   - Для каждого этапа дай один разобранный аналогичный пример того же типа.
+   - Пример должен быть похож по методу, но отличаться сценарием, значениями и формулировкой от задач практики, references и теории.
+   - Для примера допустима петля "условие -> код/действие -> результат -> правило".
+   - Не копируй пример из теории дословно.
+   - Не превращай пример в ответ на одну из задач практики.
+
+7. `module_tasks[]`
+   - Используй только student-facing поля из `practice_tasks[]`.
+   - Не показывай `hidden_solution`, `teacher_explanation`, внутренние ключи и эталоны.
+   - Для задач на поиск ошибки не называй саму ошибку в условии и не подсказывай точную правку.
+   - Если задача содержит `faulty_code_display`, используй его как learner-facing код. Raw `faulty_code` не выводи, если вместо него есть `faulty_code_display`.
+
+8. `result_requirements`
+   - Обязательный непустой раздел.
+   - `deliverable`: что ученик должен получить после выполнения практики.
+   - `criteria[]`: минимум 2 проверяемых критерия результата без раскрытия ключей.
+
+9. `self_check_questions[]`
+   - Обязательный непустой раздел.
+   - Минимум 3 вопроса для самопроверки без ответов и без ключей.
+
+10. `requires_check[]`
+   - Только конкретные пункты, которые действительно невозможно подтвердить по входным данным.
+   - Не пиши процессные фразы вроде "нужно проверить learner-facing текст".
+   - Если `previous_lessons_context[]` пустой, не добавляй requires_check только из-за отсутствия ссылок на прошлые занятия.
+
+11. `consistency_notes[]` и `agent_notes[]`
+   - Внутренние заметки о согласованности источников.
+   - Не выводи их как ученический контент.
+
+## Привязка входных данных к содержанию
+
+- Шапка: `task_meta.lesson_number`, `task_meta.lesson_title`, `approved_materials.practice.practice_instances.lesson_goal`.
+- Аудитория: `task_meta.audience`.
+- Количество и состав задач: ровно `practice_tasks[]`; количество берется из утвержденной практики, а не из общей нормы.
+- Цели и задачи: `approved_materials.practice.practice_instances.lesson_goal`, `lesson_objectives`, `references.goals_and_tasks[]`.
+- Краткая теория: `theory_brief_source.sections[]` и references.
+- Связка с прошлым: только `previous_lessons_context[]`.
+- Практические действия: `practice_tasks[].student_condition`, `starter_code`, `faulty_code_display`, `input_requirements`, `output_requirements`, `checks`, `manual_checks`.
+- Методическая логика и подсказки: references и approved practice artifacts.
+- Фактура/данные: `references.donor_materials[]`; если фактуры нет, не выдумывай.
+
+## Запреты
+
+- Не раскрывай ключи, исправленный код, hidden_solution, teacher_explanation.
+- Не показывай внутренние имена JSON-полей, SHA, локальные пути, process wording.
+- Не реконструируй задания.
+- Не добавляй задания сверх `practice_tasks[]`.
+- Не дублируй raw HTML.
+- Не делай ссылки на предыдущие занятия при пустом `previous_lessons_context[]`.
+- Не используй общую норму количества задач как требование к конкретному занятию.
+- Не возвращай пустые обязательные разделы: `result_requirements.deliverable`, `result_requirements.criteria[]`, `self_check_questions[]`, `header.audience`.
+
+## Правило результата
+
+Верни только structured output `PracticeGuidanceArtifact`.

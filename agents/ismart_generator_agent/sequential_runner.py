@@ -3,22 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from agents.utils import ModelType, get_llm
+from agents.utils import ModelType
 
-from .agent import load_payload_from_path_or_text, load_payload_from_url, tasks_from_payload
+from .agent import initialize_agent, load_payload_from_path_or_text, load_payload_from_url, tasks_from_payload
 from .context import task_identity
-from .contracts import IsmartGenerationConfig, IsmartGenerationResult
-from .observability import build_callback_handlers
 from .profiles import resolve_course_level
-from .runtime import run_ismart_task
-from .subagents import build_subagent_registry
-from .task_skip import SKIPPED_MATERIAL_STATUSES, practice_task_count
-from .writer import safe_slug, write_json
+from .task_skip import practice_task_count
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,220 +55,68 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
     args = build_parser().parse_args(argv)
-    payload = load_payload_from_url(args.input_url) if args.input_url else load_payload_from_path_or_text(args.input)
-    all_tasks = tasks_from_payload(payload)
-    source_indexes = {id(task): index for index, task in enumerate(all_tasks, start=1)}
-    tasks = select_tasks(all_tasks, args)
-    if args.limit is not None:
-        tasks = tasks[: args.limit]
-
     if args.dry_run:
+        payload = load_payload_from_url(args.input_url) if args.input_url else load_payload_from_path_or_text(args.input)
+        all_tasks = tasks_from_payload(payload)
+        tasks = select_tasks(all_tasks, args)
+        if args.limit is not None:
+            tasks = tasks[: args.limit]
         print_selected_tasks(tasks)
         return 0
 
     provider = parse_provider(args.provider)
-    callback_handlers = build_callback_handlers(f"ismart_generator_agent_{time.strftime('%Y%m%d%H%M')}")
-
-    output_root = Path(args.output)
-    batch_dir = output_root / (args.run_name or f"sequential_{timestamp()}")
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = batch_dir / "sequential_manifest.json"
-
-    config = IsmartGenerationConfig(
-        prompts_dir=Path(args.prompts_dir) if args.prompts_dir else IsmartGenerationConfig().prompts_dir,
-        output_root=batch_dir,
-        max_generation_iterations=args.max_generation_iterations,
-        max_package_repair_iterations=args.max_package_repair_iterations,
-        max_reference_chars=args.max_reference_chars,
-        generation_target=args.generation_target,
-        verbose=bool(args.verbose),
-        langchain_config={"callbacks": callback_handlers},
+    request = build_graph_request(args)
+    graph = initialize_agent(
+        provider=provider,
+        use_platform_store=False,
+        streaming=False,
+        model_mode=args.model_mode,
     )
-
-    print(
-        json.dumps(
-            {
-                "event": "sequential.start",
-                "output_dir": str(batch_dir),
-                "task_count": len(tasks),
-                "provider": provider.value,
-                "model_mode": args.model_mode,
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
+    state = graph.invoke(
+        {"messages": []},
+        config={
+            "configurable": {"thread_id": f"ismart-generator-sequential-{timestamp()}"},
+            "recursion_limit": 100,
+        },
+        context=request,
     )
+    if state.get("error"):
+        print(f"error: {state['error']}", file=sys.stderr)
+        return 1
+    task_entries = state.get("task_entries") or []
+    status = overall_status(task_entries)
+    return 0 if successful_overall_status(status) else 1
 
-    manifest: dict[str, Any] = _load_existing_manifest(manifest_path) if args.preserve_source_index else {}
-    if not isinstance(manifest.get("tasks"), list):
-        manifest["tasks"] = []
-    manifest.update({
-        "status": "running",
-        "started_at": manifest.get("started_at") or datetime.now().isoformat(timespec="seconds"),
-        "last_rerun_started_at": datetime.now().isoformat(timespec="seconds") if args.preserve_source_index else None,
-        "output_dir": str(batch_dir),
-        "input": args.input,
-        "input_url": args.input_url,
-        "provider": provider.value,
-        "model_mode": args.model_mode,
-        "task_count": manifest.get("task_count") or len(tasks),
-        "selected_task_count": len(tasks),
-    })
-    if not args.preserve_source_index:
-        manifest["last_rerun_started_at"] = None
-        manifest["tasks"] = []
-    write_runner_manifest(batch_dir, manifest)
 
-    for selected_index, task in enumerate(tasks, start=1):
-        index = source_indexes.get(id(task), selected_index) if args.preserve_source_index else selected_index
-        task_id, lesson_number, lesson_title = task_identity(task)
-        course_level = resolve_course_level(task)
-        run_dir = batch_dir / safe_slug(f"{index:03d}-{lesson_number}-{task_id}")
-
-        print(
-            json.dumps(
-                {
-                    "event": "task.start",
-                    "index": index,
-                    "task_id": task_id,
-                    "lesson_number": lesson_number,
-                    "lesson_title": lesson_title,
-                    "course_level": course_level,
-                    "resolved_profile": course_level,
-                    "output_dir": str(run_dir),
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-
-        try:
-            task_llm = get_llm(
-                model=args.model_mode,
-                provider=provider.value,
-                temperature=0.2,
-                streaming=False,
-            )
-            subagents = build_subagent_registry(task_llm)
-            if args.verbose:
-                print(
-                    json.dumps(
-                        {
-                            "event": "task.subagents.reset",
-                            "index": index,
-                            "task_id": task_id,
-                            "lesson_number": lesson_number,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
-            result = run_ismart_task(
-                task,
-                config,
-                subagents=subagents,
-                run_dir=run_dir,
-            )
-            entry = manifest_entry_from_result(index, result)
-            upsert_manifest_entry(manifest, entry, replace=args.preserve_source_index)
-            print(
-                json.dumps(
-                    {
-                        "event": "task.done",
-                        "index": index,
-                        "task_id": task_id,
-                        "lesson_number": lesson_number,
-                        "course_level": result.course_level,
-                        "resolved_profile": result.course_level,
-                        "status": result.status,
-                        "output_dir": result.output_dir,
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            for material in result.materials:
-                if material.status in SKIPPED_MATERIAL_STATUSES:
-                    print(
-                        json.dumps(
-                            {
-                                "event": "task.material_skipped",
-                                "index": index,
-                                "task_id": task_id,
-                                "lesson_number": lesson_number,
-                                "course_level": result.course_level,
-                                "resolved_profile": result.course_level,
-                                "material_kind": material.kind,
-                                "material_status": material.status,
-                                "reason": _material_skip_reason(material),
-                                "output_dir": result.output_dir,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
-            if args.stop_on_failure and result.status not in {"approved", "completed_with_skips"}:
-                manifest["status"] = "stopped_on_failure"
-                write_runner_manifest(batch_dir, manifest)
-                return 1
-        except KeyboardInterrupt:
-            manifest["status"] = "interrupted"
-            manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
-            write_runner_manifest(batch_dir, manifest)
-            raise
-        except Exception as exc:  # noqa: BLE001 - runner should isolate per-task failures.
-            error_entry = {
-                "index": index,
-                "task_id": task_id,
-                "lesson_number": lesson_number,
-                "lesson_title": lesson_title,
-                "course_level": course_level,
-                "resolved_profile": course_level,
-                "status": "error",
-                "output_dir": str(run_dir),
-                "error": str(exc),
-            }
-            upsert_manifest_entry(manifest, error_entry, replace=args.preserve_source_index)
-            write_json(run_dir / "error.json", error_entry)
-            print(
-                json.dumps(
-                    {
-                        "event": "task.error",
-                        "index": index,
-                        "task_id": task_id,
-                        "lesson_number": lesson_number,
-                        "course_level": course_level,
-                        "resolved_profile": course_level,
-                        "error": str(exc),
-                    },
-                    ensure_ascii=False,
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
-            if args.stop_on_error:
-                manifest["status"] = "stopped_on_error"
-                write_runner_manifest(batch_dir, manifest)
-                return 1
-        finally:
-            write_runner_manifest(batch_dir, manifest)
-
-    manifest["status"] = overall_status(manifest["tasks"])
-    manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
-    write_runner_manifest(batch_dir, manifest)
-    print(
-        json.dumps(
-            {
-                "event": "sequential.done",
-                "status": manifest["status"],
-                "output_dir": str(batch_dir),
-                "manifest": str(batch_dir / "sequential_manifest.json"),
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
-    return 0 if successful_overall_status(str(manifest["status"])) else 1
+def build_graph_request(args: argparse.Namespace) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "output": args.output,
+        "lesson_numbers": [str(item) for item in (args.lesson_number or [])],
+        "task_ids": [str(item) for item in (args.task_id or [])],
+        "max_generation_iterations": args.max_generation_iterations,
+        "max_package_repair_iterations": args.max_package_repair_iterations,
+        "max_reference_chars": args.max_reference_chars,
+        "run_name": args.run_name or f"sequential_{timestamp()}",
+        "preserve_source_index": bool(args.preserve_source_index),
+        "stop_on_error": bool(args.stop_on_error),
+        "stop_on_failure": bool(args.stop_on_failure),
+        "verbose": bool(args.verbose),
+    }
+    if args.input:
+        request["input"] = args.input
+    if args.input_url:
+        request["input_url"] = args.input_url
+    if args.from_lesson is not None:
+        request["from_lesson"] = args.from_lesson
+    if args.to_lesson is not None:
+        request["to_lesson"] = args.to_lesson
+    if args.limit is not None:
+        request["limit"] = args.limit
+    if args.generation_target:
+        request["generation_target"] = args.generation_target
+    if args.prompts_dir:
+        request["prompts_dir"] = args.prompts_dir
+    return request
 
 
 def select_tasks(tasks: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -301,76 +142,6 @@ def select_tasks(tasks: list[dict[str, Any]], args: argparse.Namespace) -> list[
     return selected
 
 
-def manifest_entry_from_result(index: int, result: IsmartGenerationResult) -> dict[str, Any]:
-    entry = {
-        "index": index,
-        "task_id": result.task_id,
-        "lesson_number": result.lesson_number,
-        "lesson_title": result.lesson_title,
-        "course_level": result.course_level,
-        "resolved_profile": result.course_level,
-        "status": result.status,
-        "output_dir": result.output_dir,
-        "materials": [
-            {
-                "kind": material.kind,
-                "status": material.status,
-                "iterations": material.iterations,
-                "validation_issues": list(material.validation_issues),
-                **({"skip_reason": _material_skip_reason(material)} if material.status in SKIPPED_MATERIAL_STATUSES else {}),
-            }
-            for material in result.materials
-        ],
-        "package_validation": {
-            "approved": result.package_validation.approved,
-            "issues": result.package_validation.issues,
-        },
-    }
-    skipped_materials = [
-        {
-            "kind": material.kind,
-            "status": material.status,
-            "reason": _material_skip_reason(material),
-        }
-        for material in result.materials
-        if material.status in SKIPPED_MATERIAL_STATUSES
-    ]
-    if skipped_materials:
-        entry["skipped_materials"] = skipped_materials
-        entry["practice_task_count"] = 0
-    return entry
-
-
-def write_runner_manifest(batch_dir: Path, manifest: dict[str, Any]) -> None:
-    update_runner_manifest_counts(manifest)
-    write_json(batch_dir / "sequential_manifest.json", manifest)
-
-
-def _load_existing_manifest(manifest_path: Path) -> dict[str, Any]:
-    if not manifest_path.exists():
-        return {}
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def upsert_manifest_entry(manifest: dict[str, Any], entry: dict[str, Any], *, replace: bool) -> None:
-    tasks = manifest.setdefault("tasks", [])
-    if not replace:
-        tasks.append(entry)
-        return
-    for index, existing in enumerate(tasks):
-        if (
-            str(existing.get("task_id") or "") == str(entry.get("task_id") or "")
-            and str(existing.get("lesson_number") or "") == str(entry.get("lesson_number") or "")
-        ):
-            tasks[index] = entry
-            return
-    tasks.append(entry)
-
-
 def overall_status(entries: list[dict[str, Any]]) -> str:
     if any(entry.get("status") == "error" for entry in entries):
         return "has_errors"
@@ -381,30 +152,8 @@ def overall_status(entries: list[dict[str, Any]]) -> str:
     return "approved"
 
 
-def update_runner_manifest_counts(manifest: dict[str, Any]) -> None:
-    entries = manifest.get("tasks") or []
-    manifest["generated_count"] = sum(1 for entry in entries if entry.get("status") not in {"skipped", "error"})
-    manifest["approved_count"] = sum(1 for entry in entries if entry.get("status") == "approved")
-    manifest["skipped_count"] = sum(1 for entry in entries if entry.get("status") == "skipped")
-    manifest["completed_with_skips_count"] = sum(1 for entry in entries if entry.get("status") == "completed_with_skips")
-    manifest["skipped_material_count"] = sum(len(entry.get("skipped_materials") or []) for entry in entries)
-    manifest["error_count"] = sum(1 for entry in entries if entry.get("status") == "error")
-    manifest["failed_count"] = sum(
-        1 for entry in entries if entry.get("status") not in {"approved", "skipped", "completed_with_skips", "error"}
-    )
-
-
 def successful_overall_status(status: str) -> bool:
     return status in {"approved", "completed_with_skips"}
-
-
-def _material_skip_reason(material: Any) -> str:
-    artifacts = getattr(material, "generation_artifacts", None) or {}
-    reason = artifacts.get("skip_reason")
-    if reason:
-        return str(reason)
-    notes = getattr(material, "agent_notes", None) or []
-    return str(notes[0]) if notes else ""
 
 
 def print_selected_tasks(tasks: list[dict[str, Any]]) -> None:

@@ -115,25 +115,34 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
     "practice_guidance": MaterialSpec(
         kind="practice_guidance",
         material_type="Указания к практической работе",
-        agent_type="PracticeGuidanceAgent",
+        agent_type="PracticeGuidanceArtifactAgent",
         prompt_files=_files(PRACTICE_GUIDANCE_PROMPT),
         validator_kind="practice_guidance",
         dependency_kinds=("practice",),
         reference_fields=("requirements", "reference_examples", "goals_and_tasks", "donor_materials", "template_descriptions"),
-        json_field_labels=("approved practice_instances", "approved theory public_sections", "references"),
+        json_field_labels=(
+            "PracticeGuidanceInput.practice_tasks",
+            "PracticeGuidanceInput.approved_materials.practice.practice_instances",
+            "PracticeGuidanceInput.theory_brief_source.sections",
+            "PracticeGuidanceInput.previous_lessons_context",
+            "PracticeGuidanceInput.references",
+        ),
         prompt_addendum=(
-            "Создай отдельный материал указаний к практической работе по PracticeGuidanceInput. "
-            "Не используй raw HTML и не реконструируй практические задания. Основной источник заданий - "
-            "approved practice_instances/practice_tasks из входной структуры. Раздел краткой теории строится "
-            "по approved theory public_sections, если они есть, иначе по references с отметкой requires_check. "
-            "Не показывай внутренние поля решений/пояснений, corrected code, внутренние имена полей, JSON/process wording, SHA, "
-            "локальные пути или служебные данные. Возвращай только PracticeGuidanceArtifact."
+            "Создай отдельный student-facing материал указаний к практической работе по PracticeGuidanceInput. "
+            "Структура: шапка; зачем/цели/задачи/ожидаемые результаты; краткая актуализация; "
+            "разбор аналогичного примера; шаги выполнения практики; итог и переход. "
+            "Не реконструируй практические задания: используй только practice_tasks и approved practice_instances. "
+            "Обязательно заполни header.audience из PracticeGuidanceInput.task_meta.audience, "
+            "result_requirements.deliverable, result_requirements.criteria и self_check_questions. "
+            "Связку с предыдущими занятиями делай только по previous_lessons_context; если массив пуст, не выдумывай ссылки на прошлые занятия. "
+            "Не раскрывай ключи, corrected code, hidden_solution, teacher_explanation, внутренние имена полей, SHA, локальные пути и process wording."
         ),
         validation_policy_addendum=(
             "Validate practice_guidance against structured PracticeGuidanceArtifact and PracticeGuidanceInput only. "
             "Do not validate raw HTML. Reject learner-facing leakage of keys, internal answer/explanation fields, "
             "corrected code, internal field names, JSON/process wording, SHA, or local paths. "
-            "Approve only if module_tasks correspond to PracticeGuidanceInput.practice_tasks and worked examples do not replace module tasks."
+            "Approve only if module_tasks correspond to PracticeGuidanceInput.practice_tasks, worked examples do not replace module tasks, "
+            "and previous-lesson links are based only on non-empty PracticeGuidanceInput.previous_lessons_context."
         ),
         controller_policy_addendum=(
             "Overrule validator objections about rendered HTML structure for practice_guidance; HTML is deterministic renderer output. "
@@ -303,6 +312,7 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         dependency_kinds=(
             "theory",
             "practice",
+            "practice_guidance",
             "mr_theory",
             "mr_practice",
             "self_work",

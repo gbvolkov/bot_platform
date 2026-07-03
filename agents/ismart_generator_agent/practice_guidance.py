@@ -11,10 +11,19 @@ from pydantic import BaseModel
 
 from .attempts import attempt_timestamp
 from .context import build_validation_prompt, validation_result_summary
-from .contracts import IsmartGenerationConfig, MaterialSpec, ReferenceDocument, ReferenceBundle, ValidationResult
-from .profiles import prompts_dir_for_level
+from .context import task_identity
+from .contracts import (
+    IsmartGenerationConfig,
+    MaterialResult,
+    MaterialSpec,
+    ReferenceDocument,
+    ReferenceBundle,
+    ValidationResult,
+)
+from .profiles import prompts_dir_for_level, resolve_course_class
 from .registry import get_material_spec
 from .schemas import MaterialValidationDecision, PracticeGuidanceArtifact
+from .sources import reference_summary
 from .sources import read_prompt_files
 from .trace import TraceLogger
 from .validators import RuleValidator
@@ -104,6 +113,7 @@ def run_practice_guidance_postprocess(
             attempt=attempt,
             previous_artifact=previous_artifact,
             previous_validation=previous_validation,
+            previous_lessons_context=[],
         )
         latest_payload = input_payload
         prefix = f"{attempt_timestamp()}__attempt_{attempt:02d}__practice_guidance"
@@ -197,6 +207,216 @@ def run_practice_guidance_postprocess(
     raise RuntimeError(f"practice_guidance failed after {config.max_generation_iterations} attempts: {previous_issues}")
 
 
+def run_practice_guidance_material(
+    *,
+    task: dict[str, Any],
+    spec: MaterialSpec,
+    config: IsmartGenerationConfig,
+    subagents: Mapping[str, Any],
+    references: ReferenceBundle,
+    materials: list[MaterialResult],
+    output_dir: Path,
+    attempts_dir: Path,
+    trace: TraceLogger | None = None,
+    rule_validator: RuleValidator | None = None,
+) -> MaterialResult:
+    trace = trace or TraceLogger()
+    trace.log(
+        "worker.start",
+        kind=spec.kind,
+        agent=PRACTICE_GUIDANCE_AGENT,
+        dependency_kinds=list(spec.dependency_kinds),
+        dependencies=[{"kind": item.kind, "status": item.status} for item in materials if item.kind in spec.dependency_kinds],
+    )
+    prompt_contents = read_prompt_files(config, spec.prompt_files)
+    trace.log("worker.prompt_files_loaded", kind=spec.kind, prompt_files=list(spec.prompt_files))
+
+    invoker = StructuredSubagentInvoker(
+        subagents,
+        trace=trace,
+        langchain_config=config.langchain_config,
+    )
+    validator = rule_validator or RuleValidator()
+    material_attempts_dir = attempts_dir / PRACTICE_GUIDANCE_KIND
+    material_attempts_dir.mkdir(parents=True, exist_ok=True)
+
+    previous_artifact: dict[str, Any] | None = None
+    previous_validation: ValidationResult | None = None
+    previous_issues: list[str] = []
+    last_content = ""
+    last_artifact: dict[str, Any] = {}
+    last_input: dict[str, Any] = {}
+    last_validation: ValidationResult | None = None
+
+    for attempt in range(1, config.max_generation_iterations + 1):
+        trace.log(
+            "worker.attempt.start",
+            kind=spec.kind,
+            attempt=attempt,
+            max_attempts=config.max_generation_iterations,
+            previous_content_chars=len(last_content),
+            previous_issues_count=len(previous_issues),
+        )
+        result_payload = _in_memory_result_payload(
+            task=task,
+            course_level=config.course_level,
+            output_dir=output_dir,
+            materials=materials,
+            references=references,
+        )
+        input_payload = build_practice_guidance_input(
+            lesson_output_dir=output_dir,
+            result=result_payload,
+            attempt=attempt,
+            previous_artifact=previous_artifact,
+            previous_validation=previous_validation,
+            previous_lessons_context=config.previous_lessons_context,
+        )
+        last_input = input_payload
+        prefix = f"{attempt_timestamp()}__attempt_{attempt:02d}__practice_guidance"
+        write_json(material_attempts_dir / f"{prefix}.input.json", input_payload)
+
+        artifact_model = invoker.invoke(
+            PRACTICE_GUIDANCE_AGENT,
+            system=build_practice_guidance_system_prompt(),
+            prompt=build_practice_guidance_prompt(
+                prompt_contents=prompt_contents,
+                input_payload=input_payload,
+                previous_issues=previous_issues,
+            ),
+            schema=PracticeGuidanceArtifact,
+        )
+        if not isinstance(artifact_model, PracticeGuidanceArtifact):
+            raise TypeError(
+                f"{PRACTICE_GUIDANCE_AGENT} returned {type(artifact_model)!r}, expected PracticeGuidanceArtifact"
+            )
+        artifact = _model_to_dict(artifact_model)
+        last_artifact = artifact
+        write_json(
+            material_attempts_dir / f"{prefix}.artifact.json",
+            {"attempt": attempt, "practice_guidance_artifact": artifact},
+        )
+
+        content = render_practice_guidance_html(artifact)
+        last_content = content
+        artifacts = {
+            "practice_guidance_input": input_payload,
+            "practice_guidance_artifact": artifact,
+        }
+        rule_result = validator.validate_material(content, spec, task)
+        trace.log(
+            "worker.rule_validation.done",
+            kind=spec.kind,
+            attempt=attempt,
+            approved=rule_result.approved,
+            issues=rule_result.issues,
+        )
+        llm_result = _validate_practice_guidance(
+            invoker=invoker,
+            config=config,
+            spec=spec,
+            task=task,
+            prompt_contents=prompt_contents,
+            input_payload=input_payload,
+            content=content,
+            artifacts=artifacts,
+            rule_result=rule_result,
+        )
+        validation = rule_result.merge(llm_result)
+        last_validation = validation
+        trace.log(
+            "worker.validation.merged",
+            kind=spec.kind,
+            attempt=attempt,
+            approved=validation.approved,
+            issues=validation.issues,
+        )
+        write_json(
+            material_attempts_dir / f"{prefix}.validation.json",
+            {
+                "attempt": attempt,
+                "rule_validation": _validation_to_json(rule_result),
+                "llm_validation": _validation_to_json(llm_result),
+                "merged_validation": _validation_to_json(validation),
+            },
+        )
+
+        if validation.approved:
+            trace.log("worker.approved", kind=spec.kind, attempt=attempt, content_chars=len(content))
+            return MaterialResult(
+                kind=spec.kind,
+                material_type=spec.material_type,
+                agent_type=PRACTICE_GUIDANCE_AGENT,
+                status="approved",
+                iterations=attempt,
+                content=content,
+                prompt_files=spec.prompt_files,
+                validation_issues_by_block=validation.issues_by_block,
+                validation_passed_blocks=validation.passed_blocks,
+                agent_notes=[str(item) for item in artifact.get("agent_notes") or []],
+                generation_artifacts=artifacts,
+            )
+
+        previous_artifact = artifact
+        previous_validation = validation
+        previous_issues = list(validation.issues)
+        if attempt < config.max_generation_iterations:
+            trace.log("worker.retry", kind=spec.kind, next_attempt=attempt + 1, issues=previous_issues)
+
+    failure_context = {
+        "status": "failed",
+        "output_dir": str(output_dir),
+        "attempts": config.max_generation_iterations,
+        "last_input": last_input,
+        "issues": previous_issues,
+    }
+    write_json(material_attempts_dir / "practice_guidance.failed.json", failure_context)
+    trace.log("worker.failed", kind=spec.kind, issues=previous_issues)
+    return MaterialResult(
+        kind=spec.kind,
+        material_type=spec.material_type,
+        agent_type=PRACTICE_GUIDANCE_AGENT,
+        status="failed",
+        iterations=config.max_generation_iterations,
+        content=last_content,
+        prompt_files=spec.prompt_files,
+        validation_issues=previous_issues,
+        validation_issues_by_block=last_validation.issues_by_block if last_validation else [],
+        validation_passed_blocks=last_validation.passed_blocks if last_validation else [],
+        generation_artifacts={
+            "practice_guidance_input": last_input,
+            "practice_guidance_artifact": last_artifact,
+        },
+    )
+
+
+def _in_memory_result_payload(
+    *,
+    task: dict[str, Any],
+    course_level: str,
+    output_dir: Path,
+    materials: list[MaterialResult],
+    references: ReferenceBundle,
+) -> dict[str, Any]:
+    task_id, lesson_number, lesson_title = task_identity(task)
+    course_class = resolve_course_class(task)
+    return {
+        "task_id": task_id,
+        "lesson_number": lesson_number,
+        "lesson_title": lesson_title,
+        "course_class": course_class,
+        "audience": _audience_for_task(task, course_class=course_class),
+        "course_level": course_level,
+        "resolved_profile": course_level,
+        "status": "approved",
+        "output_dir": str(output_dir),
+        "agents_called": [],
+        "prompt_files_used": [],
+        "materials": [item.to_public_json() for item in materials],
+        "references": reference_summary(references),
+    }
+
+
 def build_practice_guidance_input(
     *,
     lesson_output_dir: Path,
@@ -204,6 +424,7 @@ def build_practice_guidance_input(
     attempt: int,
     previous_artifact: dict[str, Any] | None,
     previous_validation: ValidationResult | None,
+    previous_lessons_context: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     practice = _material_by_kind(result, "practice")
     if not practice or practice.get("status") != "approved":
@@ -227,6 +448,8 @@ def build_practice_guidance_input(
     theory_status = "approved" if raw_theory_status == "approved" else ("not_approved" if theory else "missing")
     theory_sections = _theory_public_sections(theory.get("content", "") if theory and theory_status == "approved" else "")
     references = _load_reference_contents(result, source_warnings=source_warnings)
+    previous_context = _normalize_previous_lessons_context(previous_lessons_context)
+    audience = _audience_from_result(result, references)
 
     return {
         "input_version": PRACTICE_GUIDANCE_INPUT_VERSION,
@@ -235,6 +458,8 @@ def build_practice_guidance_input(
             "task_id": str(result.get("task_id") or ""),
             "lesson_number": str(result.get("lesson_number") or ""),
             "lesson_title": str(result.get("lesson_title") or ""),
+            "course_class": str(result.get("course_class") or ""),
+            "audience": audience,
             "course_level": _course_level(result),
             "resolved_profile": _course_level(result),
             "status": str(result.get("status") or ""),
@@ -259,6 +484,14 @@ def build_practice_guidance_input(
             "source": "approved_theory_html_to_text" if theory_sections else "missing",
             "sections": theory_sections,
         },
+        "previous_lessons_context": previous_context,
+        "previous_lessons_context_policy": {
+            "available": bool(previous_context),
+            "usage": (
+                "Use previous_lessons_context for explicit links to earlier lessons only when the array is non-empty. "
+                "If it is empty, write the guidance without references to previous lessons."
+            ),
+        },
         "references": references,
         "source_warnings": source_warnings,
         "retry_context": {
@@ -268,6 +501,92 @@ def build_practice_guidance_input(
             "previous_passed_blocks": list(previous_validation.passed_blocks) if previous_validation else [],
         },
     }
+
+
+def _normalize_previous_lessons_context(value: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        lesson_number = str(item.get("lesson_number") or item.get("number") or "").strip()
+        title = str(item.get("lesson_title") or item.get("title") or "").strip()
+        summary = str(item.get("summary") or item.get("content") or item.get("text") or "").strip()
+        materials = item.get("materials") if isinstance(item.get("materials"), list) else []
+        material_summaries = []
+        for material in materials:
+            if not isinstance(material, dict):
+                continue
+            material_summaries.append(
+                {
+                    "kind": str(material.get("kind") or "").strip(),
+                    "status": str(material.get("status") or "").strip(),
+                    "summary": str(material.get("summary") or material.get("content") or "").strip(),
+                }
+            )
+        normalized.append(
+            {
+                "lesson_number": lesson_number,
+                "lesson_title": title,
+                "summary": summary,
+                "materials": material_summaries,
+            }
+        )
+    return normalized
+
+
+def _audience_for_task(task: dict[str, Any], *, course_class: str | None = None) -> str:
+    lesson = task.get("lesson") if isinstance(task.get("lesson"), dict) else {}
+    course = task.get("course") if isinstance(task.get("course"), dict) else {}
+    module = task.get("module") if isinstance(task.get("module"), dict) else {}
+    content = lesson.get("content") if isinstance(lesson.get("content"), dict) else {}
+    candidates = (
+        lesson.get("audience"),
+        lesson.get("course_class"),
+        lesson.get("class"),
+        lesson.get("grade"),
+        content.get("audience"),
+        course.get("audience"),
+        course.get("grades"),
+        course.get("class"),
+        course.get("grade"),
+        module.get("audience"),
+    )
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return _audience_label_for_course_class(course_class or resolve_course_class(task))
+
+
+def _audience_from_result(result: dict[str, Any], references: dict[str, list[dict[str, Any]]]) -> str:
+    for key in ("audience", "course_class"):
+        text = str(result.get(key) or "").strip()
+        if text:
+            if key == "course_class":
+                return _audience_label_for_course_class(text)
+            return text
+    joined_sources = " ".join(
+        str(item.get("source_name") or item.get("path") or item.get("content") or "")
+        for documents in references.values()
+        for item in documents
+        if isinstance(item, dict)
+    )
+    if re.search(r"\b(10|11)\b", joined_sources):
+        return "Обучающиеся 10–11 классов"
+    if re.search(r"\b(8|9)\b", joined_sources):
+        return "Обучающиеся 8–9 классов"
+    return _audience_label_for_course_class("")
+
+
+def _audience_label_for_course_class(course_class: str) -> str:
+    text = str(course_class or "").strip().lower()
+    if text == "10" or re.search(r"\b(10|11)\b", text):
+        return "Обучающиеся 10–11 классов"
+    if text == "8" or re.search(r"\b(8|9)\b", text):
+        return "Обучающиеся 8–9 классов"
+    return "Обучающиеся курса Python"
 
 
 def build_practice_guidance_system_prompt() -> str:
@@ -298,12 +617,19 @@ PREVIOUS VALIDATION ISSUES:
 
 REQUIREMENTS:
 - Return PracticeGuidanceArtifact structured output only.
+- Fill every required section of PracticeGuidanceArtifact. Empty strings/lists are not allowed for header fields, goals.objectives, result_requirements.deliverable, result_requirements.criteria, or self_check_questions.
+- header.audience must use PracticeGuidanceInput.task_meta.audience.
+- result_requirements.criteria must contain at least 2 learner-facing success criteria.
+- self_check_questions must contain at least 3 learner-facing questions without answers or keys.
 - Use practice_tasks as the source of module tasks.
 - Do not change, replace, merge, split, or reconstruct module tasks.
 - Build stages by level and methodical similarity; source_task_ids must reference practice_tasks ids.
 - Create a worked analogous example for each stage. It must be similar by method but different from the module tasks.
 - Do not reveal keys, corrected code, internal answer/explanation fields, raw field names, JSON/process wording, SHA, or local paths.
+- Use previous_lessons_context for explicit links to previous lessons only when it is non-empty.
+- If previous_lessons_context is empty, do not invent previous-lesson references and write the guidance without them.
 - If exact reference values are unavailable, add a requires_check item instead of inventing them.
+- On retry, preserve previous_passed_blocks and repair only fields mentioned in previous_validation_issues unless a passed block directly depends on a repaired field.
 """.strip()
 
 

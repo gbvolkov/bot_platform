@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 
 from agents.utils import ModelType
 
@@ -41,13 +41,14 @@ def main(argv: list[str] | None = None) -> int:
             streaming=False,
             model_mode=args.model_mode,
         )
-        configurable = _build_configurable(args)
+        request = _build_request(args)
         state = graph.invoke(
-            {"messages": [HumanMessage(content="Run iSMART material generation from CLI.")]},
+            {"messages": []},
             config={
-                "configurable": configurable,
+                "configurable": {"thread_id": f"ismart-generator-cli-{_timestamp()}"},
                 "recursion_limit": 50,
             },
+            context=request,
         )
     except Exception as exc:  # noqa: BLE001 - CLI should print concise failures.
         print(f"error: {exc}", file=sys.stderr)
@@ -69,9 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if all(item.get("status") in {"approved", "skipped", "completed_with_skips"} for item in results) else 1
 
 
-def _build_configurable(args: argparse.Namespace) -> dict[str, Any]:
-    configurable: dict[str, Any] = {
-        "thread_id": f"ismart-generator-cli-{_timestamp()}",
+def _build_request(args: argparse.Namespace) -> dict[str, Any]:
+    request: dict[str, Any] = {
         "output": args.output,
         "max_generation_iterations": args.max_generation_iterations,
         "max_package_repair_iterations": args.max_package_repair_iterations,
@@ -79,16 +79,16 @@ def _build_configurable(args: argparse.Namespace) -> dict[str, Any]:
         "verbose": bool(args.verbose),
     }
     if args.input:
-        configurable["input"] = args.input
+        request["input"] = args.input
     if args.input_url:
-        configurable["input_url"] = args.input_url
+        request["input_url"] = args.input_url
     if args.task_id:
-        configurable["task_id"] = args.task_id
+        request["task_id"] = args.task_id
     if args.lesson_number:
-        configurable["lesson_number"] = str(args.lesson_number)
+        request["lesson_number"] = str(args.lesson_number)
     if args.generation_target:
-        configurable["generation_target"] = args.generation_target
-    return configurable
+        request["generation_target"] = args.generation_target
+    return request
 
 
 def _parse_provider(value: str) -> ModelType:

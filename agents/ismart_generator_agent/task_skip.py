@@ -78,7 +78,7 @@ def project_practice_source_text(task: dict[str, Any]) -> str:
 
 
 def dependency_skip_reason(spec: MaterialSpec, dependency_results: list[MaterialResult]) -> str | None:
-    if spec.kind != "mr_practice":
+    if spec.kind not in {"mr_practice", "practice_guidance"}:
         return None
     for dependency in dependency_results:
         if dependency.kind == "practice" and dependency.status in SKIPPED_MATERIAL_STATUSES:

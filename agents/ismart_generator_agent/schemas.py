@@ -152,13 +152,13 @@ class PracticeGuidanceHeader(BaseModel):
 
     work_title: str = Field(..., min_length=1)
     topic: str = Field(..., min_length=1)
-    lesson_number: str = ""
-    audience: str = ""
+    lesson_number: str = Field(..., min_length=1)
+    audience: str = Field(..., min_length=1)
 
 
 class PracticeGuidanceGoals(BaseModel):
     goal: str = Field(..., min_length=1)
-    objectives: list[str] = Field(default_factory=list)
+    objectives: list[str] = Field(..., min_length=1)
 
 
 class PracticeGuidanceTheorySection(BaseModel):
@@ -216,8 +216,8 @@ class PracticeGuidanceMethodicalGuidance(BaseModel):
 
 
 class PracticeGuidanceResultRequirements(BaseModel):
-    deliverable: str = ""
-    criteria: list[str] = Field(default_factory=list)
+    deliverable: str = Field(..., min_length=1)
+    criteria: list[str] = Field(..., min_length=2)
 
 
 class PracticeGuidanceArtifact(BaseModel):
@@ -227,10 +227,8 @@ class PracticeGuidanceArtifact(BaseModel):
     goals: PracticeGuidanceGoals
     theory_brief: PracticeGuidanceTheoryBrief = Field(default_factory=PracticeGuidanceTheoryBrief)
     methodical_guidance: PracticeGuidanceMethodicalGuidance
-    result_requirements: PracticeGuidanceResultRequirements = Field(
-        default_factory=PracticeGuidanceResultRequirements
-    )
-    self_check_questions: list[str] = Field(default_factory=list)
+    result_requirements: PracticeGuidanceResultRequirements
+    self_check_questions: list[str] = Field(..., min_length=3)
     requires_check: list[str] = Field(default_factory=list)
     consistency_notes: list[str] = Field(default_factory=list)
     agent_notes: list[str] = Field(default_factory=list)

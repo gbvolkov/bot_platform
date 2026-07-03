@@ -54,6 +54,7 @@ class IsmartGenerationConfig:
     generation_target: str | None = None
     verbose: bool = False
     langchain_config: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    previous_lessons_context: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

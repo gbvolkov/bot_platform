@@ -50,6 +50,9 @@ def write_task_output(
     validation_reports: dict[str, ValidationResult],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    stale_error = output_dir / "error.json"
+    if stale_error.exists():
+        stale_error.unlink()
     material_files: dict[str, str] = {}
     for index, material in enumerate(result.materials, start=1):
         if material.status in SKIPPED_MATERIAL_STATUSES:

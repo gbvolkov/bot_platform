@@ -46,6 +46,7 @@ def build_material_plan(
         kinds.append("theory")
     if (flags.get("practice") or flags.get("project")) and positive_hours(lesson, "practice"):
         kinds.append("practice")
+        kinds.append("practice_guidance")
 
     teacher_materials = lesson.get("teacher_materials") or {}
     if "theory" in kinds and teacher_material_required(teacher_materials.get("theory")):
