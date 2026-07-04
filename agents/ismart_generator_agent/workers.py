@@ -2635,8 +2635,8 @@ class MaterialWorker:
         adjusted = dict(decision)
         note = (
             "Deterministic appellate policy overruled practice validator objections that used an over-narrow "
-            "interpretation of the practice contract: lesson.practice_tasks/authoritative_task_ids define the "
-            "task set, intentionally faulty code may be invalid by design, and source subject entities are slot "
+            "interpretation of the practice contract: authoritative_task_ids define the required task set after "
+            "expanding lesson.difficulty counts, intentionally faulty code may be invalid by design, and source subject entities are slot "
             "examples unless exact entities are explicitly required. Practice validation checks methodology and "
             "topic coverage rather than requiring one rigid task rendering structure."
         )

@@ -28,6 +28,10 @@ class IsmartGeneratorAgentContext(TypedDict, total=False):
     stop_on_failure: bool
     previous_lessons_context: list[dict[str, Any]]
     previous_lesson_context: list[dict[str, Any]]
+    resume_mode: str
+    existing_output_root: str
+    existing_lesson_output_dir: str
+    existing_package: dict[str, Any]
     verbose: bool
 
 
@@ -53,6 +57,10 @@ class GeneratorRunRequest(TypedDict, total=False):
     stop_on_failure: bool
     previous_lessons_context: list[dict[str, Any]]
     previous_lesson_context: list[dict[str, Any]]
+    resume_mode: str
+    existing_output_root: str
+    existing_lesson_output_dir: str
+    existing_package: dict[str, Any]
     verbose: bool
 
 

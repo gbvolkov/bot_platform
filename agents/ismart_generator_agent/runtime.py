@@ -16,6 +16,13 @@ from .contracts import (
 from .planner import build_material_plan
 from .practice_guidance import run_practice_guidance_material
 from .profiles import config_for_task_profile, resolve_course_level
+from .resume import (
+    ExistingPackage,
+    existing_package_from_payload,
+    find_existing_lesson_dir,
+    load_existing_package,
+    reusable_material,
+)
 from .sources import ReferenceLoader, reference_summary
 from .task_skip import (
     SKIPPED_MATERIAL_STATUSES,
@@ -91,7 +98,11 @@ class IsmartGeneratorRuntime:
             course_level = resolve_course_level(task)
             task_config = config_for_task_profile(self.config, task)
             output_dir_value = state.get("output_dir")
-            output_dir = Path(output_dir_value) if output_dir_value is not None else self._new_run_dir(task)
+            output_dir = self._resolve_output_dir(
+                task=task,
+                task_config=task_config,
+                requested_output_dir=Path(output_dir_value) if output_dir_value is not None else None,
+            )
             attempts_dir = output_dir / "tmp"
             attempts_dir.mkdir(parents=True, exist_ok=True)
             runtime_data.update(
@@ -102,6 +113,12 @@ class IsmartGeneratorRuntime:
                     "materials": [],
                     "validation_reports": {},
                     "package_validator_called": False,
+                    "resume_mode": task_config.resume_mode,
+                    "existing_package": None,
+                    "existing_material_files": {},
+                    "execution_actions": {},
+                    "package_changed": False,
+                    "resume_noop": False,
                 }
             )
             self.trace.log(
@@ -143,12 +160,79 @@ class IsmartGeneratorRuntime:
             runtime_data["references"] = references
             return {}
 
+        def load_existing_package_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            task_config = runtime_data["task_config"]
+            if task_config.resume_mode != "missing_only":
+                return {}
+            if isinstance(task_config.existing_package, dict):
+                package = existing_package_from_payload(
+                    task_config.existing_package,
+                    fallback_output_dir=runtime_data["output_dir"],
+                )
+            else:
+                package = load_existing_package(runtime_data["output_dir"])
+            runtime_data["existing_package"] = package
+            runtime_data["existing_material_files"] = dict(package.material_files_by_kind)
+            runtime_data["package_validation"] = package.to_generation_result().package_validation
+            self.trace.log(
+                "resume.existing_package.loaded",
+                output_dir=str(package.output_dir),
+                status=package.result.get("status"),
+                materials=[
+                    {"kind": material.kind, "status": material.status}
+                    for material in package.materials_by_kind.values()
+                ],
+            )
+            return {}
+
+        def diff_existing_vs_required_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            if runtime_data.get("resume_mode") != "missing_only":
+                return {}
+            package = runtime_data.get("existing_package")
+            if not isinstance(package, ExistingPackage):
+                raise RuntimeError("missing-only resume did not load an existing package")
+            actions: dict[str, str] = {}
+            unusable: dict[str, list[str]] = {}
+            non_qa_changed = False
+            specs = runtime_data.get("specs") or []
+            for spec in specs:
+                if spec.kind == "specification_qa":
+                    continue
+                material, reasons = reusable_material(package, spec)
+                if material is not None:
+                    actions[spec.kind] = "reuse_existing"
+                else:
+                    actions[spec.kind] = "generate"
+                    unusable[spec.kind] = reasons
+                    non_qa_changed = True
+            qa_spec = next((spec for spec in specs if spec.kind == "specification_qa"), None)
+            if qa_spec is not None:
+                material, reasons = reusable_material(package, qa_spec)
+                if material is not None and not non_qa_changed:
+                    actions[qa_spec.kind] = "reuse_existing"
+                else:
+                    actions[qa_spec.kind] = "generate"
+                    if reasons:
+                        unusable[qa_spec.kind] = reasons
+            package.unusable_reasons_by_kind = unusable
+            runtime_data["execution_actions"] = actions
+            runtime_data["resume_noop"] = bool(actions) and all(action == "reuse_existing" for action in actions.values())
+            self.trace.log(
+                "resume.execution_plan.done",
+                actions=actions,
+                unusable=unusable,
+                noop=runtime_data["resume_noop"],
+            )
+            return {}
+
         def route_material_node(state: LessonTaskGraphState) -> dict[str, Any]:
             return {}
 
         def route_next_material(state: LessonTaskGraphState) -> str:
             if int(state.get("current_material_index") or 0) < len(runtime_data.get("specs") or []):
                 return "run_material"
+            if runtime_data.get("resume_mode") == "missing_only" and runtime_data.get("resume_noop"):
+                return "finish_task"
             return "package_validation"
 
         def run_material_node(state: LessonTaskGraphState) -> dict[str, Any]:
@@ -160,6 +244,29 @@ class IsmartGeneratorRuntime:
             materials = list(runtime_data.get("materials") or [])
             validation_reports = dict(runtime_data.get("validation_reports") or {})
             dependencies = self._dependency_results(spec.dependency_kinds, specs, materials)
+            action = self._material_action(spec.kind, runtime_data)
+            if action == "reuse_existing":
+                package = runtime_data.get("existing_package")
+                if not isinstance(package, ExistingPackage):
+                    raise RuntimeError("resume action reuse_existing has no existing package")
+                material = package.material(spec.kind)
+                if material is None:
+                    raise RuntimeError(f"resume action reuse_existing but material is missing: {spec.kind}")
+                validation = package.validation(spec.kind)
+                materials.append(material)
+                validation_reports[spec.kind] = validation
+                runtime_data["materials"] = materials
+                runtime_data["validation_reports"] = validation_reports
+                self.trace.log(
+                    "material.reused",
+                    kind=spec.kind,
+                    status=material.status,
+                    file=package.material_files_by_kind.get(spec.kind),
+                )
+                return {
+                    "current_material_index": int(state.get("current_material_index") or 0) + 1,
+                }
+
             skip_reason = practice_material_skip_reason(task, spec)
             skip_status = "skipped"
             if skip_reason is None:
@@ -243,6 +350,8 @@ class IsmartGeneratorRuntime:
             validation_reports[spec.kind] = validation
             runtime_data["materials"] = materials
             runtime_data["validation_reports"] = validation_reports
+            if runtime_data.get("resume_mode") == "missing_only" and spec.kind != "specification_qa":
+                runtime_data["package_changed"] = True
             result_update: dict[str, Any] = {
                 "current_material_index": int(state.get("current_material_index") or 0) + 1,
             }
@@ -327,6 +436,17 @@ class IsmartGeneratorRuntime:
             }
 
         def finish_task_node(state: LessonTaskGraphState) -> dict[str, Any]:
+            if runtime_data.get("resume_mode") == "missing_only" and runtime_data.get("resume_noop"):
+                package = runtime_data.get("existing_package")
+                if not isinstance(package, ExistingPackage):
+                    raise RuntimeError("missing-only resume noop has no existing package")
+                result = package.to_generation_result()
+                result_box["result"] = result
+                self.trace.log("resume.noop", output_dir=result.output_dir, status=result.status)
+                return {
+                    "result": result.to_public_json(),
+                    "output_dir": result.output_dir,
+                }
             result = self._finish_task(
                 task_id=state["task_id"],
                 lesson_number=state["lesson_number"],
@@ -338,6 +458,7 @@ class IsmartGeneratorRuntime:
                 package_validation=runtime_data["package_validation"],
                 validation_reports=dict(runtime_data.get("validation_reports") or {}),
                 package_validator_called=bool(runtime_data.get("package_validator_called")),
+                material_file_overrides=dict(runtime_data.get("existing_material_files") or {}),
             )
             result_box["result"] = result
             return {
@@ -349,6 +470,8 @@ class IsmartGeneratorRuntime:
         builder.add_node("init_task", init_task_node)
         builder.add_node("plan", plan_node)
         builder.add_node("load_references", load_references_node)
+        builder.add_node("load_existing_package", load_existing_package_node)
+        builder.add_node("diff_existing_vs_required", diff_existing_vs_required_node)
         builder.add_node("route_material", route_material_node)
         builder.add_node("run_material", run_material_node)
         builder.add_node("package_validation", package_validation_node)
@@ -356,13 +479,16 @@ class IsmartGeneratorRuntime:
         builder.add_edge(START, "init_task")
         builder.add_edge("init_task", "plan")
         builder.add_edge("plan", "load_references")
-        builder.add_edge("load_references", "route_material")
+        builder.add_edge("load_references", "load_existing_package")
+        builder.add_edge("load_existing_package", "diff_existing_vs_required")
+        builder.add_edge("diff_existing_vs_required", "route_material")
         builder.add_conditional_edges(
             "route_material",
             route_next_material,
             {
                 "run_material": "run_material",
                 "package_validation": "package_validation",
+                "finish_task": "finish_task",
             },
         )
         builder.add_conditional_edges(
@@ -390,6 +516,7 @@ class IsmartGeneratorRuntime:
         package_validation: ValidationResult,
         validation_reports: dict[str, ValidationResult],
         package_validator_called: bool,
+        material_file_overrides: dict[str, str] | None = None,
     ) -> IsmartGenerationResult:
         result = IsmartGenerationResult(
             task_id=task_id,
@@ -406,7 +533,12 @@ class IsmartGeneratorRuntime:
         )
         validation_reports["package"] = package_validation
         self.trace.log("output.write.start", output_dir=str(output_dir), material_count=len(materials))
-        write_task_output(result=result, output_dir=output_dir, validation_reports=validation_reports)
+        write_task_output(
+            result=result,
+            output_dir=output_dir,
+            validation_reports=validation_reports,
+            material_file_overrides=material_file_overrides,
+        )
         self.trace.log("output.write.done", output_dir=str(output_dir), status=result.status)
         self.trace.log("task.done", task_id=task_id, status=result.status, output_dir=str(output_dir))
         return result
@@ -501,6 +633,35 @@ class IsmartGeneratorRuntime:
                     affected.append(spec)
                     break
         return affected
+
+    def _resolve_output_dir(
+        self,
+        *,
+        task: dict[str, Any],
+        task_config: IsmartGenerationConfig,
+        requested_output_dir: Path | None,
+    ) -> Path:
+        if task_config.resume_mode is None:
+            return requested_output_dir if requested_output_dir is not None else self._new_run_dir(task)
+        if task_config.resume_mode != "missing_only":
+            raise ValueError(f"Unsupported resume_mode: {task_config.resume_mode!r}")
+        if task_config.existing_package and isinstance(task_config.existing_package, dict):
+            output_dir = task_config.existing_package.get("output_dir")
+            if output_dir:
+                return Path(str(output_dir))
+            if requested_output_dir is not None:
+                return requested_output_dir
+        if task_config.existing_lesson_output_dir is not None:
+            return find_existing_lesson_dir(task_config.existing_lesson_output_dir, task)
+        if task_config.existing_output_root is not None:
+            return find_existing_lesson_dir(task_config.existing_output_root, task)
+        raise ValueError("missing-only resume requires existing_output_root or existing_lesson_output_dir")
+
+    def _material_action(self, kind: str, runtime_data: dict[str, Any]) -> str:
+        if runtime_data.get("resume_mode") != "missing_only":
+            return "generate"
+        actions = runtime_data.get("execution_actions") if isinstance(runtime_data.get("execution_actions"), dict) else {}
+        return str(actions.get(kind) or "generate")
 
     def _new_run_dir(self, task: dict[str, Any]) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

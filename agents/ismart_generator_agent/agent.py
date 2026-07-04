@@ -181,6 +181,10 @@ def _runtime_context(
         "task_ids",
         "previous_lessons_context",
         "previous_lesson_context",
+        "resume_mode",
+        "existing_output_root",
+        "existing_lesson_output_dir",
+        "existing_package",
     ):
         if key in configurable and key not in context:
             context[key] = configurable[key]
@@ -690,6 +694,12 @@ def _build_generation_config(
         previous_lessons_context=_context_list_of_dicts(
             context.get("previous_lessons_context", context.get("previous_lesson_context"))
         ),
+        resume_mode=_optional_str(context.get("resume_mode")),
+        existing_output_root=Path(str(context["existing_output_root"])) if context.get("existing_output_root") else None,
+        existing_lesson_output_dir=(
+            Path(str(context["existing_lesson_output_dir"])) if context.get("existing_lesson_output_dir") else None
+        ),
+        existing_package=dict(context["existing_package"]) if isinstance(context.get("existing_package"), dict) else None,
     )
 
 

@@ -35,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", default=ModelType.GPT.value, help="Model provider value or enum name.")
     parser.add_argument("--model-mode", choices=("base", "mini", "nano"), default="base")
     parser.add_argument("--prompts-dir", help="Prompt/skill directory. Defaults to agents/ismart_generator_agent/prompts_skills/basic.")
+    parser.add_argument(
+        "--resume-missing-from",
+        help="Existing lesson folder or root with lesson folders. Runs only missing/unusable materials in-place.",
+    )
     parser.add_argument("--run-name", help="Name of the run directory under --output.")
     parser.add_argument(
         "--preserve-source-index",
@@ -116,6 +120,9 @@ def build_graph_request(args: argparse.Namespace) -> dict[str, Any]:
         request["generation_target"] = args.generation_target
     if args.prompts_dir:
         request["prompts_dir"] = args.prompts_dir
+    if args.resume_missing_from:
+        request["resume_mode"] = "missing_only"
+        request["existing_output_root"] = args.resume_missing_from
     return request
 
 

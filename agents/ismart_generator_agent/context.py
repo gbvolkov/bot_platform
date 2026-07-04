@@ -56,10 +56,21 @@ def json_context_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[str,
     return context
 
 
-def _normalized_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]]:
+def _practice_level_count(value: Any) -> int | None:
+    if isinstance(value, dict):
+        value = value.get("count")
+    if value in (None, ""):
+        return None
+    try:
+        return max(0, int(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _practice_source_samples(task: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     lesson = task.get("lesson") or {}
     practice_tasks = lesson.get("practice_tasks") or {}
-    normalized_tasks: list[dict[str, Any]] = []
+    samples: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "l3": []}
     for level in ("l1", "l2", "l3"):
         items = practice_tasks.get(level) or []
         if not isinstance(items, list):
@@ -71,14 +82,91 @@ def _normalized_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]]:
             else:
                 number = None
                 text = str(item).strip()
-            normalized_tasks.append(
+            samples[level].append(
                 {
-                    "id": f"P{number or len(normalized_tasks) + 1}",
                     "level": level.upper(),
                     "source_number": number,
                     "source_text": text,
+                    "source_kind": "sample_task",
                 }
             )
+    return samples
+
+
+def _practice_required_counts(task: dict[str, Any], samples: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    lesson = task.get("lesson") or {}
+    difficulty = lesson.get("difficulty") or {}
+    counts: dict[str, int] = {}
+    has_explicit_count = False
+    for level in ("l1", "l2", "l3"):
+        count = _practice_level_count((difficulty.get(level) or {}) if isinstance(difficulty, dict) else None)
+        if count is not None:
+            has_explicit_count = True
+            counts[level] = count
+        else:
+            counts[level] = len(samples.get(level, []))
+    if not has_explicit_count:
+        return {level: len(samples.get(level, [])) for level in ("l1", "l2", "l3")}
+    return counts
+
+
+def _generated_practice_source_text(task: dict[str, Any], *, level: str, task_id: str) -> str:
+    lesson = task.get("lesson") or {}
+    content = lesson.get("content") or {}
+    if isinstance(content, dict):
+        content_parts = [
+            str(content.get("general") or "").strip(),
+            str(content.get("for_grades") or "").strip(),
+            str(content.get("audience_specific") or "").strip(),
+        ]
+        content_text = " ".join(part for part in content_parts if part)
+    else:
+        content_text = str(content or "").strip()
+    title = str(lesson.get("title") or lesson.get("topic") or "").strip()
+    topic = title or content_text or "current lesson topic"
+    return (
+        f"No direct sample is provided for {task_id}. Generate a new {level.upper()} practice task "
+        f"for the lesson topic. Use lesson content, prompt/skill rules, references, and available "
+        f"sibling samples as pattern evidence. Lesson topic/content: {topic}"
+    )
+
+
+def _normalized_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]]:
+    lesson = task.get("lesson") or {}
+    samples = _practice_source_samples(task)
+    counts = _practice_required_counts(task, samples)
+    normalized_tasks: list[dict[str, Any]] = []
+    task_index = 1
+    for level in ("l1", "l2", "l3"):
+        level_samples = samples.get(level, [])
+        for level_index in range(counts.get(level, 0)):
+            sample = level_samples[level_index] if level_index < len(level_samples) else None
+            task_id = f"P{task_index}"
+            if sample is not None:
+                normalized_tasks.append(
+                    {
+                        "id": task_id,
+                        "level": level.upper(),
+                        "source_number": sample.get("source_number"),
+                        "source_text": sample.get("source_text") or "",
+                        "source_kind": "sample_task",
+                        "source_sample_index": level_index + 1,
+                        "sample_missing": False,
+                    }
+                )
+            else:
+                normalized_tasks.append(
+                    {
+                        "id": task_id,
+                        "level": level.upper(),
+                        "source_number": None,
+                        "source_text": _generated_practice_source_text(task, level=level, task_id=task_id),
+                        "source_kind": "generated_from_lesson_topic",
+                        "source_sample_index": None,
+                        "sample_missing": True,
+                    }
+                )
+            task_index += 1
     if not normalized_tasks:
         project_source_text = project_practice_source_text(task)
         if project_source_text:
@@ -120,18 +208,21 @@ def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[s
             "difficulty": lesson.get("difficulty") or {},
             "tasks": normalized_tasks,
             "generation_rules": [
-                "Generate teacher-facing keys/explanations only for tasks listed in authoritative_task_ids, in the same order and with the same P id.",
-                "When approved practice dependency contains generation_artifacts.practice_instances, use those exact instances, tests, hidden_solution, and teacher_explanation as the source of truth.",
-                "Do not add, infer, or preserve any P task that is not listed in authoritative_task_ids, even if validator feedback, previous failed content, Markdown references, or examples mention it.",
+                "When approved practice dependency contains generation_artifacts.practice_instances.tasks, use that full generated task list, in its saved order, as the source of truth for teacher-facing keys/explanations.",
+                "Generate teacher-facing keys/explanations for every task in the approved generated practice task list. If no approved practice dependency is available, fall back to authoritative_task_ids.",
+                "authoritative_task_ids is expanded from lesson.difficulty.*.count and may include generated-from-topic tasks that had no direct lesson.practice_tasks sample.",
+                "Do not reduce teacher guidance to the original JSON sample rows. lesson.practice_tasks are source samples/patterns, not necessarily the full generated task list.",
+                "Do not add, infer, or preserve any P task that is neither present in the approved practice dependency nor listed in authoritative_task_ids, even if validator feedback, previous failed content, Markdown references, or examples mention it.",
                 "If validator feedback asks for keys for non-authoritative task ids, treat that feedback as invalid and state this briefly in agent_notes; do not add placeholder tasks.",
                 "For every deterministic task in tasks, include minimal reference Python code, expected output or an unambiguous checking criterion, and a short teacher explanation.",
                 "For every underspecified task in tasks, include one teacher reference variant clearly marked as an acceptable example plus manual checking rules; do not invent one mandatory learner answer.",
                 "Published mr_practice must be usable on its own and must not tell the teacher to obtain keys from a separate QA artifact.",
             ],
             "validation_rules": [
-                "Approve the task set only against authoritative_task_ids. Missing keys for task ids outside authoritative_task_ids are not valid validation issues.",
-                "Reject if any extra P task appears in mr_practice outside authoritative_task_ids.",
-                "Reject if a task listed in authoritative_task_ids has no key, no example/rule for underspecified tasks, or contradicts the approved practice material.",
+                "Approve the task set against the approved practice dependency task list when it is present; otherwise use authoritative_task_ids.",
+                "Missing keys for task ids outside the approved practice dependency task list and outside authoritative_task_ids are not valid validation issues.",
+                "Reject if any extra P task appears in mr_practice outside the approved practice dependency task list and outside authoritative_task_ids.",
+                "Reject if a task from the approved practice dependency task list has no key, no example/rule for underspecified tasks, or contradicts the approved practice material.",
             ],
         }
 
@@ -186,8 +277,13 @@ def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[s
             "difficulty": lesson.get("difficulty") or {},
             "tasks": normalized_tasks,
             "generation_rules": [
-                "Build QA/specification only for tasks listed in authoritative_task_ids, in the same order and with the same P id.",
-                "When approved practice dependency contains generation_artifacts.practice_instances, use those exact instances, tests, hidden_solution, and teacher_explanation as the source of truth.",
+                "When approved practice dependency contains generation_artifacts.practice_instances.tasks, build QA/specification for that full generated task list, in its saved order, with the same P ids.",
+                "If no approved practice dependency is available, fall back to authoritative_task_ids.",
+                "authoritative_task_ids is expanded from lesson.difficulty.*.count and may include generated-from-topic tasks that had no direct lesson.practice_tasks sample.",
+                "Do not reduce QA/specification to the original JSON sample rows. lesson.practice_tasks are source samples/patterns, not necessarily the full generated task list.",
+                "Use approved practice dependency instances, tests, hidden_solution, and teacher_explanation as the source of truth.",
+                "When approved practice dependency is present, copy concrete error-message tokens, variable names, code snippets, input/output requirements, tests, manual checks, keys, and teacher explanations from the approved practice_instances only.",
+                "Do not substitute concrete values from lesson.practice_tasks, references, or Markdown examples when they differ from approved practice_instances.",
                 "Preserve each task pattern. Do not invent concrete variable names, concrete values, exact stdout, exact input data, or a mandatory output format unless they are explicitly present in source_text, Markdown references, or approved dependency artifacts.",
                 "If a task is underspecified for deterministic stdout, mark it as requiring source clarification or manual checking. Do not create deterministic autocheck tests, mandatory expected output, or mandatory reference code with invented values.",
                 "For underspecified tasks, an optional illustrative teacher example is allowed only if clearly labeled as a non-authoritative example and not used as the required test/key.",
@@ -195,7 +291,8 @@ def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[s
                 "Do not claim full JSON conformance if QA introduced values, tests, or formats that are not in the source.",
             ],
             "validation_rules": [
-                "Approve QA/specification only when task ids match authoritative_task_ids exactly.",
+                "Approve QA/specification only when task ids match the approved practice dependency task list when present; otherwise they must match authoritative_task_ids exactly.",
+                "Reject any QA task value that differs from the corresponding approved practice_instances value when approved practice dependency is available, even if the differing value appears in lesson.practice_tasks samples or reference examples.",
                 "Reject deterministic tests or keys for underspecified source tasks when they rely on invented concrete values.",
                 "Do not reject merely because an underspecified task has no deterministic test; that is the correct source-faithful representation.",
             ],
@@ -303,8 +400,11 @@ def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[s
         "tasks": normalized_tasks,
         "generation_rules": [
             "Generate exactly one student-facing task variant for each task in tasks, in the same order and with the same P id.",
-            "The tasks list and authoritative_task_ids are the authoritative task count, ids, order, and levels for this practice material. lesson.difficulty.*.count is planning context only and must not be used to invent extra tasks such as P6 when no corresponding lesson.practice_tasks item exists.",
-            "Treat source_text as an authoritative task pattern: preserve id, level, task_type, skill_target, and constraints, but do not treat source_text as mandatory final learner wording unless it explicitly says exact wording/value is required.",
+            "The tasks list and authoritative_task_ids are the authoritative required task count, ids, order, and levels for this practice material.",
+            "For ordinary practice, lesson.difficulty.*.count defines how many tasks must be generated per level. lesson.practice_tasks are samples/patterns and may be fewer than the required count.",
+            "If a SOURCE CONTRACT task has sample_missing=true or source_kind=generated_from_lesson_topic, generate a new task for the same lesson topic/level using lesson.content, references, prompt/skill rules, and sibling samples as pattern evidence.",
+            "Do not stop at the number of provided samples. Missing source samples are not permission to omit required tasks.",
+            "Treat source_text as source evidence for a task pattern: preserve id, level, task_type, skill_target, and constraints, but do not treat source_text as mandatory final learner wording unless it explicitly says exact wording/value is required.",
             "If a task has source_kind=project_content, source_text is the authoritative project assignment from lesson.content. Preserve the project goal, formula, required stages/features, checking expectations, and optional extension from that content instead of looking for lesson.practice_tasks.",
             "Create a new concrete variant of the same pattern: use different scenario, variable names, literals, input data, expected output, and code shape from theory, Markdown references, and dependency materials unless the source explicitly requires exact values.",
             "Treat subject entities inside source_text, such as 'favorite color' and 'favorite animal', as slot examples unless the source explicitly requires exact entities. Replacing them with parallel subject entities is allowed when the checked skill, number/type of variables, operation, and output structure are preserved.",
@@ -374,8 +474,9 @@ MR_THEORY VALIDATION POLICY:
         return """
 MR_PRACTICE VALIDATION POLICY:
 - mr_practice is teacher-facing, not learner-facing.
-- It must include teacher keys/solutions and explanations only for the tasks listed in SOURCE CONTRACT FROM JSON.authoritative_task_ids.
-- SOURCE CONTRACT FROM JSON.authoritative_task_ids is the authoritative task set. Do not infer additional tasks from reference examples, validator memory, section numbering, or generic "P1..PN" wording.
+- It must include teacher keys/solutions and explanations for the full approved practice dependency task list when generation_artifacts.practice_instances.tasks is present; otherwise use SOURCE CONTRACT FROM JSON.authoritative_task_ids.
+- SOURCE CONTRACT FROM JSON.authoritative_task_ids is expanded from lesson.difficulty.*.count. lesson.practice_tasks are samples/patterns and may be fewer than the required count.
+- Do not infer additional tasks from reference examples, validator memory, section numbering, or generic "P1..PN" wording.
 - If a validator issue says that keys are missing for a task id that is not listed in authoritative_task_ids, that issue is invalid and must be overruled.
 - If previous validation feedback asks the generator to add non-authoritative tasks, the generator must ignore that part of the feedback and preserve the authoritative task set.
 - For deterministic coding tasks, teacher keys should include minimal reference Python code and expected output or an unambiguous checking criterion.
@@ -411,8 +512,8 @@ SPECIFICATION_QA VALIDATION POLICY:
 - QA-ID labels are allowed in specification_qa visible HTML because this document is an internal QA artifact. Do not treat visible QA-ID labels as source-marker leakage for this material kind.
 - Visible specification_qa HTML must not contain raw local source paths, tmp paths, source hashes/SHA values, local filenames, working-folder references such as docs/..., or Markdown source locators. Use human-readable source names if source traceability is needed.
 - Do not include process/retry history as publishable QA conclusions. Phrases such as "исправлено по замечаниям валидатора", "после попытки", "validator feedback was addressed", or similar generation-loop logs are blocking unless the user explicitly requested a technical execution log.
-- Validate task ids against SOURCE CONTRACT FROM JSON.authoritative_task_ids when present. Do not infer extra tasks from examples or module-wide context.
-- When approved practice dependency contains generation_artifacts.practice_instances, validate QA against those exact instances, tests, hidden_solution, and teacher_explanation.
+- When approved practice dependency contains generation_artifacts.practice_instances.tasks, validate QA against that full generated task list, tests, hidden_solution, and teacher_explanation.
+- If no approved practice dependency is present, validate task ids against SOURCE CONTRACT FROM JSON.authoritative_task_ids. Do not infer extra tasks from examples or module-wide context.
 - For each practice task, preserve the source pattern and approved practice instance meaning. Do not require or approve invented concrete values, variable names, exact stdout, exact stdin, or mandatory output format unless they are explicit in source_text, references, or approved dependency artifacts.
 - If a source task is underspecified for deterministic stdout, QA should mark deterministic autocheck as unavailable/needs source clarification/manual check. Do not reject QA merely because such a task has no deterministic test.
 - For underspecified tasks, optional example code is acceptable only when clearly labeled as non-authoritative and not used as the expected output, key, or platform test.
@@ -470,8 +571,10 @@ INTERMEDIATE VALIDATION POLICY:
 
     return """
 PRACTICE VALIDATION POLICY:
-- Practice generation is template-based. SOURCE CONTRACT FROM JSON.tasks defines the authoritative pattern: P id, level, task type, target skill, and constraints. For ordinary practice it is derived from lesson.practice_tasks; for project practice it may be derived from lesson.content with source_kind=project_content. It is not necessarily the final learner wording.
-- SOURCE CONTRACT FROM JSON.authoritative_task_ids is the authoritative task set for learner-facing practice. Do not require tasks outside that list because of lesson.difficulty.*.count, module totals, reference examples, or generic L1/L2 proportions. A mismatch between difficulty counts and SOURCE CONTRACT tasks is a source-data warning, not permission to invent P6/P7.
+- Practice generation is template-based. SOURCE CONTRACT FROM JSON.tasks defines the authoritative required task set: P id, level, task type, target skill, and constraints. For ordinary practice it is expanded from lesson.difficulty.*.count; lesson.practice_tasks are samples/patterns and may be fewer than the required count.
+- SOURCE CONTRACT FROM JSON.authoritative_task_ids is the authoritative task set for learner-facing practice. Require every listed task to be present in practice_templates and practice_instances. Do not accept omission merely because a direct lesson.practice_tasks sample is missing for that slot.
+- When a SOURCE CONTRACT task has sample_missing=true or source_kind=generated_from_lesson_topic, validate that the generated task is a plausible new task for the lesson topic/level using lesson.content, references, and sibling samples as pattern evidence.
+- Do not require tasks outside SOURCE CONTRACT because of module totals, reference examples, or generic L1/L2 proportions.
 - If SOURCE CONTRACT tasks have source_kind=project_content, validate the practice as one coherent project assignment based on lesson.content: project goal, formula/calculation, learner steps, testing expectations, required condition/extension, and deliverable.
 - Approve a new task variant when it preserves the source pattern but uses different scenario, variable names, literals, input/output data, and code shape from theory, Markdown references, and dependency materials.
 - Reject direct copying from theory/references/dependencies when the copied content becomes the learner-facing practice task, starter code, test data, or expected output without an explicit source requirement.
@@ -479,8 +582,8 @@ PRACTICE VALIDATION POLICY:
 - Treat source_text subject entities as replaceable slot examples unless the JSON/prompt/reference explicitly requires exact entities. For example, "favorite color" and "favorite animal" may become other parallel categories when the task still checks two string variables and printing both values.
 - Validate practice methodology, not a rigid task-layout template: check that tasks reveal the lesson topic, build the intended skill progression, are understandable for learners, are internally consistent, and have a reasonable checking path.
 - Do not reject practice solely because a task lacks a specific visual subsection such as "Код", "Код в редакторе", starter code, or a standalone <pre><code> block. For write-code tasks, a clear condition plus tests/checking path is sufficient; starter code is optional unless the source task type is fix/debug or explicitly requires given code.
-- Practice references require at least 3 visible input -> expected output pairs when the source task provides enough information for deterministic stdout.
-- Those runtime checks should cover typical, boundary, and atypical/special cases when applicable. Do not require fake edge cases when the source pattern cannot support them, but reject duplicated test rows used only to imitate coverage.
+- Practice references require at least 3 visible input -> expected output pairs when the source task has variable input and provides enough information for deterministic stdout.
+- Those runtime checks should cover typical, boundary, and atypical/special cases when applicable. Do not require fake edge cases when the source pattern cannot support them. For no-stdin fixed-output tasks, one exact empty-input test is valid; reject duplicated test rows used only to imitate coverage.
 - Expected stdout must be exact, unique to the task, and symbol-for-symbol checkable: no extra labels such as "Answer:", explanatory text, accidental spaces, or unrelated output lines. If stdout contains natural-language text, the phrase must be grammatically consistent and meaningful.
 - Visible expected stdout in a student-facing deterministic test table is allowed and expected for practice materials. It is a test oracle, not a forbidden answer key, as long as it does not include corrected code, hidden_solution text, teacher_explanation, QA ids, source hashes, or internal trace data.
 - Do not reject practice merely because deterministic tests show concrete expected stdout. Reject only when the material reveals the corrected code, tells the exact edit operation, exposes hidden_solution/teacher_explanation, or invents unsupported expected output.
@@ -887,6 +990,8 @@ TEMPLATE RULES:
 - Return PracticeTaskTemplateSet structured output only.
 - Create exactly one PracticeTaskTemplate for every SOURCE CONTRACT task, in the same order and with the same P id and level.
 - Do not create templates for tasks that are not present in SOURCE CONTRACT. Task count is defined by SOURCE CONTRACT, not by external norms or reference examples.
+- SOURCE CONTRACT tasks are already expanded to the required count from lesson.difficulty.*.count. lesson.practice_tasks are samples/patterns and can be fewer than SOURCE CONTRACT tasks.
+- If a SOURCE CONTRACT task has sample_missing=true or source_kind=generated_from_lesson_topic, create a real template for a new task at that level using lesson.content, prompt/skill files, Markdown references, and sibling samples as pattern evidence.
 - Extract task_type, skill_target, invariants, slots_to_fill, constraints, and test_policy from source_text, JSON context, prompt/skill files, and Markdown references.
 - Treat lesson.practice_tasks as a pattern source, not necessarily as final learner wording.
 - If SOURCE CONTRACT task has source_kind=project_content, treat lesson.content project text as the authoritative project pattern and build the template from the project goal, formula, work stages, required features, checking expectations, and optional extension.
@@ -950,6 +1055,7 @@ VARIANT RULES:
 - Always fill PracticeTaskInstanceSet.lesson_goal and PracticeTaskInstanceSet.lesson_objectives. They are rendered as the student-facing "Цели и задачи" block. Use operational learner actions aligned with the topic, for example: runs code in the cloud IDE, reads SyntaxError/NameError diagnostics, fixes one error, checks the result.
 - Create exactly one PracticeTaskInstance for every PracticeTaskTemplate, in the same order and with matching id/template_id.
 - Do not add task instances outside PracticeTaskTemplate ids. The number of practice tasks is defined by the input task templates.
+- If a template was created from a missing source sample, fill it as a new task for the same lesson topic/level. Do not leave it generic, do not mark it as unavailable, and do not omit it.
 - Preserve the template's level, task_type, skill_target, and invariants.
 - Generate a new concrete scenario and new values: variable names, literals, input data, expected output, and code shape must differ from theory, Markdown references, and dependency materials unless the source explicitly requires exact values.
 - For templates derived from source_kind=project_content, generate one complete project-practice instance that preserves the source project requirements: user input, formula/calculation, output, testing work, required conditional/extension steps, and expected deliverable. Do not split it into unrelated small P tasks and do not ignore the introductory project context.
@@ -968,9 +1074,10 @@ VARIANT RULES:
   2. correction task with deterministic corrected behavior: the source gives faulty code and a clear intended correction/output can be derived from literals, variables, print(...) calls, or the variant you created. Use run_mode=single_file, provide hidden_solution, output_requirements with exact corrected stdout, and create runtime_tests/tests for that corrected behavior. Do not downgrade this to manual_only just because the initial code is faulty.
   3. truly underspecified task: only if neither the diagnostic outcome nor corrected behavior can be made source-faithfully checkable, use manual_only or needs_platform_clarification and explain the manual/clarification policy.
 - If the source pattern asks the learner to read, demonstrate, or interpret a Python error message such as SyntaxError or NameError, the result/check must be the expected error message or diagnostic outcome. Do not invent normal stdout values for such a task. Use expected_error/error_message in runtime_tests/tests when the platform can check the error text, or keep runtime_tests/tests empty and put the diagnostic check into manual_checks/output_requirements.
-- If deterministic runtime checks are source-supported for normal program behavior, create at least 3 meaningful stdin -> expected stdout checks, put them into runtime_tests, and mirror the same list in legacy tests. Cover typical, boundary, and atypical/special cases when they apply to the task. Do not duplicate the same input/expected_output pair just to reach the count. Every stdout item must use exactly the keys input and expected_output. Preserve trailing newlines in expected_output as "\\n"; do not use keys such as output/stdout/result.
+- If deterministic runtime checks are source-supported for normal program behavior, create at least 3 meaningful stdin -> expected stdout checks when the task has variable input, put them into runtime_tests, and mirror the same list in legacy tests. Cover typical, boundary, and atypical/special cases when they apply to the task. Do not duplicate the same input/expected_output pair just to reach the count. Every stdout item must use exactly the keys input and expected_output. Preserve trailing newlines in expected_output as "\\n"; do not use keys such as output/stdout/result.
 - Expected stdout must be exact and learner-checkable: no extra "Answer:" labels, explanations, accidental spaces, or unrelated lines. If stdout is natural-language text, keep phrases grammatically consistent and meaningful.
-- For no-stdin corrected-output fix/debug tasks, create 3 runtime_tests/tests with empty input and the same exact expected_output. This repetition is acceptable because the platform still needs explicit test rows and the program has deterministic output without input.
+- For no-stdin corrected-output fix/debug tasks, create exactly one runtime_tests/tests row with empty input and the exact expected_output. Do not duplicate identical empty-input test rows.
+- For manual_only diagnostic tasks, output_requirements must describe the response format as "Напишите..." or "Укажите..."; do not use stdout/program wording such as "Выведите", "stdout", or "Запустите тесты".
 - For refactoring tasks, use runtime_tests only to verify behavior preservation. Put requirements that stdout cannot prove into manual_checks: better variable names, comments, removed duplicated computation, named constants, and readability.
 - Set run_mode to single_file when one runnable file is intended, separate_snippets when subtasks should be run independently, manual_only when only manual/static checking is meaningful, or needs_platform_clarification when the source does not define how the platform runs multi-part code.
 - If deterministic runtime tests are not source-supported, keep runtime_tests and tests empty and state the manual/clarification policy in output_requirements, manual_checks, hidden_solution, and teacher_explanation instead of inventing fake exact outputs.
@@ -982,6 +1089,7 @@ RETRY REPAIR RULES:
 - Preserve blocks listed in passed_blocks unless a document-level fix requires a narrow adjacent change.
 - Repair every block listed in blocking issues_by_block and every document-level issue. If the issue is "Цели и задачи" or missing lesson objectives, update lesson_goal/lesson_objectives; do not try to solve that by changing only task text.
 - If a previous issue says tasks are manual_only without tests but the source-supported corrected behavior is deterministic, change the affected task instances to run_mode=single_file and provide runtime_tests/tests for corrected behavior.
+- If a previous issue says manual_only output_requirements use stdout/program wording such as "Выведите", repair only that response-format wording; keep the diagnostic task manual_only when it is about interpreting an error message.
 """.strip()
 
 
@@ -1386,7 +1494,8 @@ DECISION POLICY:
 - If VALIDATION TARGET MODE is structured_artifacts, do not keep failed for HTML rendering/assembly issues. Those belong to a separate deterministic render/smoke-test step and can be fixed by regenerating HTML from the approved artifacts.
 - You may approve when remaining objections are editorial preferences, harmless wording choices, overly literal interpretation, optional/recommended style, non-blocking section naming differences, unproven "potential" concerns, or minor imperfections that do not harm the artifact purpose.
 - If SOURCE CONTRACT FROM JSON contains authoritative_task_ids, validator objections about missing keys/content for task ids outside that list are invalid and should be overruled. Do not let non-authoritative task ids block an otherwise usable material.
-- For learner-facing practice, SOURCE CONTRACT FROM JSON.authoritative_task_ids is authoritative for task count, ids, order, and levels. If lesson.difficulty.*.count conflicts with lesson.practice_tasks, treat that as source-data inconsistency and overrule validator demands to invent extra tasks such as P6/P7 when all authoritative_task_ids are present in the material.
+- For learner-facing practice, SOURCE CONTRACT FROM JSON.authoritative_task_ids is authoritative for task count, ids, order, and levels. It is expanded from lesson.difficulty.*.count; missing direct lesson.practice_tasks samples are not a reason to omit tasks.
+- Keep failed for practice when generated practice_templates/practice_instances omit a task listed in SOURCE CONTRACT FROM JSON.authoritative_task_ids. Do not use controller tolerance to approve a smaller task set.
 - You may approve when the material has a small number of local factual/terminology imprecisions that are easy to correct and do not undermine the central teaching objective; record them as non_blocking_issues with precise fix_instructions.
 - Keep failed for factual errors only when they are central, repeated, source-contradicting, or likely to make the learner form a wrong mental model that affects task performance. Do not keep failed for a single localized nuance if the surrounding explanation is still usable.
 - For practice materials, overrule validator objections that treat visible deterministic expected stdout as a forbidden key. Expected stdout in a test table is allowed when it is part of the learner's platform test description and does not reveal corrected code or the exact edit operation.

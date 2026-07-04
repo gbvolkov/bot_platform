@@ -50,11 +50,15 @@ class IsmartGenerationConfig:
     max_reference_chars: int = 0
     use_llm_validator: bool = True
     use_validation_controller: bool = True
-    validation_controller_accept_score: float = 0.2
+    validation_controller_accept_score: float = 3.0
     generation_target: str | None = None
     verbose: bool = False
     langchain_config: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     previous_lessons_context: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
+    resume_mode: str | None = None
+    existing_output_root: Path | None = None
+    existing_lesson_output_dir: Path | None = None
+    existing_package: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

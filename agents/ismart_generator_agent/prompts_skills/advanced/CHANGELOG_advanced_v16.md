@@ -10,7 +10,7 @@ Advanced directory: `docs/ismart/Материалы для ИИ-агентов/�
 - Each advanced prompt file starts from the current working basic prompt file with the same filename.
 - Controlled additions were appended only where v16 changes are needed for this iteration.
 - The prompts do not contain runtime profile switches; profile isolation is done by directory/registry selection before generation.
-- Rules that would require inventing extra practice tasks were intentionally not transferred; `lesson.practice_tasks` remains authoritative for task count, ids, order, and levels.
+- Rules that would require inventing extra practice tasks from generic quotas were intentionally not transferred; `SOURCE CONTRACT FROM JSON.tasks`, expanded from `lesson.difficulty.*.count`, is authoritative for task count, ids, order, and levels. `lesson.practice_tasks` provides samples/patterns and can be fewer than the required count.
 
 ## Files with controlled additions
 

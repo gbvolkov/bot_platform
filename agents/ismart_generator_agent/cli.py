@@ -24,6 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-generation-iterations", type=int, default=3)
     parser.add_argument("--max-package-repair-iterations", type=int, default=2)
     parser.add_argument("--max-reference-chars", type=int, default=0)
+    parser.add_argument(
+        "--resume-missing-from",
+        help="Existing lesson folder or root with lesson folders. Runs only missing/unusable materials in-place.",
+    )
     parser.add_argument("--provider", default=ModelType.GPT.value, help="Model provider value or enum name.")
     parser.add_argument("--model-mode", choices=("base", "mini", "nano"), default="base")
     parser.add_argument("--verbose", action="store_true", help="Print deterministic generation trace to stdout.")
@@ -88,6 +92,9 @@ def _build_request(args: argparse.Namespace) -> dict[str, Any]:
         request["lesson_number"] = str(args.lesson_number)
     if args.generation_target:
         request["generation_target"] = args.generation_target
+    if args.resume_missing_from:
+        request["resume_mode"] = "missing_only"
+        request["existing_output_root"] = args.resume_missing_from
     return request
 
 

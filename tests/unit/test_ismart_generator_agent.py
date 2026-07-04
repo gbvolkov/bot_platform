@@ -23,6 +23,7 @@ from agents.ismart_generator_agent.context import (
     channel_key_visibility_policy_for_spec,
     generation_artifacts_for_validation,
     source_contract_for_spec,
+    task_identity,
     validation_policy_for_spec,
 )
 from agents.ismart_generator_agent.contracts import (
@@ -518,6 +519,202 @@ def test_write_task_output_removes_stale_error_json(tmp_path: Path) -> None:
     assert (output_dir / "result.json").exists()
 
 
+def _write_existing_lesson_package(
+    lesson_dir: Path,
+    *,
+    task: dict[str, Any],
+    materials: list[dict[str, Any]],
+) -> None:
+    lesson_dir.mkdir(parents=True, exist_ok=True)
+    manifest_materials = []
+    result_materials = []
+    for index, material in enumerate(materials, start=1):
+        kind = str(material["kind"])
+        filename = material.get("file") or f"{index:02d}_{kind.replace('_', '-')}.html"
+        content = str(material.get("content") or VALID_HTML)
+        (lesson_dir / filename).write_text(content, encoding="utf-8")
+        manifest_materials.append({**material, "file": filename, "content": None})
+        result_materials.append({**material, "content": content})
+    task_id, lesson_number, lesson_title = task_identity(task)
+    result = {
+        "task_id": task_id,
+        "lesson_number": lesson_number,
+        "lesson_title": lesson_title,
+        "course_level": "basic",
+        "resolved_profile": "basic",
+        "status": "approved",
+        "output_dir": str(lesson_dir),
+        "agents_called": [],
+        "prompt_files_used": [],
+        "materials": result_materials,
+        "package_validation": {"approved": True, "issues": [], "fix_instructions": []},
+        "references": {},
+    }
+    manifest = {
+        **{key: result[key] for key in ("task_id", "lesson_number", "lesson_title", "course_level", "resolved_profile", "status")},
+        "materials": [
+            {key: value for key, value in item.items() if value is not None}
+            for item in manifest_materials
+        ],
+        "package_validation": result["package_validation"],
+        "references": {},
+    }
+    (lesson_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    (lesson_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+
+def _practice_material_json(**overrides: Any) -> dict[str, Any]:
+    data = {
+        "kind": "practice",
+        "type": "practice",
+        "agent": "PracticeMaterialAgent",
+        "status": "approved",
+        "iterations": 1,
+        "prompt_files": [],
+        "validation_issues": [],
+        "generation_artifacts": {
+            "practice_templates": {"tasks": [{"id": "P1"}]},
+            "practice_instances": {
+                "lesson_goal": "Goal",
+                "lesson_objectives": ["Objective"],
+                "tasks": [
+                    {
+                        "id": "P1",
+                        "template_id": "P1",
+                        "level": "L1",
+                        "task_type": "write",
+                        "scenario": "Scenario",
+                        "student_condition": "Write code.",
+                    }
+                ],
+            },
+        },
+    }
+    data.update(overrides)
+    return data
+
+
+def _approved_material_json(kind: str, agent: str, **overrides: Any) -> dict[str, Any]:
+    data = {
+        "kind": kind,
+        "type": kind,
+        "agent": agent,
+        "status": "approved",
+        "iterations": 1,
+        "prompt_files": [],
+        "validation_issues": [],
+    }
+    data.update(overrides)
+    return data
+
+
+def _write_prompt_files(prompt_dir: Path, kinds: list[str]) -> None:
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    for kind in kinds:
+        for name in get_material_spec(kind).prompt_files:
+            (prompt_dir / name).write_text(f"prompt {name}", encoding="utf-8")
+
+
+def test_missing_only_resume_noops_when_existing_package_is_complete(tmp_path: Path) -> None:
+    task = _profile_task()
+    lesson_dir = tmp_path / "existing" / "1-lesson-1"
+    _write_existing_lesson_package(
+        lesson_dir,
+        task=task,
+        materials=[
+            _practice_material_json(file="01_practice.html"),
+            _approved_material_json("practice_guidance", "PracticeGuidanceArtifactAgent", file="02_practice-guidance.html"),
+            _approved_material_json("specification_qa", "SpecificationQAAgent", file="03_specification-qa.html"),
+        ],
+    )
+
+    result = IsmartGeneratorRuntime(
+        config=IsmartGenerationConfig(
+            output_root=tmp_path,
+            resume_mode="missing_only",
+            existing_output_root=tmp_path / "existing",
+        ),
+        subagents={},
+    ).run_task(task)
+
+    assert result.status == "approved"
+    assert result.output_dir == str(lesson_dir)
+    assert [material.kind for material in result.materials] == ["practice", "practice_guidance", "specification_qa"]
+    assert result.package_validation.approved is True
+
+
+def test_missing_only_resume_generates_missing_practice_guidance_and_regenerates_qa(tmp_path: Path) -> None:
+    task = _profile_task()
+    lesson_dir = tmp_path / "existing" / "1-lesson-1"
+    _write_existing_lesson_package(
+        lesson_dir,
+        task=task,
+        materials=[
+            _practice_material_json(file="01_practice.html"),
+            _approved_material_json("specification_qa", "SpecificationQAAgent", file="02_specification-qa.html"),
+        ],
+    )
+    prompt_dir = tmp_path / "prompts"
+    _write_prompt_files(prompt_dir, ["practice_guidance", "specification_qa"])
+    guidance = PracticeGuidanceArtifact(
+        header={
+            "work_title": "Practice guidance 1",
+            "topic": "Profile test",
+            "lesson_number": "1",
+            "audience": "Python students",
+        },
+        goals={"goal": "Complete practice.", "objectives": ["Run code."]},
+        methodical_guidance={
+            "stages": [
+                {
+                    "id": "stage-1",
+                    "title": "Stage",
+                    "source_task_ids": ["P1"],
+                    "worked_example": {"task_statement": "Example."},
+                    "module_tasks": [{"task_id": "P1", "student_condition": "Write code."}],
+                }
+            ]
+        },
+        result_requirements={
+            "deliverable": "Completed task P1.",
+            "criteria": ["Code runs.", "Result matches the condition."],
+        },
+        self_check_questions=["What to check?", "How to run?", "What should happen?"],
+    )
+    subagents = {
+        "PracticeGuidanceArtifactAgent": FakeGraph([guidance]),
+        "SpecificationQAAgent": FakeGraph([GeneratedMaterial(content=VALID_HTML, agent_notes=[])]),
+        "MaterialValidatorAgent": FakeGraph(
+            [MaterialValidationDecision(approved=True), MaterialValidationDecision(approved=True)]
+        ),
+        "PackageValidatorAgent": FakeGraph([PackageValidationDecision(approved=True)]),
+    }
+
+    result = IsmartGeneratorRuntime(
+        config=IsmartGenerationConfig(
+            prompts_dir=prompt_dir,
+            output_root=tmp_path,
+            resume_mode="missing_only",
+            existing_output_root=tmp_path / "existing",
+            max_generation_iterations=1,
+        ),
+        subagents=subagents,
+    ).run_task(task)
+
+    assert result.status == "approved"
+    assert [material.kind for material in result.materials] == ["practice", "practice_guidance", "specification_qa"]
+    assert result.materials[0].iterations == 1
+    assert result.materials[1].iterations == 1
+    assert result.materials[2].iterations == 1
+    updated_manifest = json.loads((lesson_dir / "manifest.json").read_text(encoding="utf-8"))
+    files_by_kind = {item["kind"]: item["file"] for item in updated_manifest["materials"]}
+    assert files_by_kind["practice"] == "01_practice.html"
+    assert files_by_kind["specification_qa"] == "02_specification-qa.html"
+    assert files_by_kind["practice_guidance"] == "03_practice-guidance.html"
+    assert len(subagents["PracticeGuidanceArtifactAgent"].calls) == 1
+    assert len(subagents["SpecificationQAAgent"].calls) == 1
+
+
 def test_advanced_registry_does_not_add_per_lesson_practice_quota_rule() -> None:
     advanced_specs = [get_material_spec(kind, course_level="advanced") for kind in ("practice", "specification_qa")]
     joined = "\n".join(
@@ -818,6 +1015,66 @@ def test_practice_guidance_input_uses_structured_practice_without_raw_html_or_hi
     assert "secret-sha" not in serialized
     assert "secret broken code" not in serialized
     assert payload["source_warnings"][0]["code"] == "raw_faulty_code_omitted"
+
+
+def test_practice_guidance_prompt_maps_faulty_code_display_to_code_cell() -> None:
+    prompt = practice_guidance.build_practice_guidance_prompt(
+        prompt_contents={},
+        input_payload={
+            "practice_tasks": [
+                {
+                    "id": "P1",
+                    "student_condition": "Fix code.",
+                    "faulty_code_display": "prnt('x')",
+                }
+            ]
+        },
+        previous_issues=[],
+    )
+
+    assert "faulty_code_display to module_tasks[].code_cell exactly" in prompt
+    assert "code_cell is the learner-facing code display field" in prompt
+
+
+def test_practice_guidance_validation_allows_code_cell_from_faulty_code_display() -> None:
+    spec = get_material_spec("practice_guidance")
+    policy = validation_policy_for_spec(spec)
+
+    assert "module_tasks[].code_cell is the expected learner-facing code field" in policy
+    assert "faulty_code_display or starter_code exactly" in policy
+    assert "Do not reject this as duplicated code" in policy
+
+
+def test_default_validation_controller_accept_score_matches_zero_to_five_policy() -> None:
+    assert IsmartGenerationConfig().validation_controller_accept_score == 3.0
+
+
+def test_specification_qa_policy_uses_approved_practice_instances_as_exact_source() -> None:
+    spec = get_material_spec("specification_qa")
+    policy = validation_policy_for_spec(spec)
+    prompt_addendum = spec.prompt_addendum
+    contract = source_contract_for_spec(
+        {
+            "lesson": {
+                "difficulty": {
+                    "l1": {"count": 1},
+                    "l2": {"count": 0},
+                    "l3": {"count": 0},
+                },
+                "practice_tasks": {"l1": [{"number": 1, "text": "sample"}], "l2": [], "l3": []},
+                "hours": {"practice": 1},
+            }
+        },
+        spec,
+    )
+    rules = " ".join(contract["generation_rules"] + contract["validation_rules"])
+
+    assert "specification_qa is an internal QA artifact" in policy
+    assert "corrected/fixed code, patches" in policy
+    assert "must match the corresponding approved practice instance exactly" in policy
+    assert "копируй конкретные токены ошибок" in prompt_addendum
+    assert "approved practice_instances only" in rules
+    assert "Reject any QA task value that differs" in rules
 
 
 def test_practice_guidance_schema_rejects_empty_required_sections() -> None:
@@ -1500,8 +1757,8 @@ def test_practice_source_contract_is_template_variant_based() -> None:
     assert contract["contract_type"] == "practice_source_contract"
     assert contract["authoritative_task_ids"] == ["P1"]
     assert contract["required_task_count"] == 1
-    assert "authoritative task pattern" in rules
-    assert "lesson.difficulty.*.count is planning context only" in rules
+    assert "source evidence for a task pattern" in rules
+    assert "lesson.difficulty.*.count defines how many tasks must be generated per level" in rules
     assert "Create a new concrete variant of the same pattern" in rules
     assert "Do not choose manual_only merely because the starting code is intentionally faulty" in rules
     assert "quote the expected diagnostic message" in rules
@@ -1509,6 +1766,35 @@ def test_practice_source_contract_is_template_variant_based() -> None:
     assert "level, source task, condition" not in rules
     assert "PracticeTaskTemplateAgent" in " ".join(contract["pipeline"])
     assert "PracticeTaskVariantAgent" in " ".join(contract["pipeline"])
+
+
+def test_practice_source_contract_expands_difficulty_counts_beyond_samples() -> None:
+    spec = get_material_spec("practice")
+    task = {
+        "lesson": {
+            "title": "Variables and output",
+            "content": {"general": "Create variables, print values, and fix simple output errors."},
+            "difficulty": {"l1": {"count": 2}, "l2": {"count": 3}, "l3": {"count": 0}},
+            "practice_tasks": {
+                "l1": [
+                    {"number": 1, "text": "Create a string variable and print it"},
+                    {"number": 2, "text": "Create an integer variable and print it"},
+                ],
+                "l2": [
+                    {"number": 3, "text": "Create two variables and print both values"},
+                ],
+            },
+        }
+    }
+
+    contract = source_contract_for_spec(task, spec)
+
+    assert contract["required_task_count"] == 5
+    assert contract["authoritative_task_ids"] == ["P1", "P2", "P3", "P4", "P5"]
+    assert [item["level"] for item in contract["tasks"]] == ["L1", "L1", "L2", "L2", "L2"]
+    assert [item["sample_missing"] for item in contract["tasks"]] == [False, False, False, True, True]
+    assert contract["tasks"][3]["source_kind"] == "generated_from_lesson_topic"
+    assert "Variables and output" in contract["tasks"][3]["source_text"]
 
 
 def test_project_practice_source_contract_uses_lesson_content_when_task_rows_are_empty() -> None:
@@ -1564,7 +1850,7 @@ def test_practice_variant_prompt_requires_single_file_for_deterministic_fix_task
     assert "correction task with deterministic corrected behavior" in prompt
     assert "Use run_mode=single_file" in prompt
     assert "Do not downgrade this to manual_only just because the initial code is faulty" in prompt
-    assert "For no-stdin corrected-output fix/debug tasks, create 3 runtime_tests/tests" in prompt
+    assert "For no-stdin corrected-output fix/debug tasks, create exactly one runtime_tests/tests row" in prompt
 
 
 class NamedFakeGraph(FakeGraph):
@@ -3549,8 +3835,6 @@ def test_mr_practice_source_contract_has_authoritative_task_ids() -> None:
                 ],
                 "l2": [
                     {"number": 3, "text": "Print name age"},
-                    {"number": 4, "text": "Print phrase"},
-                    {"number": 5, "text": "Favorite color and animal"},
                 ],
             },
         }
@@ -3561,8 +3845,9 @@ def test_mr_practice_source_contract_has_authoritative_task_ids() -> None:
     assert contract["contract_type"] == "mr_practice_task_key_contract"
     assert contract["authoritative_task_ids"] == ["P1", "P2", "P3", "P4", "P5"]
     assert contract["required_task_count"] == 5
-    assert "Do not add, infer, or preserve any P task" in " ".join(contract["generation_rules"])
-    assert "Missing keys for task ids outside authoritative_task_ids are not valid validation issues" in " ".join(contract["validation_rules"])
+    assert contract["tasks"][3]["sample_missing"] is True
+    assert "Do not reduce teacher guidance to the original JSON sample rows" in " ".join(contract["generation_rules"])
+    assert "approved practice dependency task list" in " ".join(contract["validation_rules"])
 
 
 def test_mr_practice_prompts_ignore_non_authoritative_validator_task_feedback() -> None:
@@ -3614,8 +3899,8 @@ def test_mr_practice_prompts_ignore_non_authoritative_validator_task_feedback() 
 
     assert '"authoritative_task_ids": [\n    "P1",\n    "P2"\n  ]' in generation_prompt
     assert "Ignore validator feedback that asks for non-authoritative tasks" in generation_prompt
-    assert "validator issue says that keys are missing for a task id that is not listed in authoritative_task_ids" in validation_prompt
-    assert "Missing keys for task ids outside authoritative_task_ids are not valid validation issues" in validation_prompt
+    assert "full approved practice dependency task list" in validation_prompt
+    assert "outside the approved practice dependency task list and outside authoritative_task_ids" in validation_prompt
 
 
 def test_mr_intermediate_contract_uses_dependency_artifact_without_key_bank_html() -> None:
@@ -4372,7 +4657,7 @@ def test_controller_prompt_overrules_non_authoritative_task_ids() -> None:
     assert "If a validator issue says that keys are missing for a task id that is not listed in authoritative_task_ids" in prompt
 
 
-def test_practice_controller_prompt_overrules_difficulty_count_mismatch() -> None:
+def test_practice_controller_prompt_keeps_missing_expanded_task_blocking() -> None:
     spec = get_material_spec("practice")
     task = {
         "course": {},
@@ -4403,8 +4688,8 @@ def test_practice_controller_prompt_overrules_difficulty_count_mismatch() -> Non
     )
 
     assert "authoritative_task_ids" in prompt
-    assert "lesson.difficulty.*.count conflicts with lesson.practice_tasks" in prompt
-    assert "overrule validator demands to invent extra tasks such as P6/P7" in prompt
+    assert "missing direct lesson.practice_tasks samples are not a reason to omit tasks" in prompt
+    assert "Do not use controller tolerance to approve a smaller task set" in prompt
 
 
 def test_practice_controller_prompt_overrules_unclosed_string_display_objection() -> None:
@@ -4438,7 +4723,7 @@ def test_practice_validation_policy_focuses_on_methodology_not_task_layout() -> 
     assert "starter code is optional" in policy
 
 
-def test_practice_appellate_policy_approves_overstrict_difficulty_count_issue(tmp_path: Path) -> None:
+def test_practice_appellate_policy_keeps_missing_expanded_task_blocking(tmp_path: Path) -> None:
     spec = get_material_spec("practice")
     task = {
         "course": {},
@@ -4483,10 +4768,10 @@ def test_practice_appellate_policy_approves_overstrict_difficulty_count_issue(tm
         decision=decision,
     )
 
-    assert adjusted["approved"] is True
-    assert adjusted["decision"] == "approve_material"
-    assert adjusted["blocking_issues"] == []
-    assert adjusted["overruled_validator_issues"] == [issue]
+    assert adjusted["approved"] is False
+    assert adjusted["decision"] == "keep_failed"
+    assert adjusted["blocking_issues"] == [issue]
+    assert adjusted["overruled_validator_issues"] == []
 
 
 def test_practice_appellate_policy_approves_subject_entity_and_layout_objections(tmp_path: Path) -> None:

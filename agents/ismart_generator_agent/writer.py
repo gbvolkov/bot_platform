@@ -48,18 +48,23 @@ def write_task_output(
     result: IsmartGenerationResult,
     output_dir: Path,
     validation_reports: dict[str, ValidationResult],
+    material_file_overrides: dict[str, str] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     stale_error = output_dir / "error.json"
     if stale_error.exists():
         stale_error.unlink()
-    material_files: dict[str, str] = {}
+    material_files: dict[str, str] = dict(material_file_overrides or {})
+    used_filenames = {value for value in material_files.values() if value}
     for index, material in enumerate(result.materials, start=1):
         if material.status in SKIPPED_MATERIAL_STATUSES:
             continue
-        filename = material_filename(index, material)
+        filename = material_files.get(material.kind)
+        if not filename:
+            filename = _next_material_filename(output_dir, material.kind, used_filenames, start_index=index)
+            material_files[material.kind] = filename
+            used_filenames.add(filename)
         (output_dir / filename).write_text(material.content, encoding="utf-8")
-        material_files[material.kind] = filename
 
     manifest = {
         "task_id": result.task_id,
@@ -137,3 +142,21 @@ def _batch_status(results: list[IsmartGenerationResult]) -> str:
     if any(item.status in {"skipped", "completed_with_skips"} for item in results):
         return "completed_with_skips"
     return "approved"
+
+
+def _next_material_filename(output_dir: Path, kind: str, used_filenames: set[str], *, start_index: int) -> str:
+    index = max(start_index, _max_existing_material_index(output_dir, used_filenames) + 1)
+    while True:
+        filename = f"{index:02d}_{safe_slug(kind)}.html"
+        if filename not in used_filenames and not (output_dir / filename).exists():
+            return filename
+        index += 1
+
+
+def _max_existing_material_index(output_dir: Path, used_filenames: set[str]) -> int:
+    max_index = 0
+    for name in {path.name for path in output_dir.glob("*.html")} | set(used_filenames):
+        prefix = name.split("_", 1)[0]
+        if prefix.isdigit():
+            max_index = max(max_index, int(prefix))
+    return max_index

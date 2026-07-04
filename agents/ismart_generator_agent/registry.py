@@ -74,7 +74,7 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         json_field_labels=("course", "module", "lesson.practice_tasks", "lesson.difficulty", "lesson.content", "lesson.hours.practice"),
         prompt_addendum=(
             "Создай ученическую практику строго из GENERATION ARTIFACTS FOR THIS MATERIAL.practice_instances. "
-            "lesson.practice_tasks/source_contract.tasks задают авторитетный P id, уровень, тип и паттерн задания; "
+            "source_contract.tasks задаёт полный авторитетный список P id, уровней, типов и паттернов задания; lesson.practice_tasks дают sample-паттерны и могут быть неполными; "
             "конкретная ученическая формулировка, сценарий, значения, имена переменных, входы/выходы и код берутся "
             "из PracticeTaskInstanceSet и должны быть новым вариантом, а не копией теории или reference_examples. "
             "Предметные сущности в source_text являются примерами слотов, если источник явно не требует именно их: "
@@ -92,7 +92,8 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "и не подставляй вымышленные значения; при этом сохрани для такого задания поля «Как проверить» и «Тесты» "
             "со статусом «не заданы/не применимы до уточнения». Для такого задания не делай таблицу или строку "
             "«вход → ожидаемый вывод» и не ставь заглушки в колонку ожидаемого вывода. Если runtime_tests заданы, выводи их как "
-            "минимум 3 точные пары stdin→stdout: поле input как stdin, поле expected_output как stdout. Поле tests является legacy alias "
+            "точные пары stdin→stdout: поле input как stdin, поле expected_output как stdout. Для задач с варьируемым вводом ожидается "
+            "минимум 3 осмысленные уникальные пары; для no-stdin fixed-output задач допустима одна точная строка теста, без дублирования. Поле tests является legacy alias "
             "для runtime_tests. Если manual_checks заданы, покажи их отдельным learner-facing чек-листом ручной/статической "
             "проверки; для задач на рефакторинг такой чек-лист обязателен для требований, которые stdout не доказывает "
             "(имена переменных, комментарии, устранение повторов, именованные константы). Рендери проверку строго по "
@@ -141,12 +142,20 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "Validate practice_guidance against structured PracticeGuidanceArtifact and PracticeGuidanceInput only. "
             "Do not validate raw HTML. Reject learner-facing leakage of keys, internal answer/explanation fields, "
             "corrected code, internal field names, JSON/process wording, SHA, or local paths. "
+            "For module_tasks, module_tasks[].code_cell is the expected learner-facing code field. It may copy "
+            "PracticeGuidanceInput.practice_tasks[].faulty_code_display or starter_code exactly, including intentionally "
+            "faulty code that the learner must fix. Do not reject this as duplicated code, key leakage, or corrected-code "
+            "leakage unless code_cell contains corrected code, hidden_solution, teacher_explanation, or content that is not "
+            "present in the corresponding learner-facing practice task fields. "
             "Approve only if module_tasks correspond to PracticeGuidanceInput.practice_tasks, worked examples do not replace module tasks, "
             "and previous-lesson links are based only on non-empty PracticeGuidanceInput.previous_lessons_context."
         ),
         controller_policy_addendum=(
             "Overrule validator objections about rendered HTML structure for practice_guidance; HTML is deterministic renderer output. "
-            "Keep blocking issues only for semantic artifact defects, missing approved practice tasks, or learner-facing key leakage."
+            "Overrule validator objections that module_tasks[].code_cell duplicates faulty_code_display/starter_code from "
+            "PracticeGuidanceInput.practice_tasks; this is the required mapping, not a defect. "
+            "Keep blocking issues only for semantic artifact defects, missing approved practice tasks, corrected-code leakage, "
+            "or learner-facing key leakage."
         ),
     ),
     "mr_theory": MaterialSpec(
@@ -178,6 +187,8 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         reference_fields=("requirements", "reference_examples", "goals_and_tasks", "donor_materials"),
         json_field_labels=("teacher_materials.practice", "lesson.practice_tasks", "lesson.difficulty", "lesson.hours.practice"),
         prompt_addendum=(
+            "Если dependency practice содержит generation_artifacts.practice_instances.tasks, используй полный список реально сгенерированных задач как источник истины. "
+            "Не сокращай МР до sample-строк из lesson.practice_tasks: они являются примерами/паттернами, а не полным списком заданий. "
             "Создай МР-практику для учителя. Включи раздел «Ключи и пояснения» только к задачам из "
             "SOURCE CONTRACT FROM JSON.authoritative_task_ids, в том же порядке и с теми же P id. "
             "Если dependency practice содержит generation_artifacts.practice_instances, используй эти instances, "
@@ -324,6 +335,10 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
         reference_fields=REFERENCE_FIELDS,
         json_field_labels=("full task JSON", "all MaterialResult", "validation reports"),
         prompt_addendum=(
+            "Для практических задач, если dependency practice содержит generation_artifacts.practice_instances.tasks, используй полный список реально сгенерированных задач как источник истины. "
+            "Не сокращай QA до sample-строк из lesson.practice_tasks: они являются примерами/паттернами, а не полным списком заданий. "
+            "Если approved practice dependency есть, копируй конкретные токены ошибок, faulty/starter code, input/output requirements, tests, manual_checks, hidden_solution и teacher_explanation только из approved practice_instances; "
+            "не заменяй их на значения из lesson.practice_tasks, reference examples или Markdown samples, даже если они похожи по паттерну. "
             "Создай Спецификацию+QA. Содержательно покрой паспорт, источники, ключи и тесты, "
             "faulty code и патчи, критерии QA, рубрику и результат валидации. "
             "QA-ID можно показывать в HTML для трассировки задач, потому что specification_qa является внутренним QA-артефактом. "
@@ -347,6 +362,22 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "в HTML называй это «закрытый набор проверки аттестации», без внутренних имён полей; не требуй, чтобы эти ключи были показаны в ученическом HTML. "
             "Если задача недоопределена для детерминированной автопроверки, явно пометь её как требующую "
             "уточнения источника или ручной проверки; не превращай пример в обязательный ключ/тест."
+        ),
+        validation_policy_addendum=(
+            "specification_qa is an internal QA artifact, not learner-facing material. It may include QA-ID labels, keys, "
+            "runtime tests, faulty code, corrected/fixed code, patches, rubrics, and teacher-only checking notes. Do not reject "
+            "specification_qa merely because it visibly contains those internal QA elements. "
+            "When approved practice dependency contains generation_artifacts.practice_instances.tasks, every concrete task value "
+            "in specification_qa must match the corresponding approved practice instance exactly: ids/order, error-message tokens, "
+            "student condition, faulty_code_display/starter_code, input/output requirements, tests/runtime_tests, manual_checks, "
+            "hidden_solution, and teacher_explanation. Reject substitutions from lesson.practice_tasks samples, reference examples, "
+            "or source Markdown when they differ from approved practice_instances. "
+            "Reject raw local paths, source hashes/SHA, process/retry logs, invented task ids, or contradictions with approved dependencies."
+        ),
+        controller_policy_addendum=(
+            "Overrule validator objections that specification_qa exposes QA-ID labels, keys, tests, corrected/fixed code, or patches; "
+            "these are allowed in this internal QA artifact. Keep failed for concrete mismatches with approved practice_instances, "
+            "invented task ids, raw local paths/source hashes, process logs, or unsupported source contradictions."
         ),
     ),
     "final_project": MaterialSpec(
@@ -386,8 +417,8 @@ ADVANCED_PROMPT_ADDENDUMS: dict[str, str] = {
     ),
     "practice": (
         "Use the selected Python practice prompt/skill baseline. L1, L2, and L3 tasks are allowed when they are present in "
-        "lesson.practice_tasks. Treat lesson.practice_tasks as the authoritative source for task count, order, level, type, "
-        "and checked skill. Do not add extra tasks to satisfy a general quota. For L3, preserve the independent-choice "
+        "SOURCE CONTRACT FROM JSON.tasks. Treat SOURCE CONTRACT as the authoritative source for task count, order, level, type, "
+        "and checked skill; lesson.practice_tasks are samples/patterns and may be fewer than the required count. Do not add extra tasks to satisfy a general quota. For L3, preserve the independent-choice "
         "nature of the task while still producing a concrete new variant and checkable outcome when the source supports it. "
         "When the source task explicitly requires use of AI as a tool, include a learner-facing disclosure requirement: "
         "what tool/query was used, what was changed manually, why the final solution is correct, and what limitations remain."
@@ -416,7 +447,8 @@ ADVANCED_VALIDATION_POLICY_ADDENDUMS: dict[str, str] = {
     "practice": """
 PRACTICE VALIDATION ADDENDUM:
 - L3 tasks are allowed when present in SOURCE CONTRACT FROM JSON.authoritative_task_ids. Do not reject a task merely because it requires independent choice of approach.
-- Task count, order, ids, and levels are defined by SOURCE CONTRACT FROM JSON.tasks. For ordinary practice this comes from lesson.practice_tasks; for project practice it can come from lesson.content with source_kind=project_content. Do not require extra tasks because of generic course quotas.
+- Task count, order, ids, and levels are defined by SOURCE CONTRACT FROM JSON.tasks. For ordinary practice this is expanded from lesson.difficulty.*.count, using lesson.practice_tasks as samples/patterns; for project practice it can come from lesson.content with source_kind=project_content. Do not require extra tasks because of generic course quotas.
+- When SOURCE CONTRACT contains generated-from-topic tasks because samples are missing, require the generated task list to include them instead of stopping at the sample rows.
 - Validate L3 by source faithfulness, topic coverage, feasibility in Python 3, and a clear checking path. Do not downgrade L3 into step-by-step L1/L2 guidance.
 - Require AI-use disclosure only when the source task or prompt/skill references explicitly make AI an allowed or required tool for that task.
 - When AI-use disclosure is required, it should ask the learner to state the tool/query, manual changes, correctness rationale, and limitations; it must not accept copied AI code without explanation as a complete answer.
@@ -425,6 +457,7 @@ PRACTICE VALIDATION ADDENDUM:
 QA VALIDATION ADDENDUM:
 - Validate L3 and AI-tool tasks against approved structured artifacts and source task ids only.
 - Do not infer missing tasks from generic course quotas when all authoritative_task_ids are present.
+- Do not treat a missing lesson.practice_tasks sample as permission to omit a task listed in authoritative_task_ids.
 - For source-required AI-tool tasks, QA may include internal checks for disclosure quality, manual modification, correctness rationale, and limitations.
 """.strip(),
 }
@@ -449,12 +482,22 @@ def _advanced_spec(kind: str, spec: MaterialSpec) -> MaterialSpec:
     prompt_addendum = spec.prompt_addendum
     if extra := ADVANCED_PROMPT_ADDENDUMS.get(kind):
         prompt_addendum = f"{prompt_addendum}\n\n{extra}" if prompt_addendum else extra
+    validation_policy_addendum = spec.validation_policy_addendum
+    if extra := ADVANCED_VALIDATION_POLICY_ADDENDUMS.get(kind):
+        validation_policy_addendum = (
+            f"{validation_policy_addendum}\n\n{extra}" if validation_policy_addendum else extra
+        )
+    controller_policy_addendum = spec.controller_policy_addendum
+    if extra := ADVANCED_CONTROLLER_POLICY_ADDENDUMS.get(kind):
+        controller_policy_addendum = (
+            f"{controller_policy_addendum}\n\n{extra}" if controller_policy_addendum else extra
+        )
     return replace(
         spec,
         course_level="advanced",
         prompt_addendum=prompt_addendum,
-        validation_policy_addendum=ADVANCED_VALIDATION_POLICY_ADDENDUMS.get(kind, ""),
-        controller_policy_addendum=ADVANCED_CONTROLLER_POLICY_ADDENDUMS.get(kind, ""),
+        validation_policy_addendum=validation_policy_addendum,
+        controller_policy_addendum=controller_policy_addendum,
     )
 
 

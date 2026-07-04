@@ -190,7 +190,14 @@ class PracticeGuidanceModuleTask(BaseModel):
     task_id: str = Field(..., min_length=1)
     level: str = ""
     student_condition: str = Field(..., min_length=1)
-    code_cell: str = ""
+    code_cell: str = Field(
+        default="",
+        description=(
+            "Learner-facing code shown for this task. If the source practice task has faulty_code_display, "
+            "copy that value here exactly. This field is not a solution field; it may contain intentionally "
+            "faulty starter code that the learner must fix."
+        ),
+    )
     input_requirements: str = ""
     output_requirements: str = ""
     checks: list[str] = Field(default_factory=list)

@@ -25,7 +25,7 @@ references_dir: "../референсы"
 
 Вход: JSON `../для_теста_существенные_данные.json` и Markdown-референсы, указанные в полях `materials_md` выбранного занятия/модуля.
 
-Задача: Сгенерируй практические задания по типам из JSON: L1/L2 должны соответствовать `lesson.practice_tasks`, а не произвольной задаче.
+Задача: Сгенерируй практические задания по полному `SOURCE CONTRACT FROM JSON.tasks`: количество и уровни идут из `lesson.difficulty.*.count`, а `lesson.practice_tasks` даёт sample-паттерны типов задач.
 
 Правила:
 1. Бери содержание, объём, тип занятия, уровни L1/L2/L3, цели, задачи и материалы только из JSON и Markdown-референсов.
@@ -41,11 +41,11 @@ references_dir: "../референсы"
 
 Эти правила имеют приоритет над старыми формулировками ниже:
 
-- `lesson.practice_tasks` — не готовый финальный текст задания, а авторитетное описание паттерна: id/номер, уровень, тип действия, проверяемый навык и ограничения.
+- `lesson.practice_tasks` — не готовый финальный текст задания и не всегда полный список заданий, а sample-паттерны: уровень, тип действия, проверяемый навык и ограничения.
 - Pipeline практики: `source task -> PracticeTaskTemplate -> PracticeTaskInstance -> learner-facing HTML`.
 - Сохраняй единый паттерн задания, но генерируй новые сценарии, значения, имена переменных, входы/выходы и код, отличные от теории, reference examples и уже созданных материалов.
-- Количество, P id, порядок и уровни задач бери из `lesson.practice_tasks.*` и source contract. Не добавляй задачи сверх входных данных из-за внешних нормативов, референсных примеров или замечаний валидатора.
-- Для каждой автопроверяемой кодовой задачи нужны минимум 3 осмысленных теста: типичный, граничный и нетипичный/особый, если они применимы к задаче. Каждый уникальный тест указывай один раз; не дублируй один и тот же тест ради количества.
+- Количество, P id, порядок и уровни задач бери из `SOURCE CONTRACT FROM JSON.tasks`, который расширяется по `lesson.difficulty.*.count`. Если sample-паттернов меньше, чем требуется по count, сгенерируй новые задачи по теме занятия и уровню.
+- Для каждой автопроверяемой кодовой задачи с варьируемым вводом нужны минимум 3 осмысленных теста: типичный, граничный и нетипичный/особый, если они применимы к задаче. Каждый уникальный тест указывай один раз; не дублируй один и тот же тест ради количества. Для no-stdin fixed-output задач допустим один точный тест, потому что других осмысленных входов нет.
 - У задачи должен быть один допустимый `stdout`. Если корректных вариантов вывода несколько, переформулируй задачу или переведи проверку в manual/static check.
 - Ожидаемый вывод должен быть точным: без лишнего `Ответ:`, пояснений, пробелов и строк. Если задача выводит текст, фразы должны быть грамматически согласованными и осмысленными.
 - Если паттерн задачи требует прочитать, продемонстрировать или интерпретировать сообщение ошибки Python (`SyntaxError`, `NameError` и т.п.), проверяемый результат — это сообщение ошибки или диагностический вывод, а не нормальный `stdout` исправленной программы. Не подставляй в тесты обычные значения вывода; используй `expected_error`/`error_message` или manual/static check.
@@ -56,7 +56,7 @@ references_dir: "../референсы"
 - Student practice HTML не показывает `source_text`, source contract, JSON/pipeline wording, `hidden_solution`, `teacher_explanation`, corrected code и internal artifacts.
 
 ### JSON selectors
-- `lesson.practice_tasks.l1` и `lesson.practice_tasks.l2` - авторитетный тип и ориентир задач.
+- `lesson.practice_tasks.l1` и `lesson.practice_tasks.l2` - sample-паттерны типов задач и ориентиры для генерации.
 - `lesson.difficulty.l1.count`, `lesson.difficulty.l2.count` - количество задач по уровням.
 - `lesson.hours.practice` и `lesson.hours.raw` - объём практической работы.
 - `lesson.content.*` - содержательная тема практики.
@@ -69,7 +69,7 @@ references_dir: "../референсы"
 - Спланируй количество этапов, задач и тестов по `lesson.hours.practice`, `lesson.hours.raw`, `lesson.difficulty.*` и `lesson.practice_tasks.*`.
 - Для каждой задачи сохрани тип из JSON: написать, дополнить, исправить и т.п.
 - Если тип задачи - исправление, дай исходный код с конкретной реалистичной ошибкой.
-- Для каждой автопроверяемой задачи дай минимум 3 тест-кейса парами вход -> ожидаемый вывод: типичный, граничный и нетипичный/особый, если они применимы. Не повторяй один и тот же тест несколько раз.
+- Для каждой автопроверяемой задачи с варьируемым вводом дай минимум 3 тест-кейса парами вход -> ожидаемый вывод: типичный, граничный и нетипичный/особый, если они применимы. Не повторяй один и тот же тест несколько раз. Для no-stdin fixed-output задач дай один точный тест-кейс с пустым входом.
 - Для задач на исправление не раскрывай точную правку в learner-facing формулировках; точная правка и исправленный код находятся только во внутренних полях для МР/QA.
 - Для задач на чтение/демонстрацию сообщения ошибки ожидаемый результат должен быть сообщением ошибки (`expected_error`/диагностический критерий), а не выдуманным `stdout` после исправления.
 - При рендеринге ученического HTML форма проверки зависит от structured artifact: `expected_output` → таблица `stdin → stdout`; `expected_error`/`error_message` → диагностическая проверка сообщения ошибки, не stdout-таблица; `run_mode = manual_only` и пустые `runtime_tests/tests` → раздел «Как проверить вручную» с `manual_checks`, без «Запустить тесты», «все тесты Успех», `stdin`, `stdout` и «Статус тестов».
@@ -85,7 +85,7 @@ references_dir: "../референсы"
 - Все обязательные секции из сохранённой структуры требований присутствуют или явно отмечены как неприменимые.
 - Все ссылки на источники ведут на Markdown-файлы из JSON, а не на исходные `.docx`, `.pdf`, `.html`.
 - Объём, тип задач, L1/L2 и ограничения L3 соответствуют JSON.
-- Количество, P id, порядок и уровни задач соответствуют `lesson.practice_tasks.*`; задачи сверх входных данных не добавлены.
+- Количество, P id, порядок и уровни задач соответствуют `SOURCE CONTRACT FROM JSON.tasks`; если для части P id нет sample в `lesson.practice_tasks.*`, они сгенерированы как новые задачи по теме занятия.
 - Практика по числу этапов, задач, тест-кейсов и подсказок достаточна для `lesson.hours.practice` и `lesson.hours.raw`.
 - Ключи и пояснения размещены только в разрешённых артефактах.
 - Формулировки понятны целевой аудитории и учителю-неэксперту.
@@ -97,9 +97,9 @@ references_dir: "../референсы"
 
 - **Шаг 1**: Требования по практике бери из Markdown-файлов `lesson.materials_md.requirements`.
 - **Шаг 2**: Объём и уровни бери из `lesson.difficulty.*`; модульные нормативы проверяй по `module.totals`.
-- **Шаг 3**: Тип и содержание задач бери из `lesson.practice_tasks.l1` и `lesson.practice_tasks.l2` (авторитетно): это паттерн, а не текст для дословного копирования.
+- **Шаг 3**: Тип и содержание задач бери из `SOURCE CONTRACT FROM JSON.tasks`; `lesson.practice_tasks.l1` и `lesson.practice_tasks.l2` используются как sample-паттерны, а не как полный список и не как текст для дословного копирования.
 - **Шаг 4**: Опора на готовую теорию занятия.
-- **Шаг 5**: Каждая задача сохраняет P id, уровень и тип из `lesson.practice_tasks.*`: написать код / дополнить / исправить и т.п. + минимум 3 осмысленных тест-кейса (вход → вывод) для автопроверяемых задач + эталон (ключ → МР и QA). `input()`/`print()` используй где нужно. Если тип — исправление, код с ошибкой обязателен. Задачи уникальны.
+- **Шаг 5**: Каждая задача сохраняет P id, уровень и тип из `SOURCE CONTRACT FROM JSON.tasks`; для задач без прямого sample сгенерируй новый паттерн по теме занятия, уровню и соседним sample-паттернам. Минимум 3 осмысленных тест-кейса (вход → вывод) для автопроверяемых задач + эталон (ключ → МР и QA). `input()`/`print()` используй где нужно. Если тип — исправление, код с ошибкой обязателен. Задачи уникальны.
 - **Шаг 6**: Если `lesson.teacher_materials.practice` требует МР, заполни МР-практику по `07_Методические_указания_prompt_skill.md`.
 - **Выход**: Задания + код с ошибкой + тесты (ученик) + ключи + МР-практика (учитель), если она требуется по `lesson.teacher_materials.practice`.
 ### Структура документа (референс практика_2.1.1)
@@ -137,9 +137,9 @@ Source: `Python advanced prompt workbook v16`, sheet `Practice`.
 
 - Practice tasks must teach or check executable action in the platform editor. When source-supported, checking is based on explicit input -> output tests and a success status.
 - Use Python 3 with the standard library by default. If a source task explicitly needs an additional library, mark that requirement clearly instead of silently using it.
-- Task type and task substance come from the source L1/L2/L3 cells in `lesson.practice_tasks`; keep the source pattern, but generate a new scenario, values, variable names, inputs, outputs, and code.
+- Task type and task substance come from `SOURCE CONTRACT FROM JSON.tasks`; source L1/L2/L3 cells in `lesson.practice_tasks` are samples/patterns. Keep the source pattern, but generate a new scenario, values, variable names, inputs, outputs, and code.
 - L3 tasks are allowed when present in the source data. L3 must preserve independent choice of approach and must not be reduced to a step-by-step beginner task.
 - Every generated task should have a learner-facing structure: context/legend, what is given, what to do, input data when relevant, output requirement, checking method, and tests or manual/static checks when deterministic tests are not source-supported.
 - For fix/debug tasks, include faulty code when the source task type requires it, but keep exact fixes, corrected code, keys, and teacher explanations only in internal artifacts.
-- Do not add practice tasks beyond the source task list. Source `lesson.practice_tasks` is authoritative for ids, levels, order, and count.
+- Do not add practice tasks beyond `SOURCE CONTRACT FROM JSON.tasks`. The source contract is authoritative for ids, levels, order, and count; `lesson.practice_tasks` may be fewer than the required count.
 - When a source task explicitly allows or requires AI as a tool, require learner disclosure: tool/query used, manual changes made, why the final solution is correct, and remaining limitations.

@@ -623,6 +623,10 @@ REQUIREMENTS:
 - self_check_questions must contain at least 3 learner-facing questions without answers or keys.
 - Use practice_tasks as the source of module tasks.
 - Do not change, replace, merge, split, or reconstruct module tasks.
+- For each PracticeGuidanceModuleTask, map practice_tasks[].faulty_code_display to module_tasks[].code_cell exactly.
+- module_tasks[].code_cell is the learner-facing code display field for starter or intentionally faulty code; it is not a solution field.
+- If faulty_code_display exists, leaving code_cell empty is invalid. Do not add requires_check saying there is no field for faulty_code_display; use code_cell.
+- Do not put raw faulty_code into code_cell when faulty_code_display exists.
 - Build stages by level and methodical similarity; source_task_ids must reference practice_tasks ids.
 - Create a worked analogous example for each stage. It must be similar by method but different from the module tasks.
 - Do not reveal keys, corrected code, internal answer/explanation fields, raw field names, JSON/process wording, SHA, or local paths.
