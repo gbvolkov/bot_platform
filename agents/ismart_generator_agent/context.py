@@ -4,8 +4,24 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import MaterialResult, MaterialSpec, ReferenceBundle, ValidationResult
-from .sources import compact_json
+from .sources import compact_json, sanitize_reference_markdown_content
 from .task_skip import project_practice_source_text
+
+
+EFFECTIVE_PRACTICE_CONTRACT_KEY = "_effective_practice_task_contract"
+TECHNICAL_JSON_CONTEXT_KEYS = {
+    "source_workbook",
+    "source_sheet",
+    "source_file",
+    "source_path",
+    "resolved_path",
+    "absolute_path",
+    "local_path",
+    "tracker_row",
+    "tracker_index",
+    "sha",
+    "hash",
+}
 
 
 def select_references(spec: MaterialSpec, references: ReferenceBundle) -> dict[str, list[dict[str, Any]]]:
@@ -23,7 +39,7 @@ def reference_document_for_prompt(document: Any) -> dict[str, Any]:
         "field": document.field,
         "document_name": Path(str(document.path)).stem,
         "truncated": document.truncated,
-        "content": document.content,
+        "content": sanitize_reference_markdown_content(document.content),
     }
     return data
 
@@ -46,14 +62,33 @@ def module_context_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[st
 def json_context_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[str, Any]:
     lesson = task.get("lesson") or {}
     context: dict[str, Any] = {
-        "course": task.get("course") or {},
-        "module": module_context_for_spec(task, spec),
-        "lesson": lesson,
+        "course": _public_json_context_value(task.get("course") or {}),
+        "module": _public_json_context_value(module_context_for_spec(task, spec)),
+        "lesson": _public_json_context_value(lesson),
         "json_field_labels": list(spec.json_field_labels),
     }
     if spec.kind == "final_project":
-        context["modules"] = task.get("modules") or []
+        context["modules"] = _public_json_context_value(task.get("modules") or [])
     return context
+
+
+def _public_json_context_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_technical_json_context_key(key_text):
+                continue
+            cleaned[key_text] = _public_json_context_value(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_public_json_context_value(item) for item in value]
+    return value
+
+
+def _is_technical_json_context_key(key: str) -> bool:
+    normalized = key.strip().lower()
+    return normalized.startswith("_") or normalized in TECHNICAL_JSON_CONTEXT_KEYS
 
 
 def _practice_level_count(value: Any) -> int | None:
@@ -132,6 +167,10 @@ def _generated_practice_source_text(task: dict[str, Any], *, level: str, task_id
 
 
 def _normalized_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]]:
+    effective_tasks = _effective_practice_tasks(task)
+    if effective_tasks is not None:
+        return effective_tasks
+
     lesson = task.get("lesson") or {}
     samples = _practice_source_samples(task)
     counts = _practice_required_counts(task, samples)
@@ -181,6 +220,15 @@ def _normalized_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return normalized_tasks
+
+
+def _effective_practice_tasks(task: dict[str, Any]) -> list[dict[str, Any]] | None:
+    lesson = task.get("lesson") or {}
+    value = lesson.get(EFFECTIVE_PRACTICE_CONTRACT_KEY)
+    if not isinstance(value, list):
+        return None
+    tasks = [dict(item) for item in value if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    return tasks if tasks else None
 
 
 def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[str, Any]:
@@ -284,16 +332,17 @@ def source_contract_for_spec(task: dict[str, Any], spec: MaterialSpec) -> dict[s
                 "Use approved practice dependency instances, tests, hidden_solution, and teacher_explanation as the source of truth.",
                 "When approved practice dependency is present, copy concrete error-message tokens, variable names, code snippets, input/output requirements, tests, manual checks, keys, and teacher explanations from the approved practice_instances only.",
                 "Do not substitute concrete values from lesson.practice_tasks, references, or Markdown examples when they differ from approved practice_instances.",
-                "Preserve each task pattern. Do not invent concrete variable names, concrete values, exact stdout, exact input data, or a mandatory output format unless they are explicitly present in source_text, Markdown references, or approved dependency artifacts.",
-                "If a task is underspecified for deterministic stdout, mark it as requiring source clarification or manual checking. Do not create deterministic autocheck tests, mandatory expected output, or mandatory reference code with invented values.",
+                "When approved practice dependency is present, concrete values, variable names, exact stdout, exact input data, and mandatory output format from approved practice_instances are approved generated variants, not inventions, even if they differ from lesson.practice_tasks source_text samples.",
+                "If no approved practice dependency is available, preserve each task pattern. Do not invent concrete variable names, concrete values, exact stdout, exact input data, or a mandatory output format unless they are explicitly present in source_text or Markdown references.",
+                "If no approved practice dependency is available and a task is underspecified for deterministic stdout, mark it as requiring source clarification or manual checking. Do not create deterministic autocheck tests, mandatory expected output, or mandatory reference code with invented values.",
                 "For underspecified tasks, an optional illustrative teacher example is allowed only if clearly labeled as a non-authoritative example and not used as the required test/key.",
                 "Reuse the approved practice and mr_practice dependency interpretation when they mark a task as underspecified or manually checked.",
-                "Do not claim full JSON conformance if QA introduced values, tests, or formats that are not in the source.",
+                "Do not claim full JSON conformance if QA introduced values, tests, or formats that are neither in the source nor in approved practice dependency artifacts.",
             ],
             "validation_rules": [
                 "Approve QA/specification only when task ids match the approved practice dependency task list when present; otherwise they must match authoritative_task_ids exactly.",
                 "Reject any QA task value that differs from the corresponding approved practice_instances value when approved practice dependency is available, even if the differing value appears in lesson.practice_tasks samples or reference examples.",
-                "Reject deterministic tests or keys for underspecified source tasks when they rely on invented concrete values.",
+                "Reject deterministic tests or keys for underspecified source tasks when they rely on invented concrete values and no approved practice dependency artifact supplies those values.",
                 "Do not reject merely because an underspecified task has no deterministic test; that is the correct source-faithful representation.",
             ],
         }
@@ -513,9 +562,10 @@ SPECIFICATION_QA VALIDATION POLICY:
 - Visible specification_qa HTML must not contain raw local source paths, tmp paths, source hashes/SHA values, local filenames, working-folder references such as docs/..., or Markdown source locators. Use human-readable source names if source traceability is needed.
 - Do not include process/retry history as publishable QA conclusions. Phrases such as "исправлено по замечаниям валидатора", "после попытки", "validator feedback was addressed", or similar generation-loop logs are blocking unless the user explicitly requested a technical execution log.
 - When approved practice dependency contains generation_artifacts.practice_instances.tasks, validate QA against that full generated task list, tests, hidden_solution, and teacher_explanation.
+- When approved practice dependency contains generation_artifacts.practice_instances.tasks, concrete variable names, values, exact stdout, tests, output format, hidden_solution, and teacher_explanation from those instances are approved generated variants. They are not inventions and must not be rejected merely because the original JSON/source_text sample used different entities or was less specific.
 - If no approved practice dependency is present, validate task ids against SOURCE CONTRACT FROM JSON.authoritative_task_ids. Do not infer extra tasks from examples or module-wide context.
-- For each practice task, preserve the source pattern and approved practice instance meaning. Do not require or approve invented concrete values, variable names, exact stdout, exact stdin, or mandatory output format unless they are explicit in source_text, references, or approved dependency artifacts.
-- If a source task is underspecified for deterministic stdout, QA should mark deterministic autocheck as unavailable/needs source clarification/manual check. Do not reject QA merely because such a task has no deterministic test.
+- For each practice task, preserve the source pattern and approved practice instance meaning. When approved dependency artifacts are present, judge concrete values against those artifacts, not against the original JSON sample wording. When no approved dependency artifact is present: Do not require or approve invented concrete values, variable names, exact stdout, exact stdin, or mandatory output format unless they are explicit in source_text or references.
+- If no approved practice dependency artifact is present and a source task is underspecified for deterministic stdout, QA should mark deterministic autocheck as unavailable/needs source clarification/manual check. Do not reject QA merely because such a task has no deterministic test.
 - For underspecified tasks, optional example code is acceptable only when clearly labeled as non-authoritative and not used as the expected output, key, or platform test.
 - If approved practice or mr_practice dependency marks a task as underspecified/manual, reuse that interpretation instead of creating deterministic tests.
 - Reject if QA claims "JSON conformance" while adding invented values/tests/formats, or if keys/tests/faulty patches contradict the approved materials.
@@ -640,6 +690,70 @@ def material_result_summary(
     return summary
 
 
+def approved_practice_dependency_source_for_prompt(
+    spec: MaterialSpec,
+    dependencies: list[MaterialResult],
+) -> dict[str, Any] | None:
+    if spec.kind not in {"mr_practice", "specification_qa"}:
+        return None
+
+    for material in dependencies:
+        if material.kind != "practice" or material.status != "approved":
+            continue
+        artifacts = material.generation_artifacts or {}
+        instances = artifacts.get("practice_instances")
+        if not isinstance(instances, dict):
+            return {
+                "present": False,
+                "reason": "Approved practice dependency is present, but generation_artifacts.practice_instances is missing.",
+            }
+        tasks = instances.get("tasks")
+        if not isinstance(tasks, list):
+            tasks = []
+        selected_tasks: list[dict[str, Any]] = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                continue
+            selected_tasks.append(
+                {
+                    "id": item.get("id"),
+                    "template_id": item.get("template_id"),
+                    "level": item.get("level"),
+                    "task_type": item.get("task_type"),
+                    "scenario": item.get("scenario"),
+                    "student_condition": item.get("student_condition"),
+                    "starter_code": item.get("starter_code"),
+                    "faulty_code_display": item.get("faulty_code_display"),
+                    "input_requirements": item.get("input_requirements"),
+                    "output_requirements": item.get("output_requirements"),
+                    "tests": item.get("tests"),
+                    "runtime_tests": item.get("runtime_tests"),
+                    "manual_checks": item.get("manual_checks"),
+                    "run_mode": item.get("run_mode"),
+                    "subtasks": item.get("subtasks"),
+                    "hidden_solution": item.get("hidden_solution"),
+                    "teacher_explanation": item.get("teacher_explanation"),
+                }
+            )
+        return {
+            "present": True,
+            "dependency_kind": "practice",
+            "dependency_status": material.status,
+            "task_count": len(selected_tasks),
+            "lesson_goal": instances.get("lesson_goal"),
+            "lesson_objectives": instances.get("lesson_objectives"),
+            "tasks": selected_tasks,
+            "usage_rules": [
+                "This block is the clean source of truth for all practice-related teacher keys, expected outputs, tests, and QA specification.",
+                "Use every task from tasks[] in the saved order. Do not fall back to original JSON sample rows when tasks[] is present.",
+                "Concrete task values, variable names, expected stdout, tests, output format, hidden_solution, and teacher_explanation in tasks[] are approved generated variants, not inventions, even if the original JSON sample used other entities or was less specific.",
+                "For mr_practice, copy the relevant hidden_solution, teacher_explanation, tests/runtime_tests/manual_checks, and expected error/output semantics from this block.",
+                "For specification_qa, specify exactly these generated tasks and do not introduce tasks or keys not present here.",
+            ],
+        }
+    return None
+
+
 def dependency_result_summaries_for_validation(
     spec: MaterialSpec,
     dependencies: list[MaterialResult],
@@ -649,6 +763,12 @@ def dependency_result_summaries_for_validation(
             material_result_summary(item, include_content=False)
             for item in dependencies
         ]
+        for item, summary in zip(dependencies, summaries, strict=False):
+            artifacts = generation_artifacts_for_validation_kind(item.kind, item.generation_artifacts)
+            if artifacts:
+                summary["generation_artifacts"] = artifacts
+            else:
+                summary.pop("generation_artifacts", None)
         for summary in summaries:
             if summary.get("kind") == "intermediate":
                 summary["content_omission_reason"] = (
@@ -657,14 +777,24 @@ def dependency_result_summaries_for_validation(
                     "only against CHECKED MATERIAL HTML."
                 )
         return summaries
-    return [material_result_summary(item) for item in dependencies]
+    summaries = [material_result_summary(item) for item in dependencies]
+    for item, summary in zip(dependencies, summaries, strict=False):
+        artifacts = generation_artifacts_for_validation_kind(item.kind, item.generation_artifacts)
+        if artifacts:
+            summary["generation_artifacts"] = artifacts
+        else:
+            summary.pop("generation_artifacts", None)
+    return summaries
 
 
 def package_material_payload(material: MaterialResult) -> dict[str, Any]:
     content = material.content
     stripped = content.strip()
     lower = stripped.lower()
-    generation_artifacts = material.generation_artifacts
+    generation_artifacts = package_generation_artifact_summary(
+        material.kind,
+        generation_artifacts_for_validation_kind(material.kind, material.generation_artifacts),
+    )
     structured_keys = tuple(
         key
         for key in PRIMARY_STRUCTURED_ARTIFACT_KEYS_BY_KIND.get(material.kind, ())
@@ -698,6 +828,185 @@ def package_material_payload(material: MaterialResult) -> dict[str, Any]:
     return payload
 
 
+def package_task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    course = _public_json_context_value(task.get("course") or {})
+    module = task.get("module") or {}
+    lesson = task.get("lesson") or {}
+    module_lessons = module.get("lessons") if isinstance(module, dict) else None
+    modules = task.get("modules")
+    return {
+        "task_id": task.get("task_id"),
+        "course": course,
+        "module": _public_json_context_value(
+            {key: value for key, value in module.items() if key != "lessons"}
+            if isinstance(module, dict)
+            else {}
+        ),
+        "lesson": _public_json_context_value(lesson),
+        "module_lessons_omitted": isinstance(module_lessons, list),
+        "module_lessons_count": len(module_lessons) if isinstance(module_lessons, list) else 0,
+        "modules_omitted": isinstance(modules, list),
+        "modules_count": len(modules) if isinstance(modules, list) else 0,
+    }
+
+
+def package_generation_artifact_summary(kind: str, artifacts: dict[str, Any]) -> dict[str, Any]:
+    if not artifacts:
+        return {}
+    if kind == "practice":
+        return _practice_artifact_package_summary(artifacts)
+    if kind == "practice_guidance":
+        return _practice_guidance_artifact_package_summary(artifacts)
+    if kind in {"self_work", "current_control", "intermediate"}:
+        return {key: _compact_package_artifact_value(value) for key, value in artifacts.items()}
+    return {}
+
+
+def _practice_artifact_package_summary(artifacts: dict[str, Any]) -> dict[str, Any]:
+    templates = artifacts.get("practice_templates")
+    instances = artifacts.get("practice_instances")
+    return {
+        "practice_templates": _task_set_package_summary(templates),
+        "practice_instances": _task_set_package_summary(instances, include_test_counts=True),
+    }
+
+
+def _practice_guidance_artifact_package_summary(artifacts: dict[str, Any]) -> dict[str, Any]:
+    guidance_input = artifacts.get("practice_guidance_input")
+    guidance_artifact = artifacts.get("practice_guidance_artifact")
+    return {
+        "practice_guidance_input": _practice_guidance_input_package_summary(guidance_input),
+        "practice_guidance_artifact": _practice_guidance_output_package_summary(guidance_artifact),
+    }
+
+
+def _task_set_package_summary(value: Any, *, include_test_counts: bool = False) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"present": False}
+    tasks = value.get("tasks")
+    if not isinstance(tasks, list):
+        tasks = []
+    task_summaries: list[dict[str, Any]] = []
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+        summary: dict[str, Any] = {
+            "id": item.get("id"),
+            "template_id": item.get("template_id"),
+            "level": item.get("level"),
+            "task_type": item.get("task_type"),
+        }
+        if include_test_counts:
+            summary["tests_count"] = len(item.get("tests") or []) if isinstance(item.get("tests"), list) else 0
+            summary["runtime_tests_count"] = (
+                len(item.get("runtime_tests") or []) if isinstance(item.get("runtime_tests"), list) else 0
+            )
+            summary["manual_checks_count"] = (
+                len(item.get("manual_checks") or []) if isinstance(item.get("manual_checks"), list) else 0
+            )
+            summary["has_hidden_solution"] = bool(item.get("hidden_solution"))
+            summary["has_teacher_explanation"] = bool(item.get("teacher_explanation"))
+        task_summaries.append(summary)
+    return {
+        "present": True,
+        "task_count": len(task_summaries),
+        "task_ids": [item.get("id") for item in task_summaries],
+        "tasks": task_summaries,
+    }
+
+
+def _practice_guidance_input_package_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"present": False}
+    practice_tasks = value.get("practice_tasks")
+    if not isinstance(practice_tasks, list):
+        practice_tasks = []
+    references = value.get("references") if isinstance(value.get("references"), dict) else {}
+    retry_context = value.get("retry_context") if isinstance(value.get("retry_context"), dict) else {}
+    return {
+        "present": True,
+        "input_version": value.get("input_version"),
+        "task_meta": _public_json_context_value(value.get("task_meta") or {}),
+        "practice_task_count": len(practice_tasks),
+        "practice_task_ids": [item.get("id") for item in practice_tasks if isinstance(item, dict)],
+        "theory_available": bool((value.get("theory_brief_source") or {}).get("available"))
+        if isinstance(value.get("theory_brief_source"), dict)
+        else False,
+        "reference_counts": {
+            field: len(items)
+            for field, items in references.items()
+            if isinstance(items, list)
+        },
+        "source_warning_count": len(value.get("source_warnings") or [])
+        if isinstance(value.get("source_warnings"), list)
+        else 0,
+        "retry_attempt": retry_context.get("attempt"),
+        "has_previous_artifact": bool(retry_context.get("previous_artifact")),
+        "previous_validation_issue_count": len(retry_context.get("previous_validation_issues") or [])
+        if isinstance(retry_context.get("previous_validation_issues"), list)
+        else 0,
+    }
+
+
+def _practice_guidance_output_package_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"present": False}
+    stages = ((value.get("methodical_guidance") or {}).get("stages") or [])
+    stage_summaries: list[dict[str, Any]] = []
+    if isinstance(stages, list):
+        for item in stages:
+            if not isinstance(item, dict):
+                continue
+            module_tasks = item.get("module_tasks") if isinstance(item.get("module_tasks"), list) else []
+            source_task_ids = item.get("source_task_ids") if isinstance(item.get("source_task_ids"), list) else []
+            stage_summaries.append(
+                {
+                    "id": item.get("id"),
+                    "level": item.get("level"),
+                    "source_task_ids": source_task_ids,
+                    "module_task_count": len(module_tasks),
+                    "module_task_ids": [
+                        task.get("task_id") for task in module_tasks if isinstance(task, dict)
+                    ],
+                }
+            )
+    return {
+        "present": True,
+        "header": _public_json_context_value(value.get("header") or {}),
+        "stage_count": len(stage_summaries),
+        "stages": stage_summaries,
+        "requires_check_count": len(value.get("requires_check") or [])
+        if isinstance(value.get("requires_check"), list)
+        else 0,
+        "consistency_notes_count": len(value.get("consistency_notes") or [])
+        if isinstance(value.get("consistency_notes"), list)
+        else 0,
+    }
+
+
+def _compact_package_artifact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in {"content", "text", "html", "prompt", "raw_response"}:
+                compact[key_text] = {"omitted": True, "chars": len(str(item))}
+            else:
+                compact[key_text] = _compact_package_artifact_value(item)
+        return compact
+    if isinstance(value, list):
+        if len(value) > 20:
+            return {
+                "items_omitted": True,
+                "count": len(value),
+                "first_items": [_compact_package_artifact_value(item) for item in value[:5]],
+            }
+        return [_compact_package_artifact_value(item) for item in value]
+    if isinstance(value, str) and len(value) > 500:
+        return {"omitted": True, "chars": len(value)}
+    return value
+
+
 def validation_result_summary(validation: ValidationResult) -> dict[str, Any]:
     return {
         "approved": validation.approved,
@@ -708,15 +1017,6 @@ def validation_result_summary(validation: ValidationResult) -> dict[str, Any]:
     }
 
 
-def generation_artifacts_for_validation(
-    spec: MaterialSpec,
-    generation_artifacts: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if not generation_artifacts:
-        return {}
-    return dict(generation_artifacts)
-
-
 PRIMARY_STRUCTURED_ARTIFACT_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
     "practice": ("practice_templates", "practice_instances"),
     "practice_guidance": ("practice_guidance_input", "practice_guidance_artifact"),
@@ -724,6 +1024,46 @@ PRIMARY_STRUCTURED_ARTIFACT_KEYS_BY_KIND: dict[str, tuple[str, ...]] = {
     "current_control": ("current_control_autocheck",),
     "intermediate": ("intermediate_assessment",),
 }
+
+
+def generation_artifacts_for_validation_kind(
+    kind: str,
+    generation_artifacts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not generation_artifacts:
+        return {}
+    keys = PRIMARY_STRUCTURED_ARTIFACT_KEYS_BY_KIND.get(kind, ())
+    return {key: _llm_safe_artifact_value(generation_artifacts[key]) for key in keys if key in generation_artifacts}
+
+
+def _llm_safe_artifact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _llm_safe_artifact_value(item)
+            for key, item in value.items()
+            if not _is_llm_unsafe_artifact_key(str(key))
+        }
+    if isinstance(value, list):
+        return [_llm_safe_artifact_value(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_reference_markdown_content(value)
+    return value
+
+
+def _is_llm_unsafe_artifact_key(key: str) -> bool:
+    normalized = key.strip().lower()
+    return normalized in TECHNICAL_JSON_CONTEXT_KEYS or normalized in {
+        "source_output_dir",
+        "output_dir",
+        "lesson_output_dir",
+    }
+
+
+def generation_artifacts_for_validation(
+    spec: MaterialSpec,
+    generation_artifacts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return generation_artifacts_for_validation_kind(spec.kind, generation_artifacts)
 
 
 def primary_structured_artifact_keys(spec: MaterialSpec, artifacts: dict[str, Any]) -> tuple[str, ...]:
@@ -797,7 +1137,7 @@ def reference_context_sections(spec: MaterialSpec, references: ReferenceBundle) 
                     f"SOURCE DOCUMENT NAME: {Path(str(document.path)).stem}",
                     f"SOURCE DOCUMENT TRUNCATED: {bool(document.truncated)}",
                     "SOURCE DOCUMENT CONTENT START",
-                    document.content,
+                    sanitize_reference_markdown_content(document.content),
                     "SOURCE DOCUMENT CONTENT END",
                     "SOURCE DOCUMENT END",
                 ]
@@ -872,6 +1212,13 @@ def build_generation_prompt(
         if previous_validation is not None
         else {"present": False}
     )
+    approved_practice_source = approved_practice_dependency_source_for_prompt(spec, dependencies)
+    approved_practice_source_section = (
+        "\n\nAPPROVED PRACTICE DEPENDENCY SOURCE OF TRUTH:\n"
+        f"{compact_json(approved_practice_source)}"
+        if approved_practice_source is not None
+        else ""
+    )
     return f"""
 Сгенерируй материал УМК.
 
@@ -903,6 +1250,7 @@ MARKDOWN REFERENCES CONTENT:
 
 DEPENDENCY MATERIALRESULT OBJECTS:
 {compact_json([material_result_summary(item) for item in dependencies])}
+{approved_practice_source_section}
 
 GENERATION ARTIFACTS FOR THIS MATERIAL:
 {compact_json(generation_artifacts or {})}
@@ -1069,6 +1417,7 @@ VARIANT RULES:
 - Leave display_note empty unless a source-required, neutral formatting note is unavoidable. Never use display_note to point at where the error is, explain that a fragment is intentionally incomplete, or give a meta-comment about how the faulty code is broken.
 - Use starter_code for ordinary starter code or as a backward-compatible learner-facing code field. When faulty_code_display is present, PracticeMaterialAgent must render faulty_code_display instead of raw faulty_code.
 - Put solutions, corrected code, answer keys, and teacher-only explanations only into hidden_solution and teacher_explanation. These fields are internal artifacts for MR/QA and must not be shown in learner HTML.
+- If student_condition, input_requirements, output_requirements, manual_checks, template invariants, or template constraints prohibit input(), f-strings, string concatenation with +, imports, or another technique, hidden_solution must obey the same prohibition. Do not solve the contradiction by silently removing a source-required learner constraint; repair the code and tests instead.
 - Classify each fix/debug task before choosing run_mode:
   1. diagnostic task: the source explicitly asks to read, demonstrate, identify, or interpret a Python error message. Use manual_only or expected_error/error_message checks; student_condition must name the relevant error class and either quote the expected diagnostic message or instruct the learner to run the code and read it in the IDE.
   2. correction task with deterministic corrected behavior: the source gives faulty code and a clear intended correction/output can be derived from literals, variables, print(...) calls, or the variant you created. Use run_mode=single_file, provide hidden_solution, output_requirements with exact corrected stdout, and create runtime_tests/tests for that corrected behavior. Do not downgrade this to manual_only just because the initial code is faulty.
@@ -1207,6 +1556,8 @@ CURRENT-CONTROL ARTIFACT RULES:
 - Put diagnostic notes only into the top-level agent_notes field as a list of strings.
 - Each question must include id, template_code, question_type, skill_target, student_prompt, correct_answers, and autocheck_config.
 - Use template_descriptions to choose platform-compatible template_code values. Prefer a varied mix when the references require multiple template kinds.
+- Do not use template_code 8D for classification into repeated categories. If a matching task has repeated labels such as SyntaxError/NameError, choose a template that supports repeated category assignment, or rewrite 8D so right_items are unique match targets.
+- For template_code 8D, autocheck_config.right_items must be learner-facing unique match targets, not duplicated answer categories.
 - For closed questions, provide options and an autocheck_config that identifies the correct option(s).
 - For open-answer questions, make the student_prompt unambiguous and provide expected_answer_format plus autocheck_config normalization or matching rules. If "print" and "print()" could both be considered defensible, rewrite the prompt or list all acceptable normalized answers.
 - Put correct answers, answer flags, matching pairs, ordering keys, normalization rules, and teacher-only explanations only in this internal artifact.
@@ -1305,9 +1656,11 @@ def build_validation_prompt(
     content: str,
     rule_result: ValidationResult,
     generation_artifacts: dict[str, Any] | None = None,
+    technical_evidence: dict[str, Any] | None = None,
 ) -> str:
     validation_generation_artifacts = generation_artifacts_for_validation(spec, generation_artifacts)
     checked_artifact_section = validation_checked_artifact_section(spec, content, validation_generation_artifacts)
+    technical_evidence_section = validation_technical_evidence_section(technical_evidence)
     return f"""
 Проверь один материал. Не исправляй и не перегенерируй контент.
 
@@ -1394,6 +1747,8 @@ MaterialValidatorAgent
 
 {checked_artifact_section}
 
+{technical_evidence_section}
+
 PROMPT/SKILL FILES FOR CHECKED MATERIAL:
 {compact_json(prompt_contents)}
 
@@ -1425,6 +1780,21 @@ Do not treat the JSON response schema example above as material content.
 """.strip()
 
 
+def validation_technical_evidence_section(technical_evidence: dict[str, Any] | None) -> str:
+    if not technical_evidence:
+        return ""
+    return f"""
+TECHNICAL SANDBOX EXECUTION EVIDENCE START
+This section is generated by runtime immediately before validation.
+It is not student-facing content, not publishable output, and not part of the checked material.
+Do not report issues against this section and do not create field_path/fix_instructions targeting it.
+Use it only as technical evidence for actual Python execution behavior, stdout, stderr, and exception type.
+If this evidence contradicts an inferred runtime claim, follow the evidence instead of guessing.
+{compact_json(technical_evidence)}
+TECHNICAL SANDBOX EXECUTION EVIDENCE END
+""".strip()
+
+
 def build_validator_system_prompt() -> str:
     return (
         "You are MaterialValidatorAgent. Check only the material between explicit material delimiters. "
@@ -1444,9 +1814,11 @@ def build_validation_controller_prompt(
     llm_result: ValidationResult,
     merged_validation: ValidationResult,
     generation_artifacts: dict[str, Any] | None = None,
+    technical_evidence: dict[str, Any] | None = None,
 ) -> str:
     validation_generation_artifacts = generation_artifacts_for_validation(spec, generation_artifacts)
     checked_artifact_section = validation_checked_artifact_section(spec, content, validation_generation_artifacts)
+    technical_evidence_section = validation_technical_evidence_section(technical_evidence)
     return f"""
 Review a material after all configured generation/validation attempts were exhausted.
 Do not generate, rewrite, or repair the material. Decide whether the validator rejection should remain blocking.
@@ -1504,6 +1876,7 @@ DECISION POLICY:
 - For practice fix/debug tasks, overrule validator objections that treat intentionally faulty starter/faulty_code/faulty_code_display as invalid because it is not syntactically correct, does not run, raises NameError/SyntaxError, has an unclosed quote/bracket/string, or does not already produce the expected output. Keep failed only when the learner-facing material reveals the exact fix/corrected code, the task objective is incoherent, or tests/expected behavior contradict the task.
 - For practice tasks about SyntaxError / unterminated string literal / EOL while scanning string literal, overrule validator objections that the displayed faulty snippet visually becomes multi-line, makes the next line look consumed by the open string, or is not a clean "one isolated error" parse. This is the expected learner-facing faulty input for this error type, not a generation defect, unless the material exposes the corrected code or gives the exact edit.
 - For specification_qa, overrule validator objections that visible QA-ID labels are internal marker leakage. QA-ID is allowed in this internal QA artifact. Keep failed for specification_qa process/retry logs, raw local source paths, source hashes/SHA values, contradictory keys/tests, invented task ids, or visible content that would be unsafe if copied into learner/teacher materials.
+- For specification_qa, when approved practice_instances are present in dependency context, overrule validator objections that concrete variable names, values, expected stdout, tests, hidden_solution, or output format are "invented" merely because they are absent from or different from the original JSON/source_text sample. Those values are authoritative when they match approved practice_instances.
 - For learner-facing current_control, overrule validator objections that require visible keys when generation_artifacts.current_control_autocheck contains complete internal correct_answers/autocheck_config consistent with the HTML. Keep failed if this artifact is missing, incomplete, contradictory, or if HTML visibly displays the keys.
 - For practice tasks that are underspecified for deterministic stdout, prefer approving when the material preserves the source task, avoids fake values/expected output, and clearly marks tests as absent/not applicable/manual/unavailable until clarification. Do not keep failed merely because the material uses wording such as "training task", "manual check", "without autocheck", or "until source clarification".
 - For practice wording, do not treat source subject-entity substitutions as inventions when they preserve the same checked skill and task structure. If the source lists "favorite color" and "favorite animal", a variant with other parallel categories is acceptable unless the source explicitly requires those exact entities.
@@ -1549,6 +1922,8 @@ CHECKED MATERIAL TYPE:
 {spec.material_type}
 
 {checked_artifact_section}
+
+{technical_evidence_section}
 
 PROMPT/SKILL FILES FOR CHECKED MATERIAL:
 {compact_json(prompt_contents)}
@@ -1608,17 +1983,18 @@ Fill PackageValidationDecision structured output fields with this meaning:
 }}
 
 PACKAGE VALIDATION JUDGEMENT POLICY:
-- For materials with primary_structured_artifact_keys, validate the structured generation_artifacts and do not semantically review rendered HTML. full_final_content is intentionally omitted for those materials because HTML can be regenerated from approved artifacts by a technical renderer.
+- For materials with primary_structured_artifact_keys, use the structured artifact summary to verify package-level completeness and consistency. Do not semantically revalidate full structured artifacts here; individual material validation already did that.
 - You receive full final HTML content only for HTML-first materials in FULL MATERIALRESULT OBJECTS. That content is not a preview and is not intentionally truncated.
 - Do not claim that a material is truncated unless content_truncated is true or html_diagnostics proves an actual broken boundary in full_final_content.
 - Validate only the current task package and the expected material specs listed below. Do not fail this lesson package because of future lessons, module-wide rows, or assessment content that was not generated in this task.
+- PACKAGE TASK SUMMARY intentionally omits module.lessons[] and modules[]. Do not ask for neighboring lesson rows or full module/course rows at package validation time.
 - Source JSON may contain known warnings such as difficulty.violation or module totals.raw percentages. If generated materials faithfully preserve and disclose such source warnings, report them as source_data_warnings, not as package-blocking material defects.
 - Do not ask the generator to change lesson.practice_tasks counts or L1/L2 distribution when those values come from the source JSON. The generator must not silently rewrite source task composition to satisfy a norm.
 - Approved individual materials remain approved at package validation time unless deterministic package rule issues prove missing materials, wrong order, or broken final files.
 - Prefer approved=true with advisory issues when the materials are complete, importable HTML and individual material validation already approved them.
 
-TASK JSON:
-{compact_json(task)}
+PACKAGE TASK SUMMARY:
+{compact_json(package_task_summary(task))}
 
 EXPECTED MATERIAL SPECS:
 {compact_json([{"kind": spec.kind, "type": spec.material_type} for spec in specs])}

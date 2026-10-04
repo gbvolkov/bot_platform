@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,6 +8,9 @@ from typing import Any, Mapping
 
 from .context import task_identity
 from .contracts import IsmartGenerationResult, MaterialResult, MaterialSpec, ValidationResult
+
+
+EFFECTIVE_PRACTICE_CONTRACT_KEY = "_effective_practice_task_contract"
 
 
 @dataclass
@@ -192,6 +196,187 @@ def reusable_material(package: ExistingPackage, spec: MaterialSpec) -> tuple[Mat
     if artifact_issue:
         reasons.append(artifact_issue)
     return (material if not reasons else None), reasons
+
+
+def build_effective_task_from_existing_package(
+    task: dict[str, Any],
+    package: ExistingPackage,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Overlay approved existing material facts onto the task used by resume generation."""
+    practice = package.material("practice")
+    if practice is None or practice.status != "approved":
+        return task, {"changed": False, "reason": "approved practice material is not available"}
+
+    artifacts = practice.generation_artifacts if isinstance(practice.generation_artifacts, dict) else {}
+    instances = artifacts.get("practice_instances")
+    tasks = instances.get("tasks") if isinstance(instances, dict) else None
+    if not isinstance(tasks, list) or not tasks:
+        return task, {"changed": False, "reason": "approved practice_instances.tasks are not available"}
+
+    normalized_tasks = _effective_practice_tasks_from_instances(tasks)
+    if not normalized_tasks:
+        return task, {"changed": False, "reason": "approved practice_instances.tasks contain no usable task ids"}
+
+    effective_task = copy.deepcopy(task)
+    lesson = effective_task.setdefault("lesson", {})
+    if not isinstance(lesson, dict):
+        return task, {"changed": False, "reason": "task.lesson is not an object"}
+
+    original_difficulty = copy.deepcopy(lesson.get("difficulty") or {})
+    original_practice_tasks = copy.deepcopy(lesson.get("practice_tasks") or {})
+    lesson[EFFECTIVE_PRACTICE_CONTRACT_KEY] = normalized_tasks
+    lesson["practice_tasks"] = _practice_tasks_from_effective_contract(normalized_tasks)
+    lesson["difficulty"] = _difficulty_from_effective_contract(normalized_tasks, original_difficulty)
+
+    patch = {
+        "changed": True,
+        "source": "approved_existing_practice_instances",
+        "practice_material_status": practice.status,
+        "task_count": len(normalized_tasks),
+        "task_ids": [str(item.get("id") or "") for item in normalized_tasks],
+        "level_counts": _level_counts(normalized_tasks),
+        "overridden_fields": [
+            "lesson.practice_tasks",
+            "lesson.difficulty",
+            f"lesson.{EFFECTIVE_PRACTICE_CONTRACT_KEY}",
+        ],
+        "original_practice_task_counts": _practice_task_counts(original_practice_tasks),
+        "original_difficulty_counts": _difficulty_counts(original_difficulty),
+    }
+    return effective_task, patch
+
+
+def _effective_practice_tasks_from_instances(tasks: list[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(tasks, start=1):
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("id") or item.get("template_id") or f"P{index}").strip() or f"P{index}"
+        level = _normalize_level(item.get("level"))
+        source_text = _practice_source_text_from_instance(item)
+        normalized.append(
+            {
+                "id": task_id,
+                "level": level,
+                "source_number": _task_number_from_id(task_id) or index,
+                "source_text": source_text,
+                "source_kind": "approved_practice_instance",
+                "source_sample_index": index,
+                "sample_missing": False,
+                "task_type": item.get("task_type"),
+                "template_id": item.get("template_id"),
+                "scenario": item.get("scenario"),
+                "student_condition": item.get("student_condition"),
+                "input_requirements": item.get("input_requirements"),
+                "output_requirements": item.get("output_requirements"),
+                "run_mode": item.get("run_mode"),
+            }
+        )
+    return normalized
+
+
+def _practice_source_text_from_instance(item: Mapping[str, Any]) -> str:
+    parts = [
+        str(item.get("scenario") or "").strip(),
+        str(item.get("student_condition") or "").strip(),
+        str(item.get("input_requirements") or "").strip(),
+        str(item.get("output_requirements") or "").strip(),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _practice_tasks_from_effective_contract(tasks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {"l1": [], "l2": [], "l3": []}
+    for index, item in enumerate(tasks, start=1):
+        level_key = str(item.get("level") or "L2").strip().lower()
+        if level_key not in grouped:
+            level_key = "l2"
+        grouped[level_key].append(
+            {
+                "id": item.get("id"),
+                "number": item.get("source_number") or _task_number_from_id(str(item.get("id") or "")) or index,
+                "text": item.get("source_text") or "",
+                "task_type": item.get("task_type"),
+                "source_kind": "approved_practice_instance",
+            }
+        )
+    return grouped
+
+
+def _difficulty_from_effective_contract(
+    tasks: list[dict[str, Any]],
+    original: Mapping[str, Any],
+) -> dict[str, Any]:
+    counts = _level_counts(tasks)
+    total = sum(counts.values()) or 1
+    result: dict[str, Any] = copy.deepcopy(dict(original))
+    for level in ("l1", "l2", "l3"):
+        old_value = result.get(level)
+        item = copy.deepcopy(old_value) if isinstance(old_value, dict) else {}
+        count = counts[level]
+        item["count"] = count
+        item["percent"] = f"{round((count / total) * 100)}%"
+        if level == "l3" and count == 0:
+            item.setdefault("raw", "0")
+        result[level] = item
+    result["source"] = "approved_practice_instances"
+    result["violation"] = "OK"
+    return result
+
+
+def _level_counts(tasks: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"l1": 0, "l2": 0, "l3": 0}
+    for item in tasks:
+        level = str(item.get("level") or "L2").strip().lower()
+        if level not in counts:
+            level = "l2"
+        counts[level] += 1
+    return counts
+
+
+def _practice_task_counts(value: Any) -> dict[str, int]:
+    counts = {"l1": 0, "l2": 0, "l3": 0}
+    if not isinstance(value, Mapping):
+        return counts
+    for level in counts:
+        items = value.get(level)
+        counts[level] = len(items) if isinstance(items, list) else 0
+    return counts
+
+
+def _difficulty_counts(value: Any) -> dict[str, int | None]:
+    counts: dict[str, int | None] = {"l1": None, "l2": None, "l3": None}
+    if not isinstance(value, Mapping):
+        return counts
+    for level in counts:
+        item = value.get(level)
+        raw = item.get("count") if isinstance(item, Mapping) else item
+        try:
+            counts[level] = int(str(raw).strip()) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            counts[level] = None
+    return counts
+
+
+def _normalize_level(value: Any) -> str:
+    level = str(value or "").strip().upper()
+    if level in {"L1", "L2", "L3"}:
+        return level
+    if level in {"1", "LEVEL1"}:
+        return "L1"
+    if level in {"3", "LEVEL3"}:
+        return "L3"
+    return "L2"
+
+
+def _task_number_from_id(task_id: str) -> int | None:
+    digits = "".join(ch for ch in task_id if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

@@ -136,6 +136,7 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "Обязательно заполни header.audience из PracticeGuidanceInput.task_meta.audience, "
             "result_requirements.deliverable, result_requirements.criteria и self_check_questions. "
             "Связку с предыдущими занятиями делай только по previous_lessons_context; если массив пуст, не выдумывай ссылки на прошлые занятия. "
+            "Do not produce learner-facing requires_check/clarification blocks. If theory_brief_source.sections is empty or exact UI labels are unavailable, write neutral self-contained guidance from practice_tasks and references; keep source limitations in agent_notes or consistency_notes only. "
             "Не раскрывай ключи, corrected code, hidden_solution, teacher_explanation, внутренние имена полей, SHA, локальные пути и process wording."
         ),
         validation_policy_addendum=(
@@ -147,6 +148,16 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "faulty code that the learner must fix. Do not reject this as duplicated code, key leakage, or corrected-code "
             "leakage unless code_cell contains corrected code, hidden_solution, teacher_explanation, or content that is not "
             "present in the corresponding learner-facing practice task fields. "
+            "Do not reject a worked analogous example merely because the example is solved for its own different "
+            "input; the practice guidance format requires a worked example. Reject it only when it copies exact "
+            "practice task values/error tokens/faulty code/outputs, exposes corrected code for module tasks, or "
+            "contradicts the constraints of the same stage. For debugging/error-fixing stages, an empty "
+            "worked_example.code_cell is valid when the explanation gives the process without corrected code. "
+            "For error-reading stages, an analogous error token is valid when it differs from every token in "
+            "PracticeGuidanceInput.practice_tasks and is clearly part of the worked example, not an answer to P tasks. "
+            "If module tasks prohibit string concatenation, f-strings, input(), imports, or another technique, "
+            "worked_example must follow the same prohibition. "
+            "Do not require or reward a learner-facing requires_check/clarification block for missing theory or missing exact reference values; that is not publishable student content. "
             "Approve only if module_tasks correspond to PracticeGuidanceInput.practice_tasks, worked examples do not replace module tasks, "
             "and previous-lesson links are based only on non-empty PracticeGuidanceInput.previous_lessons_context."
         ),
@@ -154,8 +165,13 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "Overrule validator objections about rendered HTML structure for practice_guidance; HTML is deterministic renderer output. "
             "Overrule validator objections that module_tasks[].code_cell duplicates faulty_code_display/starter_code from "
             "PracticeGuidanceInput.practice_tasks; this is the required mapping, not a defect. "
+            "Overrule validator objections that treat a worked example's own analogous solved/error token or analogous "
+            "faulty fragment as key leakage when it does not copy concrete P-task values/tokens and does not show corrected "
+            "code for module tasks. "
+            "Overrule validator objections that require a learner-facing requires_check/clarification block for missing theory/reference details; the correct behavior is to omit unsupported specifics. "
             "Keep blocking issues only for semantic artifact defects, missing approved practice tasks, corrected-code leakage, "
-            "or learner-facing key leakage."
+            "learner-facing key leakage, copied P-task values/tokens in worked examples, or worked examples that violate the "
+            "same technique restrictions as their stage tasks."
         ),
     ),
     "mr_theory": MaterialSpec(
@@ -354,6 +370,7 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "их tests, hidden_solution и teacher_explanation как источник правды для QA; в HTML называй это "
             "«утверждённые материалы практики и закрытый QA-набор ключей/тестов», без внутренних имён полей; не реконструируй "
             "практические задания заново. "
+            "Concrete values, variable names, exact stdout, tests, and output format copied from approved practice_instances are approved generated variants, not inventions, even when the original lesson.practice_tasks source_text used other sample entities or was less specific. "
             "Если dependency self_work содержит generation_artifacts.self_work_autocheck, используй этот artifact "
             "как источник внутренних ключей, correct_answers, runtime_tests и autocheck_config для самостоятельной работы; "
             "в HTML называй это «закрытый набор самопроверки», без внутренних имён полей; не требуй, чтобы эти ключи были показаны в ученическом HTML. "
@@ -372,11 +389,13 @@ MATERIAL_SPEC_REGISTRY: dict[str, MaterialSpec] = {
             "student condition, faulty_code_display/starter_code, input/output requirements, tests/runtime_tests, manual_checks, "
             "hidden_solution, and teacher_explanation. Reject substitutions from lesson.practice_tasks samples, reference examples, "
             "or source Markdown when they differ from approved practice_instances. "
+            "Do not reject concrete variable names, values, exact stdout, tests, or output format copied from approved practice_instances merely because the original JSON/source_text sample used different entities or was underspecified. "
             "Reject raw local paths, source hashes/SHA, process/retry logs, invented task ids, or contradictions with approved dependencies."
         ),
         controller_policy_addendum=(
             "Overrule validator objections that specification_qa exposes QA-ID labels, keys, tests, corrected/fixed code, or patches; "
             "these are allowed in this internal QA artifact. Keep failed for concrete mismatches with approved practice_instances, "
+            "but overrule objections that treat values copied from approved practice_instances as inventions merely because they are absent from the original JSON/source_text. "
             "invented task ids, raw local paths/source hashes, process logs, or unsupported source contradictions."
         ),
     ),

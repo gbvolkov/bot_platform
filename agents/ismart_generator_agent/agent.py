@@ -20,6 +20,7 @@ from .context import task_identity
 from .contracts import IsmartGenerationConfig, IsmartGenerationResult
 from .observability import build_callback_handlers, langchain_config_from_runnable
 from .profiles import resolve_course_level
+from .python_sandbox import DisabledPythonSandbox, PythonSandbox
 from .runtime import run_ismart_task
 from .state import GeneratorRunRequest, IsmartGeneratorAgentContext, IsmartGeneratorAgentState
 from .subagents import build_subagent_registry
@@ -308,63 +309,76 @@ def run_tasks(
     if subagents is None and subagent_factory is None:
         raise ValueError("Either subagents or subagent_factory must be provided.")
     output_root = config.output_root
-    if len(tasks) == 1:
-        run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_identity(tasks[0])[0])}"
-        task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
-        if config.verbose:
-            course_level = resolve_course_level(tasks[0])
-            print(
-                f"[ismart-generator-agent] single_task.start {json.dumps({'run_dir': str(run_dir), 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
-                flush=True,
-            )
-            print(
-                f"[ismart-generator-agent] single_task.subagents.reset {json.dumps({'run_dir': str(run_dir)}, ensure_ascii=False)}",
-                flush=True,
-            )
-        return [run_ismart_task(tasks[0], config, subagents=task_subagents, run_dir=run_dir)]
+    python_sandbox = _build_python_sandbox(config)
+    try:
+        if len(tasks) == 1:
+            run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_identity(tasks[0])[0])}"
+            task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
+            if config.verbose:
+                course_level = resolve_course_level(tasks[0])
+                print(
+                    f"[ismart-generator-agent] single_task.start {json.dumps({'run_dir': str(run_dir), 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
+                    flush=True,
+                )
+                print(
+                    f"[ismart-generator-agent] single_task.subagents.reset {json.dumps({'run_dir': str(run_dir)}, ensure_ascii=False)}",
+                    flush=True,
+                )
+            return [
+                run_ismart_task(
+                    tasks[0],
+                    config,
+                    subagents=task_subagents,
+                    run_dir=run_dir,
+                    python_sandbox=python_sandbox,
+                )
+            ]
 
-    batch_dir = output_root / f"batch_{_timestamp()}"
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    if config.verbose:
-        print(
-            f"[ismart-generator-agent] batch.start {json.dumps({'batch_dir': str(batch_dir), 'task_count': len(tasks)}, ensure_ascii=False)}",
-            flush=True,
-        )
-    results: list[IsmartGenerationResult] = []
-    for task in tasks:
-        task_id, lesson_number, _ = task_identity(task)
-        course_level = resolve_course_level(task)
+        batch_dir = output_root / f"batch_{_timestamp()}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
         if config.verbose:
             print(
-                f"[ismart-generator-agent] batch.task.start {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
+                f"[ismart-generator-agent] batch.start {json.dumps({'batch_dir': str(batch_dir), 'task_count': len(tasks)}, ensure_ascii=False)}",
                 flush=True,
             )
-        run_dir = batch_dir / safe_slug(f"{lesson_number}-{task_id}")
-        task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
+        results: list[IsmartGenerationResult] = []
+        for task in tasks:
+            task_id, lesson_number, _ = task_identity(task)
+            course_level = resolve_course_level(task)
+            if config.verbose:
+                print(
+                    f"[ismart-generator-agent] batch.task.start {json.dumps({'task_id': task_id, 'lesson_number': lesson_number, 'course_level': course_level, 'resolved_profile': course_level}, ensure_ascii=False)}",
+                    flush=True,
+                )
+            run_dir = batch_dir / safe_slug(f"{lesson_number}-{task_id}")
+            task_subagents = _build_task_subagents(subagents=subagents, subagent_factory=subagent_factory)
+            if config.verbose:
+                print(
+                    f"[ismart-generator-agent] batch.task.subagents.reset {json.dumps({'task_id': task_id, 'lesson_number': lesson_number}, ensure_ascii=False)}",
+                    flush=True,
+                )
+            result = run_ismart_task(
+                task,
+                config,
+                subagents=task_subagents,
+                run_dir=run_dir,
+                python_sandbox=python_sandbox,
+            )
+            results.append(result)
+            if config.verbose:
+                print(
+                    f"[ismart-generator-agent] batch.task.done {json.dumps({'task_id': task_id, 'course_level': result.course_level, 'resolved_profile': result.course_level, 'status': result.status, 'output_dir': result.output_dir}, ensure_ascii=False)}",
+                    flush=True,
+                )
+        write_batch_manifest(batch_dir, results)
         if config.verbose:
             print(
-                f"[ismart-generator-agent] batch.task.subagents.reset {json.dumps({'task_id': task_id, 'lesson_number': lesson_number}, ensure_ascii=False)}",
+                f"[ismart-generator-agent] batch.done {json.dumps({'batch_dir': str(batch_dir)}, ensure_ascii=False)}",
                 flush=True,
             )
-        result = run_ismart_task(
-            task,
-            config,
-            subagents=task_subagents,
-            run_dir=run_dir,
-        )
-        results.append(result)
-        if config.verbose:
-            print(
-                f"[ismart-generator-agent] batch.task.done {json.dumps({'task_id': task_id, 'course_level': result.course_level, 'resolved_profile': result.course_level, 'status': result.status, 'output_dir': result.output_dir}, ensure_ascii=False)}",
-                flush=True,
-            )
-    write_batch_manifest(batch_dir, results)
-    if config.verbose:
-        print(
-            f"[ismart-generator-agent] batch.done {json.dumps({'batch_dir': str(batch_dir)}, ensure_ascii=False)}",
-            flush=True,
-        )
-    return results
+        return results
+    finally:
+        python_sandbox.close()
 
 
 def run_task_records(
@@ -416,126 +430,136 @@ def run_task_records(
 
     results: list[IsmartGenerationResult] = []
     task_entries: list[dict[str, Any]] = []
-    for selected_index, record in enumerate(task_records, start=1):
-        task = record["task"]
-        source_index = int(record.get("source_index") or selected_index)
-        output_index = source_index if preserve_source_index else selected_index
-        task_id, lesson_number, lesson_title = task_identity(task)
-        course_level = resolve_course_level(task)
-        if use_batch_dir:
-            run_dir = batch_dir / safe_slug(f"{output_index:03d}-{lesson_number}-{task_id}")
-        else:
-            run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_id)}"
+    python_sandbox = _build_python_sandbox(config)
+    try:
+        for selected_index, record in enumerate(task_records, start=1):
+            task = record["task"]
+            source_index = int(record.get("source_index") or selected_index)
+            output_index = source_index if preserve_source_index else selected_index
+            task_id, lesson_number, lesson_title = task_identity(task)
+            course_level = resolve_course_level(task)
+            if use_batch_dir:
+                run_dir = batch_dir / safe_slug(f"{output_index:03d}-{lesson_number}-{task_id}")
+            else:
+                run_dir = output_root / f"run_{_timestamp()}_{safe_slug(task_id)}"
 
-        if config.verbose:
-            print(
-                json.dumps(
-                    {
-                        "event": "task.start",
-                        "index": output_index,
-                        "task_id": task_id,
-                        "lesson_number": lesson_number,
-                        "lesson_title": lesson_title,
-                        "course_level": course_level,
-                        "resolved_profile": course_level,
-                        "output_dir": str(run_dir),
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-        try:
-            result = run_ismart_task(task, config, subagents=subagents, run_dir=run_dir)
-            results.append(result)
-            entry = _manifest_entry_from_result(output_index, result)
-            task_entries.append(entry)
-            if config.verbose or write_sequential_manifest:
+            if config.verbose:
                 print(
                     json.dumps(
                         {
-                            "event": "task.done",
+                            "event": "task.start",
                             "index": output_index,
                             "task_id": task_id,
                             "lesson_number": lesson_number,
-                            "course_level": result.course_level,
-                            "resolved_profile": result.course_level,
-                            "status": result.status,
-                            "output_dir": result.output_dir,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
-                for material in result.materials:
-                    if material.status in SKIPPED_MATERIAL_STATUSES:
-                        print(
-                            json.dumps(
-                                {
-                                    "event": "task.material_skipped",
-                                    "index": output_index,
-                                    "task_id": task_id,
-                                    "lesson_number": lesson_number,
-                                    "course_level": result.course_level,
-                                    "resolved_profile": result.course_level,
-                                    "material_kind": material.kind,
-                                    "material_status": material.status,
-                                    "reason": _material_skip_reason(material),
-                                    "output_dir": result.output_dir,
-                                },
-                                ensure_ascii=False,
-                            ),
-                            flush=True,
-                        )
-            if stop_on_failure and result.status not in {"approved", "completed_with_skips"}:
-                if manifest_path:
-                    manifest["tasks"] = task_entries
-                    manifest["status"] = "stopped_on_failure"
-                    manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
-                    _write_runner_manifest(manifest_path, manifest)
-                break
-        except Exception as exc:  # noqa: BLE001 - batch graph should isolate per-task failures when requested.
-            entry = {
-                "index": output_index,
-                "task_id": task_id,
-                "lesson_number": lesson_number,
-                "lesson_title": lesson_title,
-                "course_level": course_level,
-                "resolved_profile": course_level,
-                "status": "error",
-                "output_dir": str(run_dir),
-                "error": str(exc),
-            }
-            task_entries.append(entry)
-            write_json(run_dir / "error.json", entry)
-            if config.verbose or write_sequential_manifest:
-                print(
-                    json.dumps(
-                        {
-                            "event": "task.error",
-                            "index": output_index,
-                            "task_id": task_id,
-                            "lesson_number": lesson_number,
+                            "lesson_title": lesson_title,
                             "course_level": course_level,
                             "resolved_profile": course_level,
-                            "error": str(exc),
+                            "output_dir": str(run_dir),
                         },
                         ensure_ascii=False,
                     ),
                     flush=True,
                 )
-            if stop_on_error:
+            try:
+                result = run_ismart_task(
+                    task,
+                    config,
+                    subagents=subagents,
+                    run_dir=run_dir,
+                    python_sandbox=python_sandbox,
+                )
+                results.append(result)
+                entry = _manifest_entry_from_result(output_index, result)
+                task_entries.append(entry)
+                if config.verbose or write_sequential_manifest:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "task.done",
+                                "index": output_index,
+                                "task_id": task_id,
+                                "lesson_number": lesson_number,
+                                "course_level": result.course_level,
+                                "resolved_profile": result.course_level,
+                                "status": result.status,
+                                "output_dir": result.output_dir,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                    for material in result.materials:
+                        if material.status in SKIPPED_MATERIAL_STATUSES:
+                            print(
+                                json.dumps(
+                                    {
+                                        "event": "task.material_skipped",
+                                        "index": output_index,
+                                        "task_id": task_id,
+                                        "lesson_number": lesson_number,
+                                        "course_level": result.course_level,
+                                        "resolved_profile": result.course_level,
+                                        "material_kind": material.kind,
+                                        "material_status": material.status,
+                                        "reason": _material_skip_reason(material),
+                                        "output_dir": result.output_dir,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                flush=True,
+                            )
+                if stop_on_failure and result.status not in {"approved", "completed_with_skips"}:
+                    if manifest_path:
+                        manifest["tasks"] = task_entries
+                        manifest["status"] = "stopped_on_failure"
+                        manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                        _write_runner_manifest(manifest_path, manifest)
+                    break
+            except Exception as exc:  # noqa: BLE001 - batch graph should isolate per-task failures when requested.
+                entry = {
+                    "index": output_index,
+                    "task_id": task_id,
+                    "lesson_number": lesson_number,
+                    "lesson_title": lesson_title,
+                    "course_level": course_level,
+                    "resolved_profile": course_level,
+                    "status": "error",
+                    "output_dir": str(run_dir),
+                    "error": str(exc),
+                }
+                task_entries.append(entry)
+                write_json(run_dir / "error.json", entry)
+                if config.verbose or write_sequential_manifest:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "task.error",
+                                "index": output_index,
+                                "task_id": task_id,
+                                "lesson_number": lesson_number,
+                                "course_level": course_level,
+                                "resolved_profile": course_level,
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                if stop_on_error:
+                    if manifest_path:
+                        manifest["tasks"] = task_entries
+                        manifest["status"] = "stopped_on_error"
+                        manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                        _write_runner_manifest(manifest_path, manifest)
+                    break
+                if not write_sequential_manifest:
+                    raise
+            finally:
                 if manifest_path:
                     manifest["tasks"] = task_entries
-                    manifest["status"] = "stopped_on_error"
-                    manifest["finished_at"] = datetime.now().isoformat(timespec="seconds")
                     _write_runner_manifest(manifest_path, manifest)
-                break
-            if not write_sequential_manifest:
-                raise
-        finally:
-            if manifest_path:
-                manifest["tasks"] = task_entries
-                _write_runner_manifest(manifest_path, manifest)
+    finally:
+        python_sandbox.close()
 
     if use_batch_dir and not write_sequential_manifest:
         write_batch_manifest(batch_dir, results)
@@ -561,6 +585,12 @@ def run_task_records(
         "task_entries": task_entries,
         "manifest_path": str(manifest_path) if manifest_path else None,
     }
+
+
+def _build_python_sandbox(config: IsmartGenerationConfig) -> PythonSandbox | DisabledPythonSandbox:
+    if config.use_python_sandbox:
+        return PythonSandbox(config)
+    return DisabledPythonSandbox()
 
 
 def _build_task_subagents(

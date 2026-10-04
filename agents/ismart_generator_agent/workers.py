@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import html
 import re
@@ -52,6 +53,7 @@ from .schemas import (
     ValidationControllerDecision,
 )
 from .sources import read_prompt_files
+from .python_sandbox import DisabledPythonSandbox, PythonSandbox
 from .task_skip import SKIPPED_MATERIAL_STATUSES
 from .trace import TraceLogger
 from .validators import RuleValidator
@@ -176,6 +178,334 @@ def _normalize_practice_instance_tests(instances: dict[str, Any]) -> dict[str, A
         task_item["tests"] = tests
         task_item["runtime_tests"] = runtime_tests
     return instances
+
+
+def _verify_practice_instances_with_python(
+    instances: dict[str, Any],
+    config: IsmartGenerationConfig,
+    python_sandbox: PythonSandbox | DisabledPythonSandbox,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "enabled": bool(config.use_python_sandbox),
+        "python_command": list(config.python_sandbox_command),
+        "python_version": "",
+        "tasks": [],
+        "updates": [],
+        "errors": [],
+    }
+    if not config.use_python_sandbox:
+        return report
+    if isinstance(python_sandbox, DisabledPythonSandbox):
+        report["enabled"] = False
+        report["skipped_reason"] = "python sandbox was not provided to MaterialWorker"
+        return report
+    tasks = instances.get("tasks")
+    if not isinstance(tasks, list):
+        report["errors"].append("practice_instances.tasks is not a list")
+        return report
+    if not _practice_instances_need_python_execution(tasks):
+        report["skipped_reason"] = "no executable practice code or expected_output tests"
+        return report
+    version = python_sandbox.python_version()
+    report["python_version"] = version
+    if not version:
+        report["errors"].append("python sandbox is unavailable")
+        return report
+
+    for task_item in tasks:
+        if not isinstance(task_item, dict):
+            continue
+        task_report = _verify_practice_task_with_python(task_item, config, python_sandbox)
+        report["tasks"].append(task_report)
+        report["updates"].extend(task_report.get("updates") or [])
+    return report
+
+
+def _practice_execution_issues(report: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    for error in report.get("errors") or []:
+        issues.append(f"Python sandbox error: {error}")
+    for task_report in report.get("tasks") or []:
+        if not isinstance(task_report, dict):
+            continue
+        task_id = str(task_report.get("task_id") or "?")
+        for run in task_report.get("solution_runs") or []:
+            if not isinstance(run, dict) or not run.get("solution_execution_error"):
+                continue
+            reason = str(run.get("last_error_line") or run.get("stderr") or run.get("status") or "unknown error")
+            issues.append(
+                f"{task_id}: hidden_solution did not execute successfully in Python sandbox "
+                f"for test #{run.get('test_index')}: {reason}"
+            )
+    return issues
+
+
+def _practice_solution_constraint_issues(task_item: dict[str, Any], template: dict[str, Any] | None = None) -> list[str]:
+    task_id = str(task_item.get("id") or "?")
+    solution = str(task_item.get("hidden_solution") or "").strip()
+    if not solution:
+        return []
+
+    constraint_text = _practice_constraint_text(task_item, template)
+    try:
+        tree = ast.parse(solution)
+    except SyntaxError:
+        return []
+
+    issues: list[str] = []
+    if _forbids_input_call(constraint_text) and _uses_input_call(tree):
+        issues.append(f"practice_instances.{task_id} hidden_solution uses input() despite task constraints forbidding input()")
+    if _forbids_f_strings(constraint_text) and _uses_f_string(tree):
+        issues.append(f"practice_instances.{task_id} hidden_solution uses an f-string despite task constraints forbidding f-strings")
+    if _forbids_string_plus_concatenation(constraint_text) and _uses_string_plus_concatenation(tree):
+        issues.append(
+            f"practice_instances.{task_id} hidden_solution uses string concatenation with + despite task constraints forbidding string concatenation via +"
+        )
+    return issues
+
+
+def _practice_constraint_text(task_item: dict[str, Any], template: dict[str, Any] | None) -> str:
+    parts: list[str] = []
+    for field in ("student_condition", "input_requirements", "output_requirements"):
+        parts.append(str(task_item.get(field) or ""))
+    for check in task_item.get("manual_checks") or []:
+        parts.append(str(check))
+    if isinstance(template, dict):
+        for field in ("source_text", "test_policy"):
+            parts.append(str(template.get(field) or ""))
+        for field in ("invariants", "constraints"):
+            for item in template.get(field) or []:
+                parts.append(str(item))
+    return _normalize_constraint_text("\n".join(parts))
+
+
+def _normalize_constraint_text(text: str) -> str:
+    normalized = text.lower().replace("ё", "е").replace("‑", "-").replace("–", "-").replace("—", "-")
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _has_negative_constraint(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "не использ",
+            "нельзя",
+            "запрещ",
+            "без ",
+            "do not use",
+            "don't use",
+            "must not use",
+            "without ",
+            "forbid",
+            "forbidden",
+            "prohibit",
+            "prohibited",
+        )
+    )
+
+
+def _forbids_input_call(text: str) -> bool:
+    return _has_negative_constraint(text) and ("input()" in text or "input (" in text or " input " in text)
+
+
+def _forbids_f_strings(text: str) -> bool:
+    if not _has_negative_constraint(text):
+        return False
+    return any(marker in text for marker in ("f-стр", "f -стр", "f string", "f-string", "f strings", "f-strings"))
+
+
+def _forbids_string_plus_concatenation(text: str) -> bool:
+    if not _has_negative_constraint(text):
+        return False
+    return (
+        ("+" in text and any(marker in text for marker in ("скле", "конкатенац", "строк", "string concatenation", "concat")))
+        or "склеивание строк через +" in text
+        or "конкатенация строк через +" in text
+        or "string concatenation with +" in text
+    )
+
+
+def _uses_input_call(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "input":
+                return True
+    return False
+
+
+def _uses_f_string(tree: ast.AST) -> bool:
+    return any(isinstance(node, ast.JoinedStr) for node in ast.walk(tree))
+
+
+def _uses_string_plus_concatenation(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and (
+            _ast_expr_contains_string_literal(node.left) or _ast_expr_contains_string_literal(node.right)
+        ):
+            return True
+    return False
+
+
+def _ast_expr_contains_string_literal(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+    return any(isinstance(child, ast.Constant) and isinstance(child.value, str) for child in ast.walk(node))
+
+
+def _practice_instances_need_python_execution(tasks: list[Any]) -> bool:
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("faulty_code_display") or item.get("faulty_code") or "").strip():
+            return True
+        if str(item.get("hidden_solution") or "").strip():
+            for test in _list_of_dicts(item.get("runtime_tests")) or _list_of_dicts(item.get("tests")):
+                if "expected_output" in test:
+                    return True
+    return False
+
+
+def _verify_practice_task_with_python(
+    task_item: dict[str, Any],
+    config: IsmartGenerationConfig,
+    python_sandbox: PythonSandbox | DisabledPythonSandbox,
+) -> dict[str, Any]:
+    task_id = str(task_item.get("id") or "?")
+    task_report: dict[str, Any] = {
+        "task_id": task_id,
+        "run_mode": str(task_item.get("run_mode") or ""),
+        "faulty_run": None,
+        "solution_runs": [],
+        "updates": [],
+    }
+    faulty_code = str(task_item.get("faulty_code_display") or task_item.get("faulty_code") or "").strip()
+    if faulty_code:
+        faulty_run = python_sandbox.run_code(faulty_code, "")
+        task_report["faulty_run"] = _public_python_run_result(faulty_run)
+        _sync_expected_error_from_faulty_run(task_item, faulty_run, task_report)
+
+    solution = str(task_item.get("hidden_solution") or "").strip()
+    runtime_tests = _list_of_dicts(task_item.get("runtime_tests"))
+    if not runtime_tests:
+        runtime_tests = _list_of_dicts(task_item.get("tests"))
+    if solution and runtime_tests:
+        updated_runtime_tests: list[dict[str, Any]] = []
+        for index, test in enumerate(runtime_tests, start=1):
+            updated_test = dict(test)
+            if "expected_output" in updated_test:
+                run = python_sandbox.run_code(solution, str(updated_test.get("input") or ""))
+                public_run = _public_python_run_result(run)
+                public_run["test_index"] = index
+                public_run["input"] = str(updated_test.get("input") or "")
+                public_run["expected_output_before"] = str(updated_test.get("expected_output") or "")
+                public_run["passed_before_update"] = (
+                    run.get("status") == "completed"
+                    and int(run.get("exit_code") or 0) == 0
+                    and str(updated_test.get("expected_output") or "") == str(run.get("stdout") or "")
+                )
+                if run.get("status") == "completed" and int(run.get("exit_code") or 0) == 0:
+                    actual_stdout = str(run.get("stdout") or "")
+                    if str(updated_test.get("expected_output") or "") != actual_stdout:
+                        update = {
+                            "task_id": task_id,
+                            "test_index": index,
+                            "field": "expected_output",
+                            "old_value": str(updated_test.get("expected_output") or ""),
+                            "new_value": actual_stdout,
+                            "reason": "hidden_solution stdout from Python sandbox",
+                        }
+                        updated_test["expected_output"] = actual_stdout
+                        task_report["updates"].append(update)
+                else:
+                    public_run["solution_execution_error"] = True
+                public_run["expected_output_after"] = str(updated_test.get("expected_output") or "")
+                task_report["solution_runs"].append(public_run)
+            updated_runtime_tests.append(updated_test)
+        task_item["runtime_tests"] = copy.deepcopy(updated_runtime_tests)
+        task_item["tests"] = copy.deepcopy(updated_runtime_tests)
+    return task_report
+
+
+def _sync_expected_error_from_faulty_run(
+    task_item: dict[str, Any],
+    faulty_run: dict[str, Any],
+    task_report: dict[str, Any],
+) -> None:
+    if faulty_run.get("status") != "completed" or int(faulty_run.get("exit_code") or 0) == 0:
+        return
+    actual_error = str(faulty_run.get("last_error_line") or faulty_run.get("stderr") or "").strip()
+    if not actual_error:
+        return
+    runtime_tests = _list_of_dicts(task_item.get("runtime_tests"))
+    if not runtime_tests:
+        runtime_tests = _list_of_dicts(task_item.get("tests"))
+    if not runtime_tests:
+        return
+    updated = False
+    updated_runtime_tests: list[dict[str, Any]] = []
+    for index, test in enumerate(runtime_tests, start=1):
+        updated_test = dict(test)
+        for field_name in ("expected_error", "error_message"):
+            if field_name in updated_test and str(updated_test.get(field_name) or "") != actual_error:
+                task_report["updates"].append(
+                    {
+                        "task_id": str(task_item.get("id") or "?"),
+                        "test_index": index,
+                        "field": field_name,
+                        "old_value": str(updated_test.get(field_name) or ""),
+                        "new_value": actual_error,
+                        "reason": "faulty_code stderr from Python sandbox",
+                    }
+                )
+                updated_test[field_name] = actual_error
+                updated = True
+        updated_runtime_tests.append(updated_test)
+    if updated:
+        task_item["runtime_tests"] = copy.deepcopy(updated_runtime_tests)
+        task_item["tests"] = copy.deepcopy(updated_runtime_tests)
+
+
+def _public_python_run_result(result: dict[str, Any]) -> dict[str, Any]:
+    public = {
+        "status": result.get("status"),
+        "exit_code": result.get("exit_code"),
+        "stdout": result.get("stdout") or "",
+        "stderr": result.get("stderr") or "",
+        "exception_type": result.get("exception_type") or "",
+        "exception_message": result.get("exception_message") or "",
+        "last_error_line": result.get("last_error_line") or "",
+    }
+    if result.get("status") == "timeout":
+        public["timeout_seconds"] = result.get("timeout_seconds")
+    if result.get("status") == "command_not_found":
+        public["error"] = result.get("error")
+    return public
+
+
+def _technical_evidence_for_validation(
+    spec: MaterialSpec,
+    generation_artifacts: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if spec.kind != "practice" or not isinstance(generation_artifacts, dict):
+        return None
+    report = generation_artifacts.get("practice_execution_report")
+    if not isinstance(report, dict):
+        return None
+    report_for_llm = copy.deepcopy(report)
+    report_for_llm.pop("python_command", None)
+    return {
+        "evidence_type": "python_sandbox_execution",
+        "checked_material": False,
+        "student_facing": False,
+        "publishable": False,
+        "instruction": (
+            "Use this only to ground runtime claims about generated practice code, stdout, stderr, "
+            "and exception types. Do not validate this evidence as material content and do not target it "
+            "in fix_instructions."
+        ),
+        "practice_execution_report": report_for_llm,
+    }
 
 
 def _model_to_dict(value: BaseModel | dict[str, Any]) -> dict[str, Any]:
@@ -870,10 +1200,12 @@ class MaterialWorker:
         config: IsmartGenerationConfig,
         rule_validator: RuleValidator | None = None,
         trace: TraceLogger | None = None,
+        python_sandbox: PythonSandbox | DisabledPythonSandbox | None = None,
     ) -> None:
         self.config = config
         self.rule_validator = rule_validator or RuleValidator()
         self.trace = trace or TraceLogger()
+        self.python_sandbox = python_sandbox or DisabledPythonSandbox()
         self.invoker = StructuredSubagentInvoker(
             subagents,
             trace=self.trace,
@@ -1250,6 +1582,9 @@ class MaterialWorker:
             raise ValueError("Practice HTML template was not loaded.")
         templates = copy.deepcopy(previous_artifacts.get("practice_templates"))
         instances = copy.deepcopy(previous_artifacts.get("practice_instances"))
+        execution_report = copy.deepcopy(previous_artifacts.get("practice_execution_report"))
+        if not isinstance(execution_report, dict):
+            execution_report = {}
         reuse_templates = False
         reuse_instances = False
         if isinstance(templates, dict):
@@ -1274,17 +1609,28 @@ class MaterialWorker:
                 templates=templates,
                 instances=instances,
             )
+            if instance_validation.approved and not execution_report:
+                execution_report = _verify_practice_instances_with_python(
+                    instances,
+                    self.config,
+                    self.python_sandbox,
+                )
+            execution_issues = _practice_execution_issues(execution_report)
+            if execution_issues:
+                instance_validation = instance_validation.merge(ValidationResult.fail(execution_issues))
             reuse_instances = instance_validation.approved
             if reuse_instances:
                 self.trace.log("worker.practice_artifacts.reused", attempt=attempt)
                 artifacts = {
                     "practice_templates": templates,
                     "practice_instances": instances,
+                    "practice_execution_report": execution_report,
                 }
                 attempt_store.write_practice_generation_artifacts(
                     attempt=attempt,
                     templates=templates,
                     instances=instances,
+                    execution_report=execution_report,
                     metadata={"stage": "instances_frozen"},
                 )
         else:
@@ -1363,27 +1709,39 @@ class MaterialWorker:
                 )
             instances = _model_to_dict(instance_model)
             instances = _normalize_practice_instance_tests(instances)
+            execution_report = _verify_practice_instances_with_python(
+                instances,
+                self.config,
+                self.python_sandbox,
+            )
             instance_validation = self._validate_practice_instances(
                 task=task,
                 spec=spec,
                 templates=templates,
                 instances=instances,
             )
+            execution_issues = _practice_execution_issues(execution_report)
+            if execution_issues:
+                instance_validation = instance_validation.merge(ValidationResult.fail(execution_issues))
             self.trace.log(
                 "worker.practice_instances.done",
                 attempt=attempt,
                 approved=instance_validation.approved,
                 issues=instance_validation.issues,
+                python_updates=len(execution_report.get("updates") or []),
+                python_errors=len(execution_report.get("errors") or []),
             )
 
             artifacts = {
                 "practice_templates": templates,
                 "practice_instances": instances,
+                "practice_execution_report": execution_report,
             }
             attempt_store.write_practice_generation_artifacts(
                 attempt=attempt,
                 templates=templates,
                 instances=instances,
+                execution_report=execution_report,
                 metadata={"stage": "instances"},
             )
             if not instance_validation.approved:
@@ -1778,6 +2136,13 @@ class MaterialWorker:
                 issues.append(
                     f"current_control_autocheck.questions.{question_id} open-answer item needs expected_answer_format"
                 )
+            if template_code == "8d" and isinstance(autocheck_config, dict):
+                right_items = _string_list(autocheck_config.get("right_items"))
+                normalized_right_items = [_normalize_copy_text(value) for value in right_items if value.strip()]
+                if normalized_right_items and len(normalized_right_items) != len(set(normalized_right_items)):
+                    issues.append(
+                        f"current_control_autocheck.questions.{question_id} template 8D right_items must be unique"
+                    )
 
         if len(question_ids) != len(set(question_ids)):
             issues.append("current_control_autocheck.questions ids must be unique")
@@ -2345,6 +2710,7 @@ class MaterialWorker:
                     issues.append(
                         f"practice_instances.{task_id} has faulty_code but no learner-facing faulty_code_display or starter_code"
                     )
+                issues.extend(_practice_solution_constraint_issues(item, template))
         return ValidationResult.fail(issues) if issues else ValidationResult.ok()
 
     def _practice_task_order_issues(
@@ -2389,6 +2755,7 @@ class MaterialWorker:
             self.trace.log("worker.llm_validation.skipped", kind=spec.kind)
             return ValidationResult.ok()
         self.trace.log("worker.llm_validation.start", kind=spec.kind)
+        technical_evidence = _technical_evidence_for_validation(spec, generation_artifacts)
         validation_prompt = build_validation_prompt(
             task=task,
             spec=spec,
@@ -2398,6 +2765,7 @@ class MaterialWorker:
             content=content,
             rule_result=rule_result,
             generation_artifacts=generation_artifacts,
+            technical_evidence=technical_evidence,
         )
         data_model = self.invoker.invoke(
             "MaterialValidatorAgent",
@@ -2450,6 +2818,7 @@ class MaterialWorker:
             return {}
 
         self.trace.log("worker.controller.start", kind=spec.kind, issues=validation.issues)
+        technical_evidence = _technical_evidence_for_validation(spec, generation_artifacts)
         prompt = build_validation_controller_prompt(
             task=task,
             spec=spec,
@@ -2461,6 +2830,7 @@ class MaterialWorker:
             llm_result=llm_result,
             merged_validation=validation,
             generation_artifacts=generation_artifacts,
+            technical_evidence=technical_evidence,
         )
         data_model = self.invoker.invoke(
             "ValidationControllerAgent",
@@ -2498,6 +2868,7 @@ class MaterialWorker:
         )
         decision = self._apply_specification_qa_appellate_policy(
             spec=spec,
+            content=content,
             rule_result=rule_result,
             validation=validation,
             decision=decision,
@@ -2683,6 +3054,7 @@ class MaterialWorker:
         self,
         *,
         spec: MaterialSpec,
+        content: str = "",
         rule_result: ValidationResult,
         validation: ValidationResult,
         decision: dict[str, Any],
@@ -2697,7 +3069,10 @@ class MaterialWorker:
         overruled: list[str] = []
         remaining: list[str] = []
         for issue in blocking_issues:
-            if self._is_overstrict_specification_qa_id_issue(issue):
+            if self._is_overstrict_specification_qa_id_issue(issue) or self._is_unproven_specification_qa_local_path_issue(
+                issue,
+                content,
+            ):
                 overruled.append(issue)
             else:
                 remaining.append(issue)
@@ -2708,7 +3083,8 @@ class MaterialWorker:
         adjusted = dict(decision)
         note = (
             "Deterministic appellate policy overruled validator objections that treated visible QA-ID labels "
-            "as leakage in specification_qa. QA-ID is allowed for this internal QA artifact."
+            "as leakage in specification_qa or reported visible local paths that are not present in the checked "
+            "specification_qa HTML. QA-ID is allowed for this internal QA artifact."
         )
         adjusted["score_rationale"] = " ".join(part for part in [str(adjusted.get("score_rationale") or ""), note] if part)
         adjusted["rationale"] = " ".join(part for part in [str(adjusted.get("rationale") or ""), note] if part)
@@ -2723,6 +3099,7 @@ class MaterialWorker:
             item
             for item in _string_list(adjusted.get("fix_instructions", []))
             if not self._mentions_qa_id(item)
+            and not self._is_unproven_specification_qa_local_path_issue(item, content)
         ]
         if not remaining:
             adjusted["approved"] = True
@@ -3064,6 +3441,33 @@ class MaterialWorker:
         ):
             return True
         return False
+
+    def _is_unproven_specification_qa_local_path_issue(self, issue: str, content: str) -> bool:
+        if not self._mentions_local_path_issue(issue):
+            return False
+        return not self._content_contains_visible_local_path(content)
+
+    @staticmethod
+    def _mentions_local_path_issue(issue: str) -> bool:
+        normalized = _normalize_copy_text(issue)
+        if re.search(r"(?i)\b[a-z]:[\\/]", issue or ""):
+            return True
+        return any(
+            marker in normalized
+            for marker in (
+                "local path",
+                "windows path",
+                "raw local path",
+                "docs/ismart",
+                "docs\\ismart",
+                ".xlsx",
+            )
+        )
+
+    @staticmethod
+    def _content_contains_visible_local_path(content: str) -> bool:
+        checked = html.unescape(str(content or ""))
+        return bool(re.search(r"(?i)(\b[a-z]:[\\/][^<>\s\"']+|\\\\[^\\/]+[\\/][^<>\s\"']+)", checked))
 
     def _is_overstrict_specification_qa_id_issue(self, issue: str) -> bool:
         normalized = _normalize_copy_text(issue)

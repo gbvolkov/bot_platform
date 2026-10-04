@@ -38,6 +38,7 @@ This documentation set describes the current platform implementation in `C:\Proj
 
 ## Quick links
 
+- [Architecture Review And Refactoring Plan (2026-10-04)](architecture/refactoring-review-2026-10-04.md)
 - [Repository Findings](findings.md)
 - [Common Agent Architecture](agents/common-agent-architecture.md)
 - [Support Modules](agents/support-modules.md)

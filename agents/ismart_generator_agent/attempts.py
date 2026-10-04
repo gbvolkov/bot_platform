@@ -81,6 +81,7 @@ class AttemptArtifactStore:
         attempt: int,
         templates: dict[str, Any] | None,
         instances: dict[str, Any] | None,
+        execution_report: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         if self.root is None:
@@ -91,6 +92,11 @@ class AttemptArtifactStore:
         common = {"attempt": attempt, "metadata": metadata or {}}
         write_json(attempt_dir / f"{prefix}.practice_templates.json", {**common, "practice_templates": templates or {}})
         write_json(attempt_dir / f"{prefix}.practice_instances.json", {**common, "practice_instances": instances or {}})
+        if execution_report is not None:
+            write_json(
+                attempt_dir / f"{prefix}.practice_execution_report.json",
+                {**common, "practice_execution_report": execution_report},
+            )
 
     def write_self_work_generation_artifacts(
         self,

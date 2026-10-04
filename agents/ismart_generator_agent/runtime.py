@@ -16,8 +16,10 @@ from .contracts import (
 from .planner import build_material_plan
 from .practice_guidance import run_practice_guidance_material
 from .profiles import config_for_task_profile, resolve_course_level
+from .python_sandbox import DisabledPythonSandbox, PythonSandbox
 from .resume import (
     ExistingPackage,
+    build_effective_task_from_existing_package,
     existing_package_from_payload,
     find_existing_lesson_dir,
     load_existing_package,
@@ -33,7 +35,7 @@ from .task_skip import (
 from .trace import TraceLogger
 from .validators import RuleValidator
 from .workers import MaterialWorker, PackageValidator
-from .writer import default_run_name, write_task_output
+from .writer import default_run_name, write_json, write_task_output
 
 
 class LessonTaskGraphState(TypedDict, total=False):
@@ -55,12 +57,16 @@ def run_ismart_task(
     *,
     subagents: Mapping[str, Any],
     run_dir: str | Path | None = None,
+    python_sandbox: PythonSandbox | DisabledPythonSandbox | None = None,
 ) -> IsmartGenerationResult:
-    runtime = IsmartGeneratorRuntime(config=config, subagents=subagents)
-    return runtime.run_task(
-        task,
-        run_dir=Path(run_dir) if run_dir is not None else None,
-    )
+    runtime = IsmartGeneratorRuntime(config=config, subagents=subagents, python_sandbox=python_sandbox)
+    try:
+        return runtime.run_task(
+            task,
+            run_dir=Path(run_dir) if run_dir is not None else None,
+        )
+    finally:
+        runtime.close()
 
 
 class IsmartGeneratorRuntime:
@@ -69,10 +75,20 @@ class IsmartGeneratorRuntime:
         *,
         config: IsmartGenerationConfig,
         subagents: Mapping[str, Any],
+        python_sandbox: PythonSandbox | DisabledPythonSandbox | None = None,
     ) -> None:
         self.config = config
         self.subagents = subagents
         self.trace = TraceLogger(enabled=config.verbose)
+        if python_sandbox is not None:
+            self.python_sandbox = python_sandbox
+            self._owns_python_sandbox = False
+        elif config.use_python_sandbox:
+            self.python_sandbox = PythonSandbox(config)
+            self._owns_python_sandbox = True
+        else:
+            self.python_sandbox = DisabledPythonSandbox()
+            self._owns_python_sandbox = False
 
     def run_task(
         self,
@@ -87,6 +103,10 @@ class IsmartGeneratorRuntime:
         if not isinstance(result, IsmartGenerationResult):
             raise RuntimeError("LessonTaskGraph finished without IsmartGenerationResult.")
         return result
+
+    def close(self) -> None:
+        if self._owns_python_sandbox:
+            self.python_sandbox.close()
 
     def _build_lesson_task_graph(self, result_box: dict[str, IsmartGenerationResult]):
         rule_validator = RuleValidator()
@@ -174,6 +194,19 @@ class IsmartGeneratorRuntime:
             runtime_data["existing_package"] = package
             runtime_data["existing_material_files"] = dict(package.material_files_by_kind)
             runtime_data["package_validation"] = package.to_generation_result().package_validation
+            effective_task, effective_patch = build_effective_task_from_existing_package(state["task"], package)
+            runtime_data["resume_effective_task_patch"] = effective_patch
+            resume_attempts_dir = runtime_data["attempts_dir"] / "resume"
+            resume_attempts_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                resume_attempts_dir / "effective_task_patch.json",
+                effective_patch,
+            )
+            if effective_patch.get("changed"):
+                write_json(
+                    resume_attempts_dir / "effective_task.json",
+                    effective_task,
+                )
             self.trace.log(
                 "resume.existing_package.loaded",
                 output_dir=str(package.output_dir),
@@ -182,6 +215,19 @@ class IsmartGeneratorRuntime:
                     {"kind": material.kind, "status": material.status}
                     for material in package.materials_by_kind.values()
                 ],
+            )
+            if effective_patch.get("changed"):
+                self.trace.log(
+                    "resume.effective_task.applied",
+                    source=effective_patch.get("source"),
+                    task_count=effective_patch.get("task_count"),
+                    task_ids=effective_patch.get("task_ids"),
+                    level_counts=effective_patch.get("level_counts"),
+                )
+                return {"task": effective_task}
+            self.trace.log(
+                "resume.effective_task.noop",
+                reason=effective_patch.get("reason"),
             )
             return {}
 
@@ -195,8 +241,23 @@ class IsmartGeneratorRuntime:
             unusable: dict[str, list[str]] = {}
             non_qa_changed = False
             specs = runtime_data.get("specs") or []
+            existing_practice = package.material("practice")
+            practice_was_skipped = bool(
+                existing_practice is not None and existing_practice.status in SKIPPED_MATERIAL_STATUSES
+            )
             for spec in specs:
                 if spec.kind == "specification_qa":
+                    continue
+                if practice_was_skipped and spec.kind == "practice":
+                    actions[spec.kind] = "reuse_existing"
+                    continue
+                if practice_was_skipped and spec.kind in {"practice_guidance", "mr_practice"}:
+                    existing_material = package.material(spec.kind)
+                    if existing_material is not None and existing_material.status in SKIPPED_MATERIAL_STATUSES:
+                        actions[spec.kind] = "reuse_existing"
+                    else:
+                        actions[spec.kind] = "generate"
+                        unusable[spec.kind] = ["practice was already skipped; dependent material will stay skipped"]
                     continue
                 material, reasons = reusable_material(package, spec)
                 if material is not None:
@@ -315,6 +376,7 @@ class IsmartGeneratorRuntime:
                         attempts_dir=attempts_dir,
                         trace=self.trace,
                         rule_validator=rule_validator,
+                        python_sandbox=self.python_sandbox,
                     )
                 else:
                     worker = MaterialWorker(
@@ -322,6 +384,7 @@ class IsmartGeneratorRuntime:
                         config=task_config,
                         rule_validator=rule_validator,
                         trace=self.trace,
+                        python_sandbox=self.python_sandbox,
                     )
                     material = worker.run(
                         task=task,
@@ -350,7 +413,11 @@ class IsmartGeneratorRuntime:
             validation_reports[spec.kind] = validation
             runtime_data["materials"] = materials
             runtime_data["validation_reports"] = validation_reports
-            if runtime_data.get("resume_mode") == "missing_only" and spec.kind != "specification_qa":
+            if (
+                runtime_data.get("resume_mode") == "missing_only"
+                and spec.kind != "specification_qa"
+                and material.status not in SKIPPED_MATERIAL_STATUSES
+            ):
                 runtime_data["package_changed"] = True
             result_update: dict[str, Any] = {
                 "current_material_index": int(state.get("current_material_index") or 0) + 1,
@@ -477,10 +544,10 @@ class IsmartGeneratorRuntime:
         builder.add_node("package_validation", package_validation_node)
         builder.add_node("finish_task", finish_task_node)
         builder.add_edge(START, "init_task")
-        builder.add_edge("init_task", "plan")
+        builder.add_edge("init_task", "load_existing_package")
+        builder.add_edge("load_existing_package", "plan")
         builder.add_edge("plan", "load_references")
-        builder.add_edge("load_references", "load_existing_package")
-        builder.add_edge("load_existing_package", "diff_existing_vs_required")
+        builder.add_edge("load_references", "diff_existing_vs_required")
         builder.add_edge("diff_existing_vs_required", "route_material")
         builder.add_conditional_edges(
             "route_material",

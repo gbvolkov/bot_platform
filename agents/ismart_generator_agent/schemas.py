@@ -193,9 +193,9 @@ class PracticeGuidanceModuleTask(BaseModel):
     code_cell: str = Field(
         default="",
         description=(
-            "Learner-facing code shown for this task. If the source practice task has faulty_code_display, "
-            "copy that value here exactly. This field is not a solution field; it may contain intentionally "
-            "faulty starter code that the learner must fix."
+            "Learner-facing code shown for this task. If faulty_code_display is non-empty, copy it here exactly. "
+            "Otherwise, if starter_code is non-empty, copy starter_code here exactly. This field is not a "
+            "solution field; it may contain intentionally faulty or incomplete starter code."
         ),
     )
     input_requirements: str = ""
@@ -236,7 +236,13 @@ class PracticeGuidanceArtifact(BaseModel):
     methodical_guidance: PracticeGuidanceMethodicalGuidance
     result_requirements: PracticeGuidanceResultRequirements
     self_check_questions: list[str] = Field(..., min_length=3)
-    requires_check: list[str] = Field(default_factory=list)
+    requires_check: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Internal non-publishable blocker notes only. Keep empty for normal missing theory/reference gaps; "
+            "do not use it for learner-facing 'requires check/clarification' text."
+        ),
+    )
     consistency_notes: list[str] = Field(default_factory=list)
     agent_notes: list[str] = Field(default_factory=list)
 

@@ -1,0 +1,2 @@
+$Lessons = @(36, 37, 38, 39, 40)
+& "$PSScriptRoot\..\ismart_complete_batches_common\_run_ismart_complete_batch.ps1" -DatasetId "advanced_10_11" -InputJson "data\ismart\generator\data\generation_input_advanced_10_11_from_tracker.json" -SourceRoot "docs\advanced_10-11" -TargetRoot "docs\advanced_10-11_complete" -Lessons $Lessons -RunName "advanced_10_11_complete_batch_08_lessons_036_040" -LogFileName "advanced_10_11_complete_batch_08_lessons_036_040.log"

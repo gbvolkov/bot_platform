@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,12 @@ def default_data_dir() -> Path:
     return default_workspace_dir() / "data"
 
 
+def default_python_sandbox_command() -> tuple[str, ...]:
+    if os.name == "nt":
+        return ("py", "-3.12")
+    return ("python3.12",)
+
+
 @dataclass(frozen=True)
 class IsmartGenerationConfig:
     prompts_dir: Path = field(default_factory=lambda: default_prompts_root() / "basic")
@@ -51,6 +58,10 @@ class IsmartGenerationConfig:
     use_llm_validator: bool = True
     use_validation_controller: bool = True
     validation_controller_accept_score: float = 3.0
+    use_python_sandbox: bool = True
+    python_sandbox_command: tuple[str, ...] = field(default_factory=default_python_sandbox_command)
+    python_sandbox_timeout_seconds: float = 3.0
+    python_sandbox_max_output_chars: int = 4000
     generation_target: str | None = None
     verbose: bool = False
     langchain_config: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)

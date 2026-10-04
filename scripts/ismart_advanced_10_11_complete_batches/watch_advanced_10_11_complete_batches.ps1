@@ -1,0 +1,1 @@
+& "$PSScriptRoot\..\ismart_complete_batches_common\_watch_ismart_complete_batches.ps1" -LogDir "logs\ismart_advanced_10_11_complete_batches" -DatasetName "advanced_10_11_complete" -DisplayName "iSMART advanced 10-11 complete"

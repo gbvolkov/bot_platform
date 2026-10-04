@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,20 @@ def compact_json(value: Any) -> str:
 
 def stable_sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+LOCAL_FILE_PATH_RE = re.compile(
+    r"(?P<path>(?:file:///)?[A-Za-z]:[\\/][^\r\n\"'<>`]*?[\\/](?P<name>[^\\/\r\n\"'<>`]*?\.[A-Za-z0-9]{1,12}))"
+)
+
+
+def sanitize_reference_markdown_content(content: str) -> str:
+    return LOCAL_FILE_PATH_RE.sub(lambda match: _filename_from_local_path(match.group("path")), content)
+
+
+def _filename_from_local_path(value: str) -> str:
+    normalized = value.replace("file:///", "").replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or normalized
 
 
 def read_prompt_files(config: IsmartGenerationConfig, prompt_files: tuple[str, ...]) -> dict[str, str]:

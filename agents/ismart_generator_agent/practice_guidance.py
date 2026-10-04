@@ -10,7 +10,12 @@ from typing import Any, Mapping
 from pydantic import BaseModel
 
 from .attempts import attempt_timestamp
-from .context import build_validation_prompt, validation_result_summary
+from .context import (
+    build_validation_controller_prompt,
+    build_validation_controller_system_prompt,
+    build_validation_prompt,
+    validation_result_summary,
+)
 from .context import task_identity
 from .contracts import (
     IsmartGenerationConfig,
@@ -21,8 +26,9 @@ from .contracts import (
     ValidationResult,
 )
 from .profiles import prompts_dir_for_level, resolve_course_class
+from .python_sandbox import DisabledPythonSandbox, PythonSandbox
 from .registry import get_material_spec
-from .schemas import MaterialValidationDecision, PracticeGuidanceArtifact
+from .schemas import MaterialValidationDecision, PracticeGuidanceArtifact, ValidationControllerDecision
 from .sources import reference_summary
 from .sources import read_prompt_files
 from .trace import TraceLogger
@@ -105,6 +111,7 @@ def run_practice_guidance_postprocess(
     previous_validation: ValidationResult | None = None
     previous_issues: list[str] = []
     latest_payload: dict[str, Any] | None = None
+    python_sandbox = PythonSandbox(task_config) if task_config.use_python_sandbox else DisabledPythonSandbox()
 
     for attempt in range(1, config.max_generation_iterations + 1):
         input_payload = build_practice_guidance_input(
@@ -141,6 +148,16 @@ def run_practice_guidance_postprocess(
             "practice_guidance_input": input_payload,
             "practice_guidance_artifact": artifact,
         }
+        execution_evidence = _build_practice_guidance_execution_evidence(
+            input_payload=input_payload,
+            artifact=artifact,
+            config=task_config,
+            python_sandbox=python_sandbox,
+        )
+        write_json(
+            attempts_dir / f"{prefix}.execution_evidence.json",
+            {"attempt": attempt, "technical_evidence": execution_evidence},
+        )
         task = _task_for_validation(result)
         rule_result = rule_validator.validate_material(content, spec, task)
         llm_result = _validate_practice_guidance(
@@ -153,6 +170,7 @@ def run_practice_guidance_postprocess(
             content=content,
             artifacts=artifacts,
             rule_result=rule_result,
+            technical_evidence=execution_evidence,
         )
         validation = rule_result.merge(llm_result)
         write_json(
@@ -184,6 +202,7 @@ def run_practice_guidance_postprocess(
                 lesson_output_dir / "validation_reports" / "practice-guidance.json",
                 _validation_to_json(validation),
             )
+            python_sandbox.close()
             return {
                 "status": "approved",
                 "output_dir": str(lesson_output_dir),
@@ -204,6 +223,7 @@ def run_practice_guidance_postprocess(
         "issues": previous_issues,
     }
     write_json(lesson_output_dir / "tmp" / PRACTICE_GUIDANCE_KIND / "practice_guidance.failed.json", failure_context)
+    python_sandbox.close()
     raise RuntimeError(f"practice_guidance failed after {config.max_generation_iterations} attempts: {previous_issues}")
 
 
@@ -219,6 +239,7 @@ def run_practice_guidance_material(
     attempts_dir: Path,
     trace: TraceLogger | None = None,
     rule_validator: RuleValidator | None = None,
+    python_sandbox: PythonSandbox | DisabledPythonSandbox | None = None,
 ) -> MaterialResult:
     trace = trace or TraceLogger()
     trace.log(
@@ -237,6 +258,7 @@ def run_practice_guidance_material(
         langchain_config=config.langchain_config,
     )
     validator = rule_validator or RuleValidator()
+    python_sandbox = python_sandbox or DisabledPythonSandbox()
     material_attempts_dir = attempts_dir / PRACTICE_GUIDANCE_KIND
     material_attempts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -247,6 +269,8 @@ def run_practice_guidance_material(
     last_artifact: dict[str, Any] = {}
     last_input: dict[str, Any] = {}
     last_validation: ValidationResult | None = None
+    last_rule_result: ValidationResult | None = None
+    last_llm_result: ValidationResult | None = None
 
     for attempt in range(1, config.max_generation_iterations + 1):
         trace.log(
@@ -303,7 +327,26 @@ def run_practice_guidance_material(
             "practice_guidance_input": input_payload,
             "practice_guidance_artifact": artifact,
         }
+        execution_evidence = _build_practice_guidance_execution_evidence(
+            input_payload=input_payload,
+            artifact=artifact,
+            config=config,
+            python_sandbox=python_sandbox,
+        )
+        write_json(
+            material_attempts_dir / f"{prefix}.execution_evidence.json",
+            {"attempt": attempt, "technical_evidence": execution_evidence},
+        )
+        trace.log(
+            "worker.execution_evidence.done",
+            kind=spec.kind,
+            attempt=attempt,
+            enabled=execution_evidence.get("enabled"),
+            task_runs=len(execution_evidence.get("practice_task_runs") or []),
+            artifact_runs=len(execution_evidence.get("artifact_module_task_runs") or []),
+        )
         rule_result = validator.validate_material(content, spec, task)
+        last_rule_result = rule_result
         trace.log(
             "worker.rule_validation.done",
             kind=spec.kind,
@@ -320,8 +363,10 @@ def run_practice_guidance_material(
             input_payload=input_payload,
             content=content,
             artifacts=artifacts,
+            technical_evidence=execution_evidence,
             rule_result=rule_result,
         )
+        last_llm_result = llm_result
         validation = rule_result.merge(llm_result)
         last_validation = validation
         trace.log(
@@ -362,6 +407,77 @@ def run_practice_guidance_material(
         previous_issues = list(validation.issues)
         if attempt < config.max_generation_iterations:
             trace.log("worker.retry", kind=spec.kind, next_attempt=attempt + 1, issues=previous_issues)
+
+    controller_decision = _review_practice_guidance_validation_failure(
+        invoker=invoker,
+        config=config,
+        spec=spec,
+        task=task,
+        prompt_contents=prompt_contents,
+        input_payload=last_input,
+        content=last_content,
+        artifacts={
+            "practice_guidance_input": last_input,
+            "practice_guidance_artifact": last_artifact,
+        },
+        technical_evidence=_build_practice_guidance_execution_evidence(
+            input_payload=last_input,
+            artifact=last_artifact,
+            config=config,
+            python_sandbox=python_sandbox,
+        ),
+        rule_result=last_rule_result,
+        llm_result=last_llm_result,
+        validation=last_validation,
+        trace=trace,
+    )
+    controller_score = float(controller_decision.get("quality_score", 0.0) or 0.0)
+    if controller_score >= config.validation_controller_accept_score:
+        rationale = str(controller_decision.get("rationale") or "validator rejection was not blocking")
+        trace.log(
+            "worker.controller.accepted_by_score",
+            kind=spec.kind,
+            quality_score=controller_score,
+            accept_score=config.validation_controller_accept_score,
+            controller_approved=controller_decision.get("approved"),
+            rationale=rationale,
+        )
+        write_json(
+            material_attempts_dir / "practice_guidance.controller_review.json",
+            {"controller_decision": controller_decision},
+        )
+        return MaterialResult(
+            kind=spec.kind,
+            material_type=spec.material_type,
+            agent_type=PRACTICE_GUIDANCE_AGENT,
+            status="approved",
+            iterations=config.max_generation_iterations,
+            content=last_content,
+            prompt_files=spec.prompt_files,
+            validation_issues=[],
+            validation_issues_by_block=last_validation.issues_by_block if last_validation else [],
+            validation_passed_blocks=last_validation.passed_blocks if last_validation else [],
+            agent_notes=[
+                *[str(item) for item in last_artifact.get("agent_notes") or []],
+                (
+                    "ValidationControllerAgent accepted after validator review "
+                    f"with quality_score={controller_score:g}: {rationale}"
+                ),
+            ],
+            controller_called=True,
+            controller_decision=controller_decision,
+            generation_artifacts={
+                "practice_guidance_input": last_input,
+                "practice_guidance_artifact": last_artifact,
+            },
+        )
+    if controller_decision:
+        previous_issues = [str(item) for item in controller_decision.get("blocking_issues") or previous_issues]
+        write_json(
+            material_attempts_dir / "practice_guidance.controller_review.json",
+            {"controller_decision": controller_decision},
+        )
+        trace.log("worker.controller.kept_failed", kind=spec.kind, issues=previous_issues)
 
     failure_context = {
         "status": "failed",
@@ -623,17 +739,29 @@ REQUIREMENTS:
 - self_check_questions must contain at least 3 learner-facing questions without answers or keys.
 - Use practice_tasks as the source of module tasks.
 - Do not change, replace, merge, split, or reconstruct module tasks.
-- For each PracticeGuidanceModuleTask, map practice_tasks[].faulty_code_display to module_tasks[].code_cell exactly.
+- For each PracticeGuidanceModuleTask, fill module_tasks[].code_cell from the corresponding practice_tasks item:
+  - if practice_tasks[].faulty_code_display is non-empty, copy it to module_tasks[].code_cell exactly;
+  - otherwise, if practice_tasks[].starter_code is non-empty, copy starter_code to module_tasks[].code_cell exactly;
+  - leaving module_tasks[].code_cell empty is valid only when both faulty_code_display and starter_code are empty.
 - module_tasks[].code_cell is the learner-facing code display field for starter or intentionally faulty code; it is not a solution field.
-- If faulty_code_display exists, leaving code_cell empty is invalid. Do not add requires_check saying there is no field for faulty_code_display; use code_cell.
-- Do not put raw faulty_code into code_cell when faulty_code_display exists.
+- Do not add requires_check saying there is no field for faulty_code_display or starter_code; use code_cell.
+- Do not put raw faulty_code into code_cell when faulty_code_display or starter_code exists.
 - Build stages by level and methodical similarity; source_task_ids must reference practice_tasks ids.
 - Create a worked analogous example for each stage. It must be similar by method but different from the module tasks.
+- A worked example is a scaffold, not a module task key. It may be solved for its own analogous input, but it must not reuse exact task values, exact error tokens, exact outputs, or exact faulty/starter code from practice_tasks.
+- For debugging/error-fixing stages, do not show corrected code in worked_example. You may show an analogous faulty fragment and the reasoning/checking process, or leave worked_example.code_cell empty and explain the process in commentary.
+- For error-reading stages, an analogous error token/value in worked_example is allowed only when it is different from all practice_tasks tokens and is clearly part of the example, not an answer to P tasks.
+- If stage/module tasks prohibit a technique, worked_example must obey the same prohibition. For example, if tasks forbid string concatenation or f-strings, worked_example must not use + for strings or f-strings.
 - Do not reveal keys, corrected code, internal answer/explanation fields, raw field names, JSON/process wording, SHA, or local paths.
 - Use previous_lessons_context for explicit links to previous lessons only when it is non-empty.
 - If previous_lessons_context is empty, do not invent previous-lesson references and write the guidance without them.
-- If exact reference values are unavailable, add a requires_check item instead of inventing them.
-- On retry, preserve previous_passed_blocks and repair only fields mentioned in previous_validation_issues unless a passed block directly depends on a repaired field.
+- Do not use requires_check for missing theory_brief_source.sections, missing exact UI/interface labels, absent previous_lessons_context, or other normal source gaps. Write self-contained guidance from practice_tasks and available references without unsupported specifics.
+- Keep requires_check empty unless the runtime explicitly asks for a non-publishable internal blocker. Never write learner-facing phrases such as "Требует проверки", "требует уточнения", "отсутствует утверждённый источник", or "при необходимости уточнить".
+- If exact reference values are unavailable, omit the exact value and use a neutral accurate formulation. Put non-publishable source limitations in consistency_notes or agent_notes, not in learner-facing content.
+- On retry, start from retry_context.previous_artifact.
+- Preserve every block listed in retry_context.previous_passed_blocks unchanged unless that exact block is named in previous_validation_issues.
+- If previous_passed_blocks contains methodical_guidance.stages/module_tasks and current issues target only theory_brief, do not modify module_tasks, source_task_ids, student_condition, code_cell, checks, or manual_checks.
+- Repair only fields mentioned in previous_validation_issues unless a passed block directly depends on a repaired field.
 """.strip()
 
 
@@ -729,11 +857,6 @@ def render_practice_guidance_html(artifact: dict[str, Any]) -> str:
     parts.append("<h2>5. Контрольные вопросы для самопроверки</h2>")
     parts.append(_numbered_list_html("", artifact.get("self_check_questions")))
 
-    requires_check = artifact.get("requires_check") if isinstance(artifact.get("requires_check"), list) else []
-    if requires_check:
-        parts.append("<h2>Требует проверки / уточнения</h2>")
-        parts.append(_list_html("", requires_check))
-
     return template.render("".join(parts))
 
 
@@ -748,6 +871,7 @@ def _validate_practice_guidance(
     content: str,
     artifacts: dict[str, Any],
     rule_result: ValidationResult,
+    technical_evidence: dict[str, Any] | None = None,
 ) -> ValidationResult:
     if not config.use_llm_validator:
         return ValidationResult.ok()
@@ -761,6 +885,7 @@ def _validate_practice_guidance(
         content=content,
         rule_result=rule_result,
         generation_artifacts=artifacts,
+        technical_evidence=technical_evidence,
     )
     decision = invoker.invoke(
         "MaterialValidatorAgent",
@@ -780,6 +905,189 @@ def _validate_practice_guidance(
         issues_by_block=[_model_to_dict(item) for item in decision.issues_by_block],
         passed_blocks=[_model_to_dict(item) for item in decision.passed_blocks],
     )
+
+
+def _build_practice_guidance_execution_evidence(
+    *,
+    input_payload: dict[str, Any],
+    artifact: dict[str, Any],
+    config: IsmartGenerationConfig,
+    python_sandbox: PythonSandbox | DisabledPythonSandbox,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "evidence_type": "python_sandbox_execution",
+        "checked_material": False,
+        "student_facing": False,
+        "publishable": False,
+        "instruction": (
+            "Use this only to ground runtime claims about learner-facing code snippets. "
+            "Do not validate this evidence as material content and do not target it in fix_instructions."
+        ),
+        "enabled": bool(config.use_python_sandbox),
+        "python_version": "",
+        "practice_task_runs": [],
+        "artifact_module_task_runs": [],
+        "errors": [],
+    }
+    if not config.use_python_sandbox:
+        evidence["skipped_reason"] = "python sandbox disabled"
+        return evidence
+    if isinstance(python_sandbox, DisabledPythonSandbox):
+        evidence["enabled"] = False
+        evidence["skipped_reason"] = "python sandbox was not provided to practice_guidance"
+        return evidence
+    version = python_sandbox.python_version()
+    evidence["python_version"] = version
+    if not version:
+        evidence["errors"].append("python sandbox is unavailable")
+        return evidence
+
+    for task_item in _list_of_dicts(input_payload.get("practice_tasks")):
+        code_source, code = _practice_guidance_task_code(task_item)
+        if not code.strip():
+            continue
+        run = python_sandbox.run_code(code, "")
+        evidence["practice_task_runs"].append(
+            {
+                "task_id": str(task_item.get("id") or "?"),
+                "code_source": code_source,
+                "code_char_count": len(code),
+                "run": _public_python_run_result(run),
+            }
+        )
+
+    for task_item in _artifact_module_tasks(artifact):
+        code = str(task_item.get("code_cell") or "")
+        if not code.strip():
+            continue
+        run = python_sandbox.run_code(code, "")
+        evidence["artifact_module_task_runs"].append(
+            {
+                "task_id": str(task_item.get("task_id") or "?"),
+                "stage_id": str(task_item.get("_stage_id") or ""),
+                "code_source": "module_tasks[].code_cell",
+                "code_char_count": len(code),
+                "run": _public_python_run_result(run),
+            }
+        )
+    return evidence
+
+
+def _practice_guidance_task_code(task_item: dict[str, Any]) -> tuple[str, str]:
+    faulty = str(task_item.get("faulty_code_display") or "")
+    if faulty.strip():
+        return "faulty_code_display", faulty
+    starter = str(task_item.get("starter_code") or "")
+    if starter.strip():
+        return "starter_code", starter
+    return "", ""
+
+
+def _artifact_module_tasks(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    guidance = artifact.get("methodical_guidance") if isinstance(artifact.get("methodical_guidance"), dict) else {}
+    tasks: list[dict[str, Any]] = []
+    for stage in _list_of_dicts(guidance.get("stages")):
+        stage_id = str(stage.get("id") or "")
+        for task_item in _list_of_dicts(stage.get("module_tasks")):
+            item = dict(task_item)
+            item["_stage_id"] = stage_id
+            tasks.append(item)
+    return tasks
+
+
+def _public_python_run_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": result.get("status"),
+        "exit_code": result.get("exit_code"),
+        "stdout": str(result.get("stdout") or ""),
+        "stderr": str(result.get("stderr") or ""),
+        "exception_type": str(result.get("exception_type") or ""),
+        "exception_message": str(result.get("exception_message") or ""),
+        "last_error_line": str(result.get("last_error_line") or ""),
+    }
+
+
+def _review_practice_guidance_validation_failure(
+    *,
+    invoker: StructuredSubagentInvoker,
+    config: IsmartGenerationConfig,
+    spec: MaterialSpec,
+    task: dict[str, Any],
+    prompt_contents: dict[str, str],
+    input_payload: dict[str, Any],
+    content: str,
+    artifacts: dict[str, Any],
+    technical_evidence: dict[str, Any] | None,
+    rule_result: ValidationResult | None,
+    llm_result: ValidationResult | None,
+    validation: ValidationResult | None,
+    trace: TraceLogger,
+) -> dict[str, Any]:
+    if not config.use_llm_validator or not config.use_validation_controller:
+        return {}
+    if not content or rule_result is None or llm_result is None or validation is None:
+        return {}
+    if not rule_result.approved:
+        trace.log("worker.controller.skipped_rule_failed", kind=spec.kind, issues=rule_result.issues)
+        return {}
+
+    trace.log("worker.controller.start", kind=spec.kind, issues=validation.issues)
+    prompt = build_validation_controller_prompt(
+        task=task,
+        spec=spec,
+        prompt_contents=prompt_contents,
+        references=_reference_bundle_from_input(input_payload),
+        dependencies=[],
+        content=content,
+        rule_result=rule_result,
+        llm_result=llm_result,
+        merged_validation=validation,
+        generation_artifacts=artifacts,
+        technical_evidence=technical_evidence,
+    )
+    data_model = invoker.invoke(
+        "ValidationControllerAgent",
+        system=build_validation_controller_system_prompt(),
+        prompt=prompt,
+        schema=ValidationControllerDecision,
+    )
+    if not isinstance(data_model, ValidationControllerDecision):
+        raise TypeError(f"ValidationControllerAgent returned {type(data_model)!r}, expected ValidationControllerDecision")
+    data = _model_to_dict(data_model)
+    decision = {
+        "approved": bool(data.get("approved")),
+        "decision": str(data.get("decision") or ("approve_material" if data.get("approved") else "keep_failed")),
+        "quality_score": _controller_quality_score(data),
+        "score_rationale": str(data.get("score_rationale") or ""),
+        "rationale": str(data.get("rationale") or ""),
+        "blocking_issues": [str(item) for item in data.get("blocking_issues") or []],
+        "non_blocking_issues": [str(item) for item in data.get("non_blocking_issues") or []],
+        "overruled_validator_issues": [str(item) for item in data.get("overruled_validator_issues") or []],
+        "residual_risks": [str(item) for item in data.get("residual_risks") or []],
+        "fix_instructions": [str(item) for item in data.get("fix_instructions") or []],
+    }
+    trace.log(
+        "worker.controller.done",
+        kind=spec.kind,
+        approved=decision["approved"],
+        quality_score=decision["quality_score"],
+        accept_score=config.validation_controller_accept_score,
+        accepted_by_score=decision["quality_score"] >= config.validation_controller_accept_score,
+        blocking_issues=decision["blocking_issues"],
+        non_blocking_issues=decision["non_blocking_issues"],
+    )
+    return decision
+
+
+def _controller_quality_score(data: dict[str, Any]) -> float:
+    raw_score = data.get("quality_score", data.get("score"))
+    if raw_score is None:
+        return 5.0 if data.get("approved") else 0.0
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(5.0, max(0.0, score))
 
 
 def _read_json(path: Path) -> dict[str, Any]:
