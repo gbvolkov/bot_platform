@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-platform-access"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = ["bot-platform-application==0.1.0", "bot-platform-infrastructure==0.1.0", "bot-platform-client==0.1.0", "bot-platform-sdk==0.1.0", "fastapi==0.120.0", "uvicorn==0.46.0"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["platform_access*"]
+namespaces = true
+exclude = ["*.build", "*.build.*", "*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.toml", "*.md", "*.txt", "*.yaml", "*.html", "static/*", "templates/*"]
