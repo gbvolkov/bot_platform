@@ -18,7 +18,7 @@ def test_configured_agent_builds_mycroft_from_config(monkeypatch, tmp_path):
         json.dumps(
             {
                 "system_prompt": {"type": "file", "path": str(prompt_path)},
-                "skills": {"paths": ["skills/marketing_analyst"]},
+                "skills": {"paths": ["agents/mycroft_agent/scenarios/marketing_analyst/skills"]},
                 "subagents": {
                     "stateless": ["stateless_agent"],
                     "stateful": ["stateful_agent"],
@@ -38,7 +38,7 @@ def test_configured_agent_builds_mycroft_from_config(monkeypatch, tmp_path):
     )
     captured: dict[str, object] = {}
 
-    async def fake_initialize_subagents(agent_ids):
+    async def fake_initialize_subagents(agent_ids, *, agent_resolver, state_scope):
         return [{"name": agent_id, "description": agent_id, "runnable": object()} for agent_id in agent_ids]
 
     async def fake_load_mcp_tools(_mcp_config):
@@ -76,14 +76,14 @@ def test_configured_agent_builds_mycroft_from_config(monkeypatch, tmp_path):
     assert [agent["name"] for agent in captured["stateful_subagents"]] == ["stateful_agent"]
     assert captured["checkpoint_saver"] == "checkpoint"
     assert captured["interrupt_on"] == {"send_message": {"allowed_decisions": ["approve"]}}
-    assert captured["skills"] == ("/skills/marketing_analyst",)
+    assert captured["skills"] == ("/agents/mycroft_agent/scenarios/marketing_analyst/skills",)
     assert isinstance(captured["backend"], FilesystemBackend)
 
 
 def test_configured_agent_accepts_repo_relative_config_path(monkeypatch):
     captured: dict[str, object] = {}
 
-    async def fake_initialize_subagents(_agent_ids):
+    async def fake_initialize_subagents(_agent_ids, *, agent_resolver, state_scope):
         return []
 
     async def fake_load_mcp_tools(_mcp_config):
@@ -113,13 +113,13 @@ def test_configured_agent_accepts_repo_relative_config_path(monkeypatch):
     )
 
     assert "internal GAZ marketing-materials analyst" in captured["system_prompt"]
-    assert captured["skills"] == ("/skills/marketing_analyst",)
+    assert captured["skills"] == ("/agents/mycroft_agent/scenarios/marketing_analyst/skills",)
 
 
 def test_build_skills_backend_loads_virtual_skills_on_windows_paths():
-    backend = build_skills_backend(("/skills/marketing_analyst",))
+    backend = build_skills_backend(("/agents/mycroft_agent/scenarios/marketing_analyst/skills",))
 
-    skills = _list_skills(backend, "/skills/marketing_analyst")
+    skills = _list_skills(backend, "/agents/mycroft_agent/scenarios/marketing_analyst/skills")
 
     assert {skill["name"] for skill in skills} == {
         "claims-guardrails",
@@ -131,9 +131,9 @@ def test_build_skills_backend_loads_virtual_skills_on_windows_paths():
 
 
 def test_build_skills_backend_loads_mycroft_orchestrator_skills():
-    backend = build_skills_backend(("/skills/mycroft",))
+    backend = build_skills_backend(("/agents/mycroft_agent/scenarios/gaz_sales/skills",))
 
-    skills = _list_skills(backend, "/skills/mycroft")
+    skills = _list_skills(backend, "/agents/mycroft_agent/scenarios/gaz_sales/skills")
 
     assert {skill["name"] for skill in skills} == {
         "answer-service-or-operation-question",
@@ -155,7 +155,7 @@ def test_build_skills_backend_loads_mycroft_orchestrator_skills():
 
 def test_mycroft_routing_skill_defines_source_capability_boundaries():
     skill_text = (
-        Path("skills/mycroft/source-authority-and-routing/SKILL.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/source-authority-and-routing/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
@@ -191,7 +191,7 @@ def test_mycroft_routing_skill_defines_source_capability_boundaries():
 
 def test_mycroft_tco_skill_requires_bi_lookup_before_template_for_active_models():
     skill_text = (
-        Path("skills/mycroft/build-tco-case/SKILL.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/build-tco-case/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
@@ -210,7 +210,7 @@ def test_mycroft_tco_skill_requires_bi_lookup_before_template_for_active_models(
 
 def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
     skill_text = (
-        Path("skills/mycroft/answer-synthesis/SKILL.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/answer-synthesis/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
@@ -228,7 +228,7 @@ def test_mycroft_answer_synthesis_skill_requires_latest_mix_consistency():
 
 def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
     skill_text = (
-        Path("skills/mycroft/validate-vehicle-facts/SKILL.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/validate-vehicle-facts/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
@@ -248,7 +248,7 @@ def test_mycroft_validate_vehicle_facts_rechecks_missing_exact_fields():
 
 def test_mycroft_recommendation_skill_uses_analytical_bi_until_full_details_are_requested():
     skill_text = (
-        Path("skills/mycroft/build-vehicle-recommendation/SKILL.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/build-vehicle-recommendation/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
@@ -261,7 +261,7 @@ def test_mycroft_recommendation_skill_uses_analytical_bi_until_full_details_are_
 
 def test_mycroft_comparison_skill_does_not_request_complete_profiles_for_analytics():
     skill_text = (
-        Path("skills/mycroft/compare-customer-options/SKILL.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/compare-customer-options/SKILL.md")
         .read_text(encoding="utf-8")
         .lower()
     )
@@ -275,13 +275,13 @@ def test_mycroft_comparison_skill_does_not_request_complete_profiles_for_analyti
 
 def test_mycroft_other_bi_using_skills_default_to_selected_field_mode():
     skill_paths = [
-        Path("skills/mycroft/answer-service-or-operation-question/SKILL.md"),
-        Path("skills/mycroft/build-tco-case/SKILL.md"),
-        Path("skills/mycroft/handle-competitor-comparison/SKILL.md"),
-        Path("skills/mycroft/shortlist-gaz-solutions/SKILL.md"),
-        Path("skills/mycroft/prepare-sales-argumentation/SKILL.md"),
-        Path("skills/mycroft/prepare-programs-and-financing/SKILL.md"),
-        Path("skills/mycroft/email-followup/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/answer-service-or-operation-question/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/build-tco-case/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/handle-competitor-comparison/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/shortlist-gaz-solutions/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/prepare-sales-argumentation/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/prepare-programs-and-financing/SKILL.md"),
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/email-followup/SKILL.md"),
     ]
 
     combined = "\n".join(path.read_text(encoding="utf-8").lower() for path in skill_paths)
@@ -296,7 +296,7 @@ def test_mycroft_other_bi_using_skills_default_to_selected_field_mode():
 
 def test_mycroft_bi_service_catalog_defines_analytical_and_complete_profile_modes():
     catalog_text = (
-        Path("skills/mycroft/references/subagents-service-catalog.md")
+        Path("agents/mycroft_agent/scenarios/gaz_sales/skills/references/subagents-service-catalog.md")
         .read_text(encoding="utf-8")
         .lower()
     )

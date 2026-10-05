@@ -482,6 +482,7 @@ def _collect_multiline_input() -> Optional[str]:
 
 
 def main() -> int:
+    from agent_runtime.runtime import AgentRuntime
     args = _parse_args()
 
     try:
@@ -489,6 +490,7 @@ def main() -> int:
         model_size = _parse_model_size(args.model_size)
 
         with asyncio.Runner() as runner:
+            runtime = AgentRuntime()
             checkpoint_cm = _persistent_checkpoint_saver()
             checkpoint_saver = runner.run(checkpoint_cm.__aenter__())
             try:
@@ -500,6 +502,7 @@ def main() -> int:
                     temperature=args.temperature,
                     streaming=False,
                     checkpoint_saver=checkpoint_saver,
+                    agent_resolver=runtime,
                 )
 
                 thread_id, run_config = _new_config(args.thread_id)
@@ -599,6 +602,7 @@ def main() -> int:
                         current_turns.append({"user": user_input, "assistant": answer})
                         print(f"\nMycroft: {answer}\n")
             finally:
+                runner.run(runtime.close())
                 runner.run(checkpoint_cm.__aexit__(None, None, None))
     except Exception as exc:
         print(f"Failed to start CLI: {exc}", file=sys.stderr)

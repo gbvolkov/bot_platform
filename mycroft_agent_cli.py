@@ -575,6 +575,7 @@ def _print_runtime_summary(
 
 
 def main() -> int:
+    from agent_runtime.runtime import AgentRuntime
     args = _parse_args()
 
     try:
@@ -586,15 +587,16 @@ def main() -> int:
         system_prompt = system_prompt_override or cli_config.system_prompt
 
         with asyncio.Runner() as runner:
+            runtime = AgentRuntime()
             checkpoint_cm = _persistent_checkpoint_saver()
             checkpoint_saver = runner.run(checkpoint_cm.__aenter__())
             try:
                 runner.run(checkpoint_saver.setup())
                 stateless_subagents = runner.run(
-                    _initialize_configured_subagents(cli_config.subagents.stateless)
+                    _initialize_configured_subagents(cli_config.subagents.stateless, agent_resolver=runtime, state_scope="stateless")
                 )
                 stateful_subagents = runner.run(
-                    _initialize_configured_subagents(cli_config.subagents.stateful)
+                    _initialize_configured_subagents(cli_config.subagents.stateful, agent_resolver=runtime, state_scope="stateful")
                 )
                 internal_tools = build_internal_tools(cli_config.internal_tools)
                 mcp_tools = runner.run(load_mcp_tools_from_config(cli_config.mcp))
@@ -724,9 +726,7 @@ def main() -> int:
                         current_turns.append({"user": user_input, "assistant": answer})
                         print(f"\nMycroft: {answer}\n")
             finally:
-                from bot_service.agent_registry import agent_registry
-
-                runner.run(agent_registry.aclose())
+                runner.run(runtime.close())
                 runner.run(checkpoint_cm.__aexit__(None, None, None))
     except Exception as exc:
         print(f"Failed to start CLI: {exc}", file=sys.stderr)

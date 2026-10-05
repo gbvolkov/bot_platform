@@ -13,7 +13,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 MYCROFT_CONFIG_ROOT_ENV = "MYCROFT_CONFIG_ROOT"
 MYCROFT_PROJECT_ROOT_ENV = "MYCROFT_PROJECT_ROOT"
 DEFAULT_MYCROFT_CONFIG_ROOT = Path("data/config/mycroft")
-DEFAULT_CLI_CONFIG_NAME = "gaz_config.json"
+DEFAULT_CLI_CONFIG_NAME = "scenarios/gaz_sales/config.json"
 DEFAULT_CLI_CONFIG_PATH = DEFAULT_MYCROFT_CONFIG_ROOT / DEFAULT_CLI_CONFIG_NAME
 _BRACED_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _ALLOWED_MCP_TRANSPORTS = {

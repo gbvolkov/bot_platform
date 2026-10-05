@@ -172,7 +172,7 @@ def test_default_cli_config_path_uses_working_directory_config_root(monkeypatch,
     monkeypatch.delenv("MYCROFT_CONFIG_ROOT", raising=False)
 
     assert resolve_cli_config_path() == (
-        tmp_path / "data" / "config" / "mycroft" / "gaz_config.json"
+        tmp_path / "data" / "config" / "mycroft" / "scenarios" / "gaz_sales" / "config.json"
     )
 
 
@@ -181,7 +181,7 @@ def test_default_cli_config_path_allows_configurable_root(monkeypatch, tmp_path)
     monkeypatch.setenv("MYCROFT_CONFIG_ROOT", "runtime/configs")
 
     assert resolve_cli_config_path() == (
-        tmp_path / "runtime" / "configs" / "gaz_config.json"
+        tmp_path / "runtime" / "configs" / "scenarios" / "gaz_sales" / "config.json"
     )
 
 
@@ -465,7 +465,7 @@ def test_load_cli_config_reads_skills_and_importable_tool_bundle(tmp_path):
         json.dumps(
             {
                 "system_prompt": "Prompt",
-                "skills": {"paths": ["/skills/marketing_analyst"]},
+                "skills": {"paths": ["/agents/mycroft_agent/scenarios/marketing_analyst/skills"]},
                 "subagents": {"stateless": [], "stateful": []},
                 "internal_tools": [
                     {
@@ -481,7 +481,7 @@ def test_load_cli_config_reads_skills_and_importable_tool_bundle(tmp_path):
 
     config = load_cli_config(config_path)
 
-    assert config.skills == SkillsConfig(paths=("/skills/marketing_analyst",))
+    assert config.skills == SkillsConfig(paths=("/agents/mycroft_agent/scenarios/marketing_analyst/skills",))
     assert config.internal_tools == (
         InternalToolSpec(
             import_path="agents.gaz_agent.marketing_tools:build_marketing_document_tools",
@@ -555,7 +555,7 @@ def test_default_cli_config_uses_generic_config_file():
     assert "latest recommended mix first" in config.system_prompt
     assert "Do not blindly accept an incorrect premise" in config.system_prompt
     assert "Do not write a procurement mix like" in config.system_prompt
-    assert config.skills == SkillsConfig(paths=("skills/mycroft",))
+    assert config.skills == SkillsConfig(paths=("agents/mycroft_agent/scenarios/gaz_sales/skills",))
 
 
 def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
@@ -585,7 +585,7 @@ def test_ingos_products_cli_config_loads_stateful_agents_and_idea_check():
 
 
 def test_kpi_agent_cli_config_loads_kpi_bi_subagent_and_skills():
-    config = load_cli_config(Path("data/config/mycroft/kpi_agent_config.json"))
+    config = load_cli_config(Path("data/config/mycroft/scenarios/kpi_agent/config.json"))
 
     assert config.subagents == SubagentsConfig(
         stateless=("kpi_bi_int",),
@@ -908,17 +908,16 @@ def test_initialize_configured_subagents_accepts_inactive_explicit_agents(monkey
             )
         }
 
-        async def ensure_agent_ready(self, agent_id):
-            assert agent_id == "product_Household"
-            return True
+        def describe(self, agent_id):
+            return self._definitions[agent_id]
 
-        def get_agent(self, agent_id):
+        async def resolve(self, agent_id, *, state_scope):
             assert agent_id == "product_Household"
             return fake_agent
 
     monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
 
-    subagents = asyncio.run(cli._initialize_configured_subagents(("product_Household",)))
+    subagents = asyncio.run(cli._initialize_configured_subagents(("product_Household",), agent_resolver=FakeRegistry(), state_scope="stateful"))
 
     assert len(subagents) == 1
     assert subagents[0]["name"] == "product_Household"
@@ -943,7 +942,7 @@ def test_initialize_configured_subagents_builds_builtin_web_search_agent(monkeyp
 
     monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
 
-    subagents = asyncio.run(cli._initialize_configured_subagents(("web_search_agent",)))
+    subagents = asyncio.run(cli._initialize_configured_subagents(("web_search_agent",), agent_resolver=None, state_scope="stateless"))
 
     assert subagents == [
         {
@@ -959,15 +958,15 @@ def test_initialize_configured_subagents_fails_on_unknown_explicit_agent(monkeyp
     class FakeRegistry:
         _definitions = {}
 
-        async def ensure_agent_ready(self, agent_id):
-            raise AssertionError("ensure_agent_ready should not be called for unknown agents")
+        def describe(self, agent_id):
+            raise KeyError(agent_id)
 
         def get_agent(self, agent_id):
             raise AssertionError("get_agent should not be called for unknown agents")
 
     monkeypatch.setattr("bot_service.agent_registry.agent_registry", FakeRegistry())
 
-    with pytest.raises(ValueError) as exc_info:
-        asyncio.run(cli._initialize_configured_subagents(("product_Unknown",)))
+    with pytest.raises(KeyError) as exc_info:
+        asyncio.run(cli._initialize_configured_subagents(("product_Unknown",), agent_resolver=FakeRegistry(), state_scope="stateless"))
 
-    assert "Unknown registry agent 'product_Unknown'" in str(exc_info.value)
+    assert "product_Unknown" in str(exc_info.value)

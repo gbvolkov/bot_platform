@@ -7,6 +7,7 @@ from typing import Any
 from deepagents.backends import FilesystemBackend
 
 from agents.utils import ModelType
+from platform_contracts import AgentResolver
 
 from .agent import initialize_agent as initialize_mycroft_agent
 from .cli_config import (
@@ -68,16 +69,17 @@ def initialize_agent(
     streaming: bool = False,
     reasoning: str | None = None,
     max_tool_calls: int | None = 12,
+    agent_resolver: AgentResolver | None = None,
 ) -> Any:
     resolved_config_path = _resolve_config_path(config_path)
     mycroft_config = load_cli_config(resolved_config_path)
     validate_required_environment(mycroft_config, provider.value)
 
     stateless_subagents = asyncio.run(
-        initialize_configured_subagents(mycroft_config.subagents.stateless)
+        initialize_configured_subagents(mycroft_config.subagents.stateless, agent_resolver=agent_resolver, state_scope="stateless")
     )
     stateful_subagents = asyncio.run(
-        initialize_configured_subagents(mycroft_config.subagents.stateful)
+        initialize_configured_subagents(mycroft_config.subagents.stateful, agent_resolver=agent_resolver, state_scope="stateful")
     )
     internal_tools = build_internal_tools(mycroft_config.internal_tools)
     mcp_tools = asyncio.run(load_mcp_tools_from_config(mycroft_config.mcp))
