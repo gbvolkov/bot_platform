@@ -1,4 +1,3 @@
 """Compatibility import; implementation lives in platform_capabilities.rendering."""
-import sys
-from importlib import import_module
-sys.modules[__name__] = import_module("platform_capabilities.rendering")
+from platform_sdk.compatibility import alias_module
+alias_module(__name__, globals(), "platform_capabilities.rendering")

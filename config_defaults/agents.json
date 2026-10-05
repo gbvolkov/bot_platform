@@ -100,13 +100,12 @@
       "params": {
         "provider": "openai",
         "use_platform_store": false,
-        "locale": "ru",
         "checkpoint_saver": "SQLite",
         "notify_on_reload": true,
         "role": "default"
       },
       "init_context": {
-        "database_url": "sqlite:///C:/Projects/bot_platform/data/gaz-pricing/gaz_pricing_norm.sqlite",
+        "database_url": "sqlite:///data/gaz-pricing/gaz_pricing_norm.sqlite",
         "database_prompt_context_path": "agents/gaz_agent/pricing_bi_prompt_context.txt",
         "return_files": false,
         "return_images": false
@@ -126,13 +125,12 @@
       "params": {
         "provider": "openai",
         "use_platform_store": false,
-        "locale": "ru",
         "checkpoint_saver": "SQLite",
         "notify_on_reload": true,
         "role": "default"
       },
       "init_context": {
-        "database_url": "sqlite:///C:/Projects/bot_platform/data/kpi/kpi.sqlite",
+        "database_url": "sqlite:///data/kpi/kpi.sqlite",
         "database_prompt_context_path": "agents/kpi_agent/kpi_bi_prompt_context.txt",
         "return_files": false,
         "return_images": false,

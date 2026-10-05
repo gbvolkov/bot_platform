@@ -1,4 +1,3 @@
 """Compatibility import; implementation lives in agent_runtime.invocation."""
-import sys
-from importlib import import_module
-sys.modules[__name__] = import_module("agent_runtime.invocation")
+from platform_sdk.compatibility import alias_module
+alias_module(__name__, globals(), "agent_runtime.invocation")

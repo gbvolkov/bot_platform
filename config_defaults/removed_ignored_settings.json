@@ -1,6 +1,12 @@
 {
   "reason": "These historical values were discarded by signature filtering in c7057f0f and have no constructor mapping. They are removed from the default manifest; supplying unsupported settings now raises an error.",
   "agents": {
+    "gaz_pricing_bi_int": {
+      "locale": "ru"
+    },
+    "kpi_bi_int": {
+      "locale": "ru"
+    },
     "service_desk": {
       "locale": "ru",
       "notify_on_reload": true
