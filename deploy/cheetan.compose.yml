@@ -1,0 +1,66 @@
+# Host nginx already routes agents.gbvolkoff.name to 5173 (GUI) and 8009 (GUI API).
+# Keep these loopback bindings; 8000 and 8080 belong to unrelated applications.
+x-runtime-mounts: &runtime-mounts
+  - ${PLATFORM_HF_CACHE_DIR}:/root/.cache/huggingface
+  - ${PLATFORM_CONFIG_DIR}/models.toml:/app/models.toml:ro
+  - ${PLATFORM_CONFIG_DIR}/auth/auth.json:/app/auth.json:ro
+  - ${PLATFORM_CONFIG_DIR}/auth/auth_tickets.json:/app/auth_tickets.json:ro
+  - ${PLATFORM_CONFIG_DIR}/auth/auth_glossary.json:/app/auth_glossary.json:ro
+
+services:
+  bot_service:
+    ports: !override ["127.0.0.1:8014:8000"]
+  openai_proxy:
+    ports: !override ["127.0.0.1:8084:8084"]
+    environment:
+      TASK_QUEUE_BOT_REQUEST_TIMEOUT_SECONDS: "3600"
+      OPENAI_PROXY_LOG_LEVEL: WARNING
+  web_chat:
+    ports: !override ["127.0.0.1:8015:8080"]
+  interactive_worker:
+    environment:
+      BOT_SERVICE_AGENT_CONFIG_PATH: /app/config_defaults/agents.json
+    volumes: *runtime-mounts
+  batch_worker:
+    environment:
+      BOT_SERVICE_AGENT_CONFIG_PATH: /app/config_defaults/agents.json
+    volumes: *runtime-mounts
+  retrieval_api:
+    volumes: *runtime-mounts
+  retrieval_worker:
+    volumes: *runtime-mounts
+  kb_manager:
+    volumes: *runtime-mounts
+
+  gui_frontend:
+    image: bot-platform-gui-frontend:${PLATFORM_GUI_RELEASE}
+    restart: unless-stopped
+    ports: ["127.0.0.1:5173:8080"]
+    networks: [access]
+  gui_backend:
+    image: bot-platform-gui-backend:${PLATFORM_GUI_RELEASE}
+    restart: unless-stopped
+    env_file: ${PLATFORM_CONFIG_DIR}/gui.env
+    environment:
+      CHAT_DATABASE_URL: sqlite:////gui-state/app.db
+      CHAT_ATTACHMENTS_STORAGE_DIR: /gui-state/storage
+      CHAT_CHROMA_PERSIST_DIRECTORY: /gui-state/chroma
+      CHAT_LLM_API_BASE: http://openai_proxy:8084
+      CHAT_LLM_API_PATH_PREFIX: /v1
+      CHAT_EMBEDDING_DEVICE: cpu
+      CHAT_LOG_LEVEL: WARNING
+    volumes:
+      - ${PLATFORM_PERSISTENT_ROOT}/gui:/gui-state
+      - ${PLATFORM_HF_CACHE_DIR}:/root/.cache/huggingface
+    ports: ["127.0.0.1:8009:8009"]
+    networks: [access, egress]
+
+volumes:
+  artifacts:
+    driver_opts: {type: none, o: bind, device: "${PLATFORM_PERSISTENT_ROOT}/artifacts"}
+  runtime-artifacts:
+    driver_opts: {type: none, o: bind, device: "${PLATFORM_PERSISTENT_ROOT}/raw-artifacts"}
+  generated-output:
+    driver_opts: {type: none, o: bind, device: "${PLATFORM_PERSISTENT_ROOT}/generated-output"}
+  logs:
+    driver_opts: {type: none, o: bind, device: "${PLATFORM_PERSISTENT_ROOT}/logs"}

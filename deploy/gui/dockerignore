@@ -1,0 +1,13 @@
+.git
+node_modules
+.env*
+backend/.env*
+backend/.venv
+backend/*.db*
+backend/storage
+backend/.chroma
+**/__pycache__
+**/*.log
+tmp-debug
+dist
+dist-web

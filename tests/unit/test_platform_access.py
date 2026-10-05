@@ -94,3 +94,36 @@ def test_public_api_worker_and_proxy_share_durable_runs(tmp_path):
         await private.close()
         await queue.shutdown()
     asyncio.run(run())
+
+
+def test_closed_legacy_history_is_readable_without_retired_runtime(tmp_path, monkeypatch):
+    async def run():
+        manifest = tmp_path / "agents.json"
+        manifest.write_text(json.dumps({"agents": [{"id": "fake", "name": "Fake",
+            "description": "Test", "module": "not_installed.agent", "revision": "r1"}]}))
+        settings = PlatformSettings(_env_file=None, database_path=str(tmp_path / "app.sqlite"),
+            catalog_path=str(manifest), artifact_path=str(tmp_path / "artifacts"), worker_agent_ids="*")
+        repo = SQLiteRepository(settings.database_path)
+        repo.migrate()
+        from platform_contracts.catalog import AgentCatalog
+        cid = repo.create_conversation(AgentCatalog.load(manifest).get("fake"), "owner", "default",
+            runtime="legacy")["id"]
+        with repo.connection(write=True) as db:
+            db.execute("INSERT INTO messages(id,conversation_id,role,content,raw_text,metadata) VALUES (?,?, 'assistant',?,?,?)",
+                ("saved", cid, json.dumps({"type": "text", "text": "Saved answer"}), "Saved answer", "{}"))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(settings, repo)),
+                                    base_url="http://api", headers={"X-User-Id": "owner"}) as api:
+            def unavailable_runtime(*args, **kwargs):
+                raise AssertionError("Archived history must not contact the retired runtime")
+            monkeypatch.setattr(httpx, "AsyncClient", unavailable_runtime)
+            assert (await api.post(f"/api/conversations/{cid}/close")).status_code == 200
+            response = await api.get(f"/api/conversations/{cid}")
+            assert response.status_code == 200
+            assert response.json()["status"] == "closed"
+            assert response.json()["messages"][0]["raw_text"] == "Saved answer"
+            assert (await api.get(f"/api/conversations/{cid}", headers={"X-User-Id": "other"})).status_code == 404
+            rejected = await api.post(f"/api/conversations/{cid}/runs", json={"payload": {"text": "next"}})
+            assert rejected.status_code == 409
+            with repo.connection() as db:
+                assert db.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    asyncio.run(run())

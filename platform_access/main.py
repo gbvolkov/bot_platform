@@ -147,7 +147,7 @@ def create_app(settings=None, repository=None):
     async def conversation(conversation_id: str, x_user_id: Annotated[str, Header()] = "anonymous"):
         value = await service.call("conversation", conversation_id, x_user_id, True)
         assignment = await service.call("assignment", conversation_id)
-        if assignment["runtime"] == "legacy":
+        if assignment["runtime"] == "legacy" and not assignment["closed"]:
             return (await legacy("GET", f"/conversations/{conversation_id}", x_user_id)).json()
         if value["status"] == "active" and value["agent_id"] not in await ready_ids(assignment["revision"]):
             value["status"] = "pending"

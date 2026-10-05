@@ -104,6 +104,12 @@ when Redis is unavailable. Retrieval services have a separate image/dependency
 set and install without `agents`.
 The worker image includes Python 3.12 for iSmart's existing generated-code checks,
 while platform services and dependencies continue to use Python 3.13.
+Worker and retrieval builds also compile libpostal at
+`25099c506612b34b23b1bfe286ca6321fcf06f35`, the revision from the prior cheetan
+installation. Its default model versions come from that pinned source revision;
+models and the upstream MIT license are included in the images. Cairo development
+headers support the already locked Python dependency. BuildKit caches dependency
+downloads between builds; containers never install dependencies at startup.
 
 ## Migration, cohorts and rollback
 

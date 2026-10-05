@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.13.3-slim-bookworm AS access-build
 WORKDIR /build
 COPY deploy/requirements.access.lock deploy/requirements.access.lock
@@ -22,8 +23,19 @@ CMD ["python", "-m", "uvicorn", "platform_access.main:app", "--host", "0.0.0.0",
 
 FROM python:3.12.10-slim-bookworm AS ismart-python
 
+FROM python:3.13.3-slim-bookworm AS postal-build
+# Match the native library already used on cheetan, including its versioned
+# default models. Keep native sources and model downloads out of startup.
+ARG LIBPOSTAL_REVISION=25099c506612b34b23b1bfe286ca6321fcf06f35
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates autoconf automake libtool build-essential curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /build/libpostal
+RUN git init && git remote add origin https://github.com/openvenues/libpostal.git && git fetch --depth 1 origin "$LIBPOSTAL_REVISION" && git checkout --detach FETCH_HEAD
+RUN ./bootstrap.sh && ./configure --datadir=/usr/local/share --disable-data-download && make -j2 && make install DESTDIR=/opt/libpostal
+RUN src/libpostal_data download all /opt/libpostal/usr/local/share/libpostal && install -D -m 644 LICENSE /opt/libpostal/usr/local/share/licenses/libpostal/LICENSE
+
 FROM python:3.13.3-slim-bookworm AS worker
-RUN apt-get update && apt-get install -y --no-install-recommends git build-essential libglib2.0-0 libgl1 libgomp1 libmagic1 poppler-utils ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git build-essential pkg-config libcairo2-dev libglib2.0-0 libgl1 libgomp1 libmagic1 poppler-utils ffmpeg && rm -rf /var/lib/apt/lists/*
+COPY --from=postal-build /opt/libpostal/usr/local /usr/local
 # Keep iSmart's existing python3.12 subprocess contract alongside the platform's
 # Python 3.13 environment. Do not replace the worker's default interpreter.
 COPY --from=ismart-python /usr/local/bin/python3.12 /usr/local/bin/python3.12
@@ -33,18 +45,20 @@ RUN ldconfig && python3.12 --version && python --version
 WORKDIR /app
 COPY vendor vendor
 COPY deploy/requirements.worker.lock deploy/requirements.worker.lock
-RUN python -m pip install --no-cache-dir -r deploy/requirements.worker.lock
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked python -m pip install -r deploy/requirements.worker.lock
 COPY . .
 RUN python -m pip install --no-deps ./platform_contracts ./platform_sdk ./platform_application ./platform_infrastructure ./platform_client ./platform_capabilities ./agent_runtime ./agents ./generators ./packages/gaz_index_builder && mkdir -p /app/logs
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "-m", "agent_runtime.worker"]
 
 FROM python:3.13.3-slim-bookworm AS retrieval
-RUN apt-get update && apt-get install -y --no-install-recommends git build-essential libglib2.0-0 libgl1 libgomp1 libmagic1 poppler-utils ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git build-essential pkg-config libcairo2-dev libglib2.0-0 libgl1 libgomp1 libmagic1 poppler-utils ffmpeg && rm -rf /var/lib/apt/lists/*
+COPY --from=postal-build /opt/libpostal/usr/local /usr/local
+RUN ldconfig
 WORKDIR /app
 COPY vendor vendor
 COPY deploy/requirements.retrieval.lock deploy/requirements.retrieval.lock
-RUN python -m pip install --no-cache-dir -r deploy/requirements.retrieval.lock
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked python -m pip install -r deploy/requirements.retrieval.lock
 COPY platform_contracts platform_contracts
 COPY config_defaults config_defaults
 COPY platform_sdk platform_sdk

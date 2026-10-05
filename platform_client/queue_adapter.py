@@ -3,17 +3,22 @@ import asyncio
 import json
 import time
 from collections import OrderedDict
+from contextlib import aclosing
 
 import httpx
 
 from platform_sdk.queue import QueueEvent
+from platform_sdk.queue_settings import settings
 from platform_contracts import TERMINAL
 
 
 class DurableQueueClient:
-    def __init__(self, base_url, *, transport=None):
+    def __init__(self, base_url, *, transport=None, heartbeat_seconds=None):
         self.client = httpx.AsyncClient(base_url=base_url, timeout=None, transport=transport)
         self.jobs = OrderedDict()
+        self.heartbeat_seconds = settings.sse_heartbeat_seconds if heartbeat_seconds is None else heartbeat_seconds
+        if self.heartbeat_seconds <= 0:
+            raise ValueError("Heartbeat interval must be positive")
 
     async def startup(self):
         return None
@@ -58,12 +63,41 @@ class DurableQueueClient:
             "conversation_id": run["conversation_id"], "content": message.get("raw_text", ""),
             "response": result, "attachments": message.get("metadata", {}).get("attachments", [])}}
 
+    async def _lines_with_heartbeats(self, response):
+        lines = response.aiter_lines()
+        pending = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(anext(lines))
+                done, _ = await asyncio.wait({pending}, timeout=self.heartbeat_seconds)
+                if not done:
+                    yield None
+                    continue
+                try:
+                    line = pending.result()
+                except StopAsyncIteration:
+                    return
+                pending = None
+                yield line
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            await lines.aclose()
+
     async def iter_events(self, job_id, *, include_status_snapshot=False):
         run_id, user_id, _ = self.jobs[job_id]
         saw_chunk = False
-        async with self.client.stream("GET", f"/runs/{run_id}/events", headers={"X-User-Id": user_id}) as response:
+        async with self.client.stream("GET", f"/runs/{run_id}/events", headers={"X-User-Id": user_id}) as response, \
+                aclosing(self._lines_with_heartbeats(response)) as lines:
             response.raise_for_status()
-            async for line in response.aiter_lines():
+            async for line in lines:
+                if line is None:
+                    # Preserve legacy keep-alives while a run waits or a tool is
+                    # quiet, so GUI/proxy idle timeouts do not detach the client.
+                    yield QueueEvent(job_id=job_id, type="heartbeat")
+                    continue
                 if not line.startswith("data:"):
                     continue
                 event = json.loads(line[5:])
