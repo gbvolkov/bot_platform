@@ -493,7 +493,8 @@ class AgentRegistry:
             tool_bundle = None
             platform_runtime = None
             if platform_mode:
-                platform_runtime = PlatformGuardrailRuntime.from_policy_id(
+                platform_runtime = await asyncio.to_thread(
+                    PlatformGuardrailRuntime.from_policy_id,
                     definition.guardrail_policy_id,
                     agent_id=agent_id,
                 )

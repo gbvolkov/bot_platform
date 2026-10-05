@@ -27,6 +27,17 @@ FROM python:3.13.3-slim-bookworm AS tokenizer-data
 COPY deploy/fetch_nltk_assets.py /fetch_nltk_assets.py
 RUN python /fetch_nltk_assets.py /opt/nltk_data
 
+FROM python:3.13.3-slim-bookworm AS privacy-models
+# Palimpsest's existing Russian analyzer uses the large model in addition to
+# the small model in uv.lock. Match cheetan's installed 3.8.0 resource exactly.
+RUN python -m pip download --no-deps --dest /models "https://github.com/explosion/spacy-models/releases/download/ru_core_news_lg-3.8.0/ru_core_news_lg-3.8.0-py3-none-any.whl#sha256=90bd584be86772b647e1b15cdc62e09d3a7182284ee23da95e19c2bf71aa0189"
+
+FROM node:22.23.3-bookworm-slim AS gmail-mcp
+WORKDIR /opt/mcp-gmail
+# Preserve the previously installed stdio tool and all transitive versions.
+COPY deploy/mcp-gmail/package.json deploy/mcp-gmail/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+
 FROM python:3.13.3-slim-bookworm AS postal-build
 # Match the native library already used on cheetan, including its versioned
 # default models. Keep native sources and model downloads out of startup.
@@ -50,10 +61,16 @@ WORKDIR /app
 COPY vendor vendor
 COPY deploy/requirements.worker.lock deploy/requirements.worker.lock
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked python -m pip install -r deploy/requirements.worker.lock
+RUN --mount=from=privacy-models,source=/models,target=/models python -m pip install --no-deps /models/ru_core_news_lg-3.8.0-py3-none-any.whl
+COPY --from=gmail-mcp /usr/local/bin/node /usr/local/bin/node
+COPY --from=gmail-mcp /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 COPY --from=tokenizer-data /opt/nltk_data /usr/local/share/nltk_data
 COPY . .
+COPY --from=gmail-mcp /opt/mcp-gmail/node_modules /app/node_modules
+COPY --from=gmail-mcp /opt/mcp-gmail/package.json /opt/mcp-gmail/package-lock.json /app/
 RUN python -m pip install --no-deps ./platform_contracts ./platform_sdk ./platform_application ./platform_infrastructure ./platform_client ./platform_capabilities ./agent_runtime ./agents ./generators ./packages/gaz_index_builder && mkdir -p /app/logs
-ENV PYTHONUNBUFFERED=1 NLTK_DATA=/usr/local/share/nltk_data
+ENV PYTHONUNBUFFERED=1 NLTK_DATA=/usr/local/share/nltk_data NPM_CONFIG_OFFLINE=true NPM_CONFIG_YES=true
 CMD ["python", "-m", "agent_runtime.worker"]
 
 FROM python:3.13.3-slim-bookworm AS retrieval
@@ -64,6 +81,7 @@ WORKDIR /app
 COPY vendor vendor
 COPY deploy/requirements.retrieval.lock deploy/requirements.retrieval.lock
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked python -m pip install -r deploy/requirements.retrieval.lock
+RUN --mount=from=privacy-models,source=/models,target=/models python -m pip install --no-deps /models/ru_core_news_lg-3.8.0-py3-none-any.whl
 COPY --from=tokenizer-data /opt/nltk_data /usr/local/share/nltk_data
 COPY platform_contracts platform_contracts
 COPY config_defaults config_defaults

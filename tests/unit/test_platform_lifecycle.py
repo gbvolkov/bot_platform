@@ -198,3 +198,52 @@ def test_privacy_child_requires_affinity_on_its_root_assignment(tmp_path):
                 await runtime.resolve("child", state_scope="stateful")
         await runtime.close()
     asyncio.run(check())
+
+
+def test_slow_guardrail_initialization_does_not_block_other_plugins(monkeypatch):
+    import threading
+    from agent_runtime import registry as registry_module
+    from agent_runtime.registry import AgentDefinition, AgentRegistry
+    from platform_contracts import ModelType
+
+    entered, release = threading.Event(), threading.Event()
+    class SlowPolicy:
+        @staticmethod
+        def from_policy_id(*args, **kwargs):
+            entered.set()
+            assert release.wait(3)
+            return SimpleNamespace(tool_execution_enabled=False)
+    class Compiler:
+        def compile(self, spec, **kwargs):
+            return spec
+    monkeypatch.setattr(registry_module, "PlatformGuardrailRuntime", SlowPolicy)
+    monkeypatch.setattr(registry_module, "PlatformGraphCompiler", Compiler)
+
+    async def check():
+        registry = AgentRegistry()
+        registry._definitions = {
+            "slow": AgentDefinition("slow", "Slow", "Test", lambda provider: object(), ModelType.GPT, (),
+                graph_factory=lambda provider: object(), graph_param_names=frozenset({"provider"}),
+                guardrail_mode="platform", guardrail_policy_id="test"),
+            "fast": AgentDefinition("fast", "Fast", "Test", lambda provider: object(), ModelType.GPT, (),
+                param_names=frozenset({"provider"})),
+        }
+        # The timer prevents a broken synchronous implementation from hanging
+        # the suite. Fast initialization must finish before this releases slow.
+        timeout = threading.Timer(2, release.set)
+        timeout.start()
+        try:
+            registry._start_initialization("slow")
+            slow = registry._init_tasks["slow"]
+            registry._start_initialization("fast")
+            fast = registry._init_tasks["fast"]
+            assert await asyncio.to_thread(entered.wait, 1)
+            await asyncio.wait_for(asyncio.shield(fast), 1)
+            assert not release.is_set(), "Another plugin waited for slow model initialization"
+            release.set()
+            await slow
+        finally:
+            release.set()
+            timeout.cancel()
+            await registry.aclose()
+    asyncio.run(check())

@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@shinzolabs/gmail-mcp": "1.7.4"
+  }
+}
