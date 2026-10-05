@@ -185,7 +185,32 @@ class RedisTaskQueue:
             yield pubsub
         finally:
             await pubsub.unsubscribe(channel)
-            await pubsub.close()
+            await pubsub.aclose()
+
+    @staticmethod
+    def _terminal_snapshot(job_id: str, snapshot: Dict[str, Any], delivered: str) -> QueueEvent | None:
+        stage = snapshot.get("status")
+        if stage == "failed":
+            return QueueEvent(job_id=job_id, type="failed", status="failed", error=snapshot.get("error"))
+        if stage not in {"completed", "interrupted"}:
+            return None
+        result = snapshot.get("result") or {}
+        metadata = dict(result) if stage == "interrupted" else {
+            key: result[key] for key in ("conversation_id", "attachments") if key in result
+        }
+        content = result.get("content", "")
+        # A subscriber may have received some deltas before losing a notification.
+        # Send only the still-undelivered suffix, using the existing terminal format.
+        if content and content.startswith(delivered):
+            remaining = content[len(delivered):]
+            if remaining:
+                metadata["content"] = remaining
+            else:
+                metadata.pop("content", None)
+        elif delivered:
+            metadata.pop("content", None)
+        return QueueEvent(job_id=job_id, type="interrupt" if stage == "interrupted" else "completed",
+                          status=stage, metadata=metadata)
 
     async def iter_events(
         self,
@@ -193,16 +218,25 @@ class RedisTaskQueue:
         *,
         include_status_snapshot: bool = False,
     ) -> AsyncIterator[QueueEvent]:
-        current_status: Optional[JobStage] = None
+        delivered = ""
         async with self.subscribe(job_id) as pubsub:
+            # Subscribe first, then reconcile. The terminal notification may have
+            # been published before this client existed, or between these calls.
+            snapshot = await self.get_status(job_id)
+            terminal = self._terminal_snapshot(job_id, snapshot, delivered)
+            if terminal is not None:
+                yield terminal
+                return
             if include_status_snapshot:
-                snapshot = await self.get_status(job_id)
                 stage = snapshot.get("status") or "queued"
-                current_status = stage  # type: ignore[assignment]
                 yield QueueEvent(job_id=job_id, type="status", status=stage)
             while True:
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if message is None:
+                    terminal = self._terminal_snapshot(job_id, await self.get_status(job_id), delivered)
+                    if terminal is not None:
+                        yield terminal
+                        return
                     await asyncio.sleep(0.05)
                     continue
                 if message["type"] != "message":
@@ -212,14 +246,8 @@ class RedisTaskQueue:
                     event = QueueEvent.model_validate_json(data)
                 except ValueError:
                     continue
-                if event.type == "status" and event.status:
-                    current_status = event.status  # type: ignore[assignment]
-                elif event.type == "completed":
-                    current_status = "completed"
-                elif event.type == "failed":
-                    current_status = "failed"
-                elif event.type == "interrupt":
-                    current_status = "interrupted"
+                if event.type == "chunk":
+                    delivered += event.content or ""
                 yield event
                 if event.type in {"completed", "failed", "interrupt"}:
                     break
