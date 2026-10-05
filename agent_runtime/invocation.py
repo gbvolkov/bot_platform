@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from typing import Any, Dict, Iterable, List, Optional, AsyncIterator
+
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    message_chunk_to_message,
+)
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
+
+ConfigSchema = dict[str, Any]
+
+from .registry import agent_registry
+from .config import settings
+from platform_sdk.schemas import MessagePayload
+from platform_sdk.context import current_context
+
+
+ATTACHMENT_TYPES = {"file", "image", "audio", "video", "attachment"}
+
+
+def _normalise_content(message: BaseMessage) -> Dict[str, Any]:
+    content = getattr(message, "content", "")
+    if isinstance(content, list):
+        parts: List[Dict[str, Any]] = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(item)
+            else:
+                parts.append({"type": "text", "text": str(item)})
+        return {"type": "segments", "parts": parts}
+    elif isinstance(content, dict) and "text" in content:
+        return content
+    return {"type": "text", "text": str(content)}
+
+
+def _extract_text(message: BaseMessage) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                texts.append(item.get("text") or "")
+            else:
+                texts.append(str(item))
+        return "\n".join(filter(None, texts))
+    return str(content)
+
+
+def _extract_stream_text(message: BaseMessage) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        text_value = content.get("text")
+        if isinstance(text_value, str):
+            return text_value
+        return str(content)
+    if isinstance(content, list):
+        texts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    texts.append(text_value)
+            else:
+                texts.append(str(item))
+        return "".join(texts)
+    return str(content)
+
+
+def _normalise_attachment_piece(piece: Dict[str, Any]) -> Dict[str, Any]:
+    attachment: Dict[str, Any] = {"type": piece.get("type")}
+
+    def _copy(field: str, target_field: Optional[str] = None) -> None:
+        value = piece.get(field)
+        if value is None:
+            return
+        attachment[target_field or field] = value
+
+    _copy("filename")
+    _copy("name")
+    _copy("title")
+    _copy("caption")
+    _copy("format")
+    _copy("graphic_type")
+
+    content_type = piece.get("mime_type") or piece.get("content_type")
+    if content_type:
+        attachment["content_type"] = content_type
+
+    data = piece.get("data") or piece.get("base64_data")
+    if isinstance(data, str) and data:
+        attachment["data"] = data
+
+    url = piece.get("url")
+    if not url:
+        image_url = piece.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+    if url:
+        attachment["url"] = url
+
+    text_value = piece.get("text")
+    if isinstance(text_value, str) and text_value:
+        attachment["text"] = text_value
+
+    metadata_value = piece.get("metadata")
+    if isinstance(metadata_value, dict) and metadata_value:
+        attachment["metadata"] = metadata_value
+
+    return attachment
+
+
+def _extract_attachments(message: BaseMessage) -> List[Dict[str, Any]]:
+    content = getattr(message, "content", None)
+    attachments: List[Dict[str, Any]] = []
+    if not isinstance(content, list):
+        return attachments
+    for piece in content:
+        if not isinstance(piece, dict):
+            continue
+        piece_type = piece.get("type")
+        if not isinstance(piece_type, str):
+            continue
+        if piece_type.lower() not in ATTACHMENT_TYPES:
+            continue
+        attachments.append(_normalise_attachment_piece(piece))
+    return attachments
+
+
+def build_human_message(payload: MessagePayload, raw_text_override: Optional[str] = None) -> HumanMessage:
+    if payload.type == "reset":
+        reset_text = payload.text or "RESET"
+        content = [{"type": "reset", "text": reset_text}]
+    else:
+        content: List[Dict[str, str]] = []
+        user_text = raw_text_override if raw_text_override is not None else payload.text
+        if user_text:
+            content.append({"type": "text", "text": user_text})
+        attachment_segments = []
+        if isinstance(payload.metadata, dict):
+            attachment_segments = payload.metadata.get("attachment_text_segments") or []
+        for segment in attachment_segments:
+            if isinstance(segment, str) and segment.strip():
+                content.append({"type": "text", "text": segment})
+        if not content:
+            content.append({"type": "text", "text": ""})
+    return HumanMessage(content=content, id=f"human-{uuid.uuid4().hex}")
+
+
+def build_agent_config(
+    conversation_id: str,
+    user_id: str,
+    user_role: Optional[str],
+    raw_attachments: Optional[List[Dict[str, Any]]] = None,
+    allow_external_tool_access: bool = False,
+) -> RunnableConfig:
+    role = user_role or settings.default_user_role
+    configurable: ConfigSchema = {
+        "user_id": user_id,
+        "user_role": role,
+        "thread_id": conversation_id,
+    }
+    if raw_attachments:
+        configurable["attachments"] = raw_attachments
+    if allow_external_tool_access:
+        configurable["allow_external_tool_access"] = True
+    context = current_context()
+    if context is not None:
+        configurable.update(run_id=context.run_id, parent_run_id=context.parent_run_id)
+    return {"configurable": configurable}
+
+
+async def invoke_agent(
+    agent: Any,
+    payload: MessagePayload,
+    conversation_id: str,
+    agent_id: Optional[str],
+    user_id: str,
+    user_role: Optional[str],
+    pending_interrupt: Optional[Dict[str, Any]] = None,
+    state_patch: Optional[Dict[str, Any]] = None,
+    registry=None,
+) -> Dict[str, Any]:
+    registry = registry or agent_registry
+    raw_user_text = None
+    raw_attachments: List[Dict[str, Any]] = []
+    if isinstance(payload.metadata, dict):
+        raw_user_text = payload.metadata.get("raw_user_text")
+        raw_attachments_value = payload.metadata.get("raw_attachments")
+        if isinstance(raw_attachments_value, list):
+            raw_attachments = [item for item in raw_attachments_value if isinstance(item, dict)]
+    human = build_human_message(payload, raw_text_override=raw_user_text if pending_interrupt else None)
+    config = build_agent_config(
+        conversation_id,
+        user_id,
+        user_role,
+        raw_attachments=raw_attachments or None,
+        allow_external_tool_access=registry.allow_external_tool_access(agent_id),
+    )
+
+    if pending_interrupt:
+        logging.info(
+            "invoke_agent resume conversation_id=%s interrupt_id=%s raw_user_text_chars=%d",
+            conversation_id,
+            pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
+            len(raw_user_text or payload.text or ""),
+        )
+        response = await agent.ainvoke(
+            Command(
+                resume=raw_user_text or payload.text or "",
+                update=state_patch or None,
+            ),
+            config=config,
+        )
+    else:
+        initial_state: Dict[str, Any] = {"messages": [human]}
+        if raw_attachments:
+            initial_state["attachments"] = raw_attachments
+        if state_patch:
+            initial_state.update(state_patch)
+        response = await agent.ainvoke(initial_state, config=config)
+
+    if isinstance(response, dict):
+        result = response
+    else:
+        result = {"messages": response}
+    messages = result.get("messages") or []
+
+    ai_message: Optional[AIMessage] = None
+    if "__interrupt__" in result:
+        interrupts = result.get("__interrupt__") or []
+        if interrupts:
+            latest = interrupts[-1]
+            interrupt_payload = getattr(latest, "value", latest)
+        else:
+            interrupt_payload = {}
+        if isinstance(interrupt_payload, dict) and "interrupt_id" not in interrupt_payload:
+            interrupt_payload = {**interrupt_payload, "interrupt_id": f"int-{uuid.uuid4().hex}"}
+        question = ""
+        if isinstance(interrupt_payload, dict):
+            question = interrupt_payload.get("question") or interrupt_payload.get("content") or ""
+        logging.info("invoke_agent interrupt detected conversation_id=%s interrupt_id=%s", conversation_id, interrupt_payload.get("interrupt_id") if isinstance(interrupt_payload, dict) else None)
+        ai_message = AIMessage(content=question)
+        return {
+            "human": human,
+            "ai": ai_message,
+            "raw_result": result,
+            "agent_status": "interrupted",
+            "interrupt_payload": interrupt_payload,
+        }
+
+    if isinstance(messages, Iterable):
+        for msg in reversed(list(messages)):
+            if isinstance(msg, AIMessage):
+                ai_message = msg
+                break
+
+    if ai_message is None:
+        ai_message = AIMessage(content="")  # fallback empty response
+
+    logging.info(
+        "invoke_agent completed conversation_id=%s agent_status=%s",
+        conversation_id,
+        "completed",
+    )
+    return {
+        "human": human,
+        "ai": ai_message,
+        "raw_result": result,
+        "agent_status": "completed",
+        "interrupt_payload": None,
+    }
+
+
+def _extract_stream_delta(message: BaseMessage) -> str:
+    return _extract_stream_text(message)
+
+
+def _sanitize_chunk(message: AIMessageChunk) -> AIMessageChunk:
+    updates: Dict[str, Any] = {}
+    response_metadata = message.response_metadata
+    if response_metadata and "created_at" in response_metadata:
+        cleaned = dict(response_metadata)
+        cleaned.pop("created_at", None)
+        updates["response_metadata"] = cleaned
+    additional_kwargs = message.additional_kwargs
+    if additional_kwargs and "parsed" in additional_kwargs:
+        cleaned_kwargs = dict(additional_kwargs)
+        cleaned_kwargs.pop("parsed", None)
+        updates["additional_kwargs"] = cleaned_kwargs
+    if updates:
+        return message.model_copy(update=updates)
+    return message
+
+
+def _coerce_incremental_stream_delta(*, emitted_text: str, delta: str) -> str:
+    if not delta:
+        return ""
+    if not emitted_text:
+        return delta
+    if delta == emitted_text:
+        logging.debug(
+            "Suppressing replayed stream delta size=%d because it matches already emitted text",
+            len(delta),
+        )
+        return ""
+    if delta.startswith(emitted_text):
+        incremental = delta[len(emitted_text) :]
+        logging.debug(
+            "Trimming cumulative stream delta from size=%d to incremental size=%d",
+            len(delta),
+            len(incremental),
+        )
+        return incremental
+    return delta
+
+
+def _build_agent_result_from_state(
+    *,
+    state: Dict[str, Any] | None,
+    human: HumanMessage,
+) -> Dict[str, Any]:
+    snapshot = state if isinstance(state, dict) else {}
+    if "__interrupt__" in snapshot:
+        interrupts = snapshot.get("__interrupt__") or []
+        if interrupts:
+            latest = interrupts[-1]
+            interrupt_payload = getattr(latest, "value", latest)
+        else:
+            interrupt_payload = {}
+        if isinstance(interrupt_payload, dict) and "interrupt_id" not in interrupt_payload:
+            interrupt_payload = {**interrupt_payload, "interrupt_id": f"int-{uuid.uuid4().hex}"}
+        question = ""
+        if isinstance(interrupt_payload, dict):
+            question = interrupt_payload.get("question") or interrupt_payload.get("content") or ""
+        ai_message = AIMessage(content=question)
+        return {
+            "human": human,
+            "ai": ai_message,
+            "raw_result": snapshot,
+            "agent_status": "interrupted",
+            "interrupt_payload": interrupt_payload,
+        }
+
+    messages = snapshot.get("messages") or []
+    ai_message: Optional[AIMessage] = None
+    if isinstance(messages, Iterable):
+        for msg in reversed(list(messages)):
+            if isinstance(msg, AIMessage):
+                ai_message = msg
+                break
+    if ai_message is None:
+        ai_message = AIMessage(content="")
+
+    return {
+        "human": human,
+        "ai": ai_message,
+        "raw_result": snapshot,
+        "agent_status": "completed",
+        "interrupt_payload": None,
+    }
+
+
+async def invoke_agent_stream(
+    agent: Any,
+    payload: MessagePayload,
+    conversation_id: str,
+    agent_id: Optional[str],
+    user_id: str,
+    user_role: Optional[str],
+    pending_interrupt: Optional[Dict[str, Any]] = None,
+    state_patch: Optional[Dict[str, Any]] = None,
+    registry=None,
+) -> tuple[AsyncIterator[Dict[str, Any]], asyncio.Future]:
+    registry = registry or agent_registry
+    raw_user_text = None
+    raw_attachments: List[Dict[str, Any]] = []
+    if isinstance(payload.metadata, dict):
+        raw_user_text = payload.metadata.get("raw_user_text")
+        raw_attachments_value = payload.metadata.get("raw_attachments")
+        if isinstance(raw_attachments_value, list):
+            raw_attachments = [item for item in raw_attachments_value if isinstance(item, dict)]
+    human = build_human_message(payload, raw_text_override=raw_user_text if pending_interrupt else None)
+    config = build_agent_config(
+        conversation_id,
+        user_id,
+        user_role,
+        raw_attachments=raw_attachments or None,
+        allow_external_tool_access=registry.allow_external_tool_access(agent_id),
+    )
+
+    queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(maxsize=64)
+    result_future: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    def _set_result(value: Dict[str, Any]) -> None:
+        if not result_future.done():
+            result_future.set_result(value)
+
+    def _set_exception(error: BaseException) -> None:
+        if not result_future.done():
+            result_future.set_exception(error)
+
+    async def _enqueue(item: Dict[str, Any] | None) -> None:
+        await queue.put(item)
+
+    async def _run() -> None:
+        last_state: Dict[str, Any] | None = None
+        saw_delta = False
+        emitted_text = ""
+        stream_modes, subgraph_stream = registry.stream_config(agent_id)
+        # Root values carry interrupts and final structured output even when a
+        # plugin advertises only public message/custom deltas. They stay internal.
+        stream_modes = list(dict.fromkeys([*stream_modes, "values"]))
+        merged_chunk: AIMessageChunk | None = None
+        last_ai_message: AIMessage | None = None
+        try:
+            if pending_interrupt:
+                logging.info(
+                    "invoke_agent_stream resume conversation_id=%s interrupt_id=%s raw_user_text_chars=%d",
+                    conversation_id,
+                    pending_interrupt.get("interrupt_id") if isinstance(pending_interrupt, dict) else None,
+                    len(raw_user_text or payload.text or ""),
+                )
+                stream = agent.astream(
+                    Command(
+                        resume=raw_user_text or payload.text or "",
+                        update=state_patch or None,
+                    ),
+                    config=config,
+                    stream_mode=stream_modes,
+                    subgraphs=subgraph_stream,
+                )
+            else:
+                initial_state: Dict[str, Any] = {"messages": [human]}
+                if raw_attachments:
+                    initial_state["attachments"] = raw_attachments
+                if state_patch:
+                    initial_state.update(state_patch)
+                stream = agent.astream(
+                    initial_state,
+                    config=config,
+                    stream_mode=stream_modes,
+                    subgraphs=subgraph_stream,
+                )
+
+            async for item in stream:
+                if not isinstance(item, tuple):
+                    continue
+                if len(item) == 2:
+                    namespace = ()
+                    mode, payload_item = item
+                elif len(item) == 3:
+                    namespace, mode, payload_item = item
+                else:
+                    continue
+                if mode == "messages":
+                    message, _meta = payload_item
+                    if not isinstance(message, (AIMessage, AIMessageChunk)):
+                        continue
+                    if isinstance(message, AIMessageChunk):
+                        message = _sanitize_chunk(message)
+                        merged_chunk = message if merged_chunk is None else merged_chunk + message
+                        delta = _extract_stream_delta(message)
+                    else:
+                        last_ai_message = message
+                        message_text = _extract_stream_delta(message)
+                        if merged_chunk is not None:
+                            merged_message = message_chunk_to_message(merged_chunk)
+                            merged_text = _extract_stream_delta(merged_message)
+                            logging.debug(
+                                "invoke_agent_stream comparing merged stream text size=%d with final AIMessage size=%d conversation_id=%s agent_id=%s",
+                                len(merged_text),
+                                len(message_text),
+                                conversation_id,
+                                agent_id,
+                            )
+                            merged_chunk = None
+                            if merged_text == message_text:
+                                logging.debug(
+                                    "invoke_agent_stream suppressed final AIMessage replay because merged and final texts matched conversation_id=%s agent_id=%s",
+                                    conversation_id,
+                                    agent_id,
+                                )
+                                message_text = ""
+                        delta = message_text
+                    delta = _coerce_incremental_stream_delta(
+                        emitted_text=emitted_text,
+                        delta=delta,
+                    )
+                    if delta:
+                        if not saw_delta:
+                            logging.debug(
+                                "invoke_agent_stream first chunk conversation_id=%s agent_id=%s",
+                                conversation_id,
+                                agent_id,
+                            )
+                        saw_delta = True
+                        emitted_text += delta
+                        await _enqueue({"type": "chunk", "content": delta})
+                elif mode == "values":
+                    if not namespace and isinstance(payload_item, dict):
+                        last_state = payload_item
+                elif mode == "custom":
+                    await _enqueue({"type": "custom", "data": payload_item})
+        except BaseException as exc:
+            _set_exception(exc)
+        else:
+            if last_state is None and last_ai_message is None and merged_chunk is not None:
+                last_ai_message = message_chunk_to_message(merged_chunk)
+            if last_state is None and last_ai_message is not None:
+                last_state = {"messages": [last_ai_message]}
+            try:
+                agent_result = _build_agent_result_from_state(state=last_state, human=human)
+                _set_result(agent_result)
+            except BaseException as exc:
+                _set_exception(exc)
+        finally:
+            if not result_future.cancelled():
+                await queue.put(None)
+
+    task = asyncio.create_task(_run())
+
+    async def _event_iter() -> AsyncIterator[Dict[str, Any]]:
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            if not task.done():
+                result_future.cancel()
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if result_future.done() and not result_future.cancelled():
+                # Mark a detached caller's error retrieved; awaiting the future
+                # still raises the same exception for attached callers.
+                result_future.exception()
+
+    return _event_iter(), result_future
+
+
+def serialise_message(message: BaseMessage) -> Dict[str, Any]:
+    return {
+        "raw_text": _extract_text(message),
+        "content": _normalise_content(message),
+        "attachments": _extract_attachments(message),
+    }

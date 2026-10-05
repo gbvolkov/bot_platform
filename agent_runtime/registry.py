@@ -1,0 +1,686 @@
+﻿from __future__ import annotations
+
+import asyncio
+import importlib
+import inspect
+import json
+import logging
+from concurrent.futures import Future
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Literal, Tuple
+from collections.abc import AsyncIterator
+
+#from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+from platform_contracts import ModelType
+from platform_guardrails.config import inline_guardrail_config_keys, resolve_guardrail_policy
+from platform_guardrails.graph_compiler import PlatformGraphCompiler
+from platform_guardrails.runtime import PlatformGuardrailRuntime
+
+from .config import settings
+from platform_sdk.manifest import parse_yaml
+from platform_sdk.schemas import AgentInfo, ContentType
+from platform_tools.registry import AgentToolsConfig, build_agent_tool_bundle, parse_agent_tools_config
+
+
+LOG = logging.getLogger(__name__)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class AgentDefinition:
+    id: str
+    name: str
+    description: str
+    factory: Callable[..., Any] | None
+    default_provider: ModelType
+    supported_content_types: Tuple[ContentType, ...]
+    allow_raw_attachments: bool = False
+    stream_modes: Tuple[str, ...] = ("messages", "values")
+    stream_subgraphs: bool = False
+    is_active: bool = True
+    init_params: Dict[str, Any] = field(default_factory=dict)
+    init_context: Dict[str, Any] = field(default_factory=dict)
+    tools_config: AgentToolsConfig = field(default_factory=AgentToolsConfig)
+    checkpoint_saver: Any = None
+    param_names: frozenset[str] = field(default_factory=frozenset)
+    accepts_kwargs: bool = False
+    graph_factory: Callable[..., Any] | None = None
+    graph_param_names: frozenset[str] = field(default_factory=frozenset)
+    graph_accepts_kwargs: bool = False
+    guardrail_policy_id: str | None = None
+    guardrail_mode: Literal["none", "platform", "agent"] = "none"
+    module_path: str | None = None
+    external_tool_access: bool = False
+
+
+_SKIP_CHECKPOINTER = object()
+
+
+def _resolve_config_path(raw_path: str | None) -> Path:
+    if not raw_path:
+        raw_path = "data/config/bot_service/load.json"
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return (_REPO_ROOT / path).resolve()
+
+
+def _load_agent_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Agent config not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        data = parse_yaml(text)
+    if not isinstance(data, dict):
+        raise ValueError("Agent config must be a mapping at the top level.")
+    return data
+
+
+def _normalize_key(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _normalize_checkpoint_saver(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() in {"none", "null", "~"}:
+            return None
+        return _normalize_key(text)
+    return _normalize_key(str(value))
+
+
+def _coerce_provider(value: Any, default: ModelType) -> ModelType:
+    if value is None:
+        return default
+    if isinstance(value, ModelType):
+        return value
+    text = str(value).strip()
+    if not text:
+        return default
+    for candidate in ModelType:
+        if text.lower() == candidate.value.lower() or text.upper() == candidate.name:
+            return candidate
+    raise ValueError(f"Unknown provider value: {value!r}")
+
+
+def _require_str(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Agent config field '{field_name}' must be a non-empty string.")
+    return value
+
+
+def _coerce_bool(value: Any, field_name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"Agent config field '{field_name}' must be a boolean.")
+
+
+def _coerce_content_type(value: Any) -> ContentType:
+    if isinstance(value, ContentType):
+        return value
+    if isinstance(value, str):
+        return ContentType(value)
+    raise ValueError(f"Unsupported content type value: {value!r}")
+
+
+def _parse_supported_content_types(
+    value: Any,
+    default: Tuple[ContentType, ...],
+) -> Tuple[ContentType, ...]:
+    if value is None:
+        return default
+    if isinstance(value, (list, tuple)):
+        return tuple(_coerce_content_type(item) for item in value)
+    raise ValueError("Agent config field 'supported_content_types' must be a list.")
+
+
+def _parse_streaming_config(
+    value: Any,
+    default_modes: Tuple[str, ...],
+    default_subgraphs: bool,
+) -> tuple[Tuple[str, ...], bool]:
+    if value is None:
+        return default_modes, default_subgraphs
+    if not isinstance(value, dict):
+        raise ValueError("Agent config field 'streaming' must be a mapping.")
+    modes_value = value.get("modes")
+    modes = default_modes
+    if modes_value is not None:
+        if not isinstance(modes_value, (list, tuple)) or not modes_value:
+            raise ValueError("Agent config field 'streaming.modes' must be a non-empty list.")
+        modes = tuple(_require_str(item, "streaming.modes[]") for item in modes_value)
+    subgraphs = _coerce_bool(value.get("subgraphs"), "streaming.subgraphs", default_subgraphs)
+    return modes, subgraphs
+
+
+def _import_agent_module(module_path: str) -> Any:
+    module = importlib.import_module(module_path)
+    return module
+
+
+def _import_agent_factories(module_path: str) -> tuple[Callable[..., Any], Callable[..., Any] | None]:
+    module = _import_agent_module(module_path)
+    init_fn = getattr(module, "initialize_agent", None)
+    if not callable(init_fn):
+        raise AttributeError(f"{module_path} does not expose initialize_agent().")
+    graph_fn = getattr(module, "build_agent_graph", None)
+    return init_fn, graph_fn if callable(graph_fn) else None
+
+
+def _get_signature_info(init_fn: Callable[..., Any]) -> tuple[frozenset[str], bool]:
+    signature = inspect.signature(init_fn)
+    params = signature.parameters.values()
+    param_names = frozenset(signature.parameters.keys())
+    accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params)
+    return param_names, accepts_kwargs
+
+
+def _parse_guardrails_config(value: Any, *, agent_id: str) -> tuple[str | None, Literal["none", "platform", "agent"]]:
+    if value is None:
+        return None, "none"
+    if not isinstance(value, dict):
+        raise ValueError(f"Agent '{agent_id}' guardrails must be a mapping.")
+    policy = value.get("policy")
+    if policy is not None:
+        policy = _require_str(policy, "guardrails.policy")
+    mode = str(value.get("mode") or ("platform" if policy else "none")).strip().lower()
+    if mode not in {"none", "platform", "agent"}:
+        raise ValueError(
+            f"Agent '{agent_id}' guardrails.mode must be one of: none, platform, agent."
+        )
+    if mode != "none" and not policy:
+        raise ValueError(f"Agent '{agent_id}' guardrails.policy is required when guardrails are enabled.")
+    return policy, mode  # type: ignore[return-value]
+
+
+def _parse_init_context(value: Any, *, agent_id: str) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Agent '{agent_id}' init_context must be a mapping.")
+
+    init_context = dict(value)
+    resolved: Dict[str, Any] = {}
+    for raw_key, raw_value in init_context.items():
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            raise ValueError(f"Agent '{agent_id}' init_context keys must be non-empty strings.")
+        key = raw_key.strip()
+        if key.endswith("_path"):
+            resolved_key = key[:-5]
+            if not resolved_key:
+                raise ValueError(f"Agent '{agent_id}' init_context key '{key}' is invalid.")
+            if resolved_key in init_context or resolved_key in resolved:
+                raise ValueError(
+                    f"Agent '{agent_id}' init_context cannot contain both '{resolved_key}' and '{key}'."
+                )
+            path_value = _require_str(raw_value, f"init_context.{key}")
+            path = Path(path_value)
+            if not path.is_absolute():
+                path = (_REPO_ROOT / path).resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"Agent '{agent_id}' init_context path does not exist: {path}")
+            if not path.is_file():
+                raise ValueError(f"Agent '{agent_id}' init_context path is not a file: {path}")
+            try:
+                resolved[resolved_key] = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"Agent '{agent_id}' init_context path could not be read: {path}") from exc
+            continue
+
+        if key in resolved:
+            raise ValueError(f"Agent '{agent_id}' init_context contains duplicate key '{key}'.")
+        resolved[key] = raw_value
+    return resolved
+
+
+def _build_definitions_from_config(
+    config: dict[str, Any],
+    default_provider: ModelType,
+    default_content_types: Tuple[ContentType, ...],
+) -> Dict[str, AgentDefinition]:
+    entries = config.get("agents") or config.get("modules")
+    if entries is None:
+        raise ValueError("Agent config must contain an 'agents' list.")
+    if not isinstance(entries, list):
+        raise ValueError("Agent config field 'agents' must be a list.")
+
+    definitions: Dict[str, AgentDefinition] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Each agent entry must be a mapping.")
+        agent_id = _require_str(entry.get("id"), "id")
+        if agent_id in definitions:
+            raise ValueError(f"Duplicate agent id '{agent_id}' in config.")
+        name = _require_str(entry.get("name"), "name")
+        description = _require_str(entry.get("description"), "description")
+        module_path = _require_str(entry.get("module") or entry.get("path"), "module")
+        supported_content_types = _parse_supported_content_types(
+            entry.get("supported_content_types"),
+            default_content_types,
+        )
+        allow_raw_attachments = _coerce_bool(
+            entry.get("allow_raw_attachments"),
+            "allow_raw_attachments",
+            False,
+        )
+        stream_modes, stream_subgraphs = _parse_streaming_config(
+            entry.get("streaming"),
+            ("messages", "values"),
+            False,
+        )
+        is_active = _coerce_bool(entry.get("is_active"), "is_active", True)
+        params = entry.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"Agent '{agent_id}' params must be a mapping.")
+        params = dict(params)
+        runtime_settings = entry.get("runtime", {})
+        unknown_runtime = set(runtime_settings) - {"allow_external_tool_access"}
+        if unknown_runtime:
+            raise ValueError(f"Unknown runtime settings for '{agent_id}': {sorted(unknown_runtime)}")
+        # This setting belongs to invocation context, not a plugin constructor.
+        external_tool_access = _coerce_bool(runtime_settings.get("allow_external_tool_access",
+            params.pop("allow_external_tool_access", False)), "allow_external_tool_access", False)
+        top_level_guardrail_policy, guardrail_mode = _parse_guardrails_config(
+            entry.get("guardrails"),
+            agent_id=agent_id,
+        )
+        guardrail_policy = params.pop("guardrail_policy", None)
+        if guardrail_policy is not None and top_level_guardrail_policy is not None:
+            raise ValueError(
+                f"Agent '{agent_id}' cannot combine top-level guardrails with params.guardrail_policy."
+            )
+        if top_level_guardrail_policy is not None:
+            inline_keys = inline_guardrail_config_keys(params)
+            if inline_keys:
+                names = ", ".join(sorted(inline_keys))
+                raise ValueError(
+                    f"Agent '{agent_id}' mixes top-level guardrails with inline guardrail params: {names}."
+                )
+        if guardrail_policy is not None:
+            inline_keys = inline_guardrail_config_keys(params)
+            if inline_keys:
+                names = ", ".join(sorted(inline_keys))
+                raise ValueError(
+                    f"Agent '{agent_id}' mixes guardrail_policy with inline guardrail params: {names}."
+                )
+            params.update(resolve_guardrail_policy(guardrail_policy))
+            top_level_guardrail_policy = str(guardrail_policy)
+            guardrail_mode = "agent"
+        tools_config = parse_agent_tools_config(entry.get("tools"), agent_id=agent_id)
+        init_context = entry.get("init_context") or {}
+        provider = _coerce_provider(params.pop("provider", None), default_provider)
+        checkpoint_saver = params.pop("checkpoint_saver", None)
+        definitions[agent_id] = AgentDefinition(
+            id=agent_id,
+            name=name,
+            description=description,
+            factory=None,
+            module_path=module_path,
+            external_tool_access=external_tool_access,
+            default_provider=provider,
+            supported_content_types=supported_content_types,
+            allow_raw_attachments=allow_raw_attachments,
+            stream_modes=stream_modes,
+            stream_subgraphs=stream_subgraphs,
+            is_active=is_active,
+            init_params=params,
+            init_context=init_context,
+            tools_config=tools_config,
+            checkpoint_saver=checkpoint_saver,
+            guardrail_policy_id=top_level_guardrail_policy,
+            guardrail_mode=guardrail_mode,
+        )
+    return definitions
+
+
+
+
+class AgentRegistry:
+    def __init__(self, config_path=None, resolver=None, capabilities=None) -> None:
+        self.resolver = resolver
+        self.capabilities = capabilities or {}
+        default_provider = _coerce_provider(settings.default_model_provider, ModelType.GPT)
+        default_content_types: Tuple[ContentType, ...] = (
+            #ContentType.TEXT_FILES,
+            #ContentType.MARKDOWN,
+            #ContentType.DOCX_DOCUMENTS,
+            #ContentType.PDFS,
+            #ContentType.CSVS,
+            #ContentType.EXCELS,
+        )
+        
+        #persistent checkpointers
+        self._checkpointer_cm: AsyncIterator[AsyncSqliteSaver] | None = None
+        self._checkpointer: AsyncSqliteSaver | None = None
+        self._checkpointer_lock = asyncio.Lock()
+
+        config_path = _resolve_config_path(config_path or settings.agent_config_path)
+        config = _load_agent_config(config_path)
+        self._definitions = _build_definitions_from_config(
+            config,
+            default_provider,
+            default_content_types,
+        )
+        LOG.info("Loaded %d agent definitions from %s", len(self._definitions), config_path)
+        self._instances: Dict[str, Any] = {}
+        self._init_tasks: Dict[str, Future] = {}
+        self._init_errors: Dict[str, BaseException] = {}
+
+    def list_agents(self) -> List[AgentInfo]:
+        return [
+            AgentInfo(
+                id=definition.id,
+                name=definition.name,
+                description=definition.description,
+                provider=definition.default_provider.value,
+                supported_content_types=list(definition.supported_content_types),
+            )
+            for definition in self._definitions.values()
+            if definition.is_active
+        ]
+
+    def list_ready_agents(self) -> List[AgentInfo]:
+        ready_ids = set(self._instances)
+        return [
+            AgentInfo(
+                id=definition.id,
+                name=definition.name,
+                description=definition.description,
+                provider=definition.default_provider.value,
+                supported_content_types=list(definition.supported_content_types),
+            )
+            for definition in self._definitions.values()
+            if definition.id in ready_ids and definition.is_active
+        ]
+
+    async def _ensure_checkpointer(self) -> AsyncSqliteSaver:
+        """Create a single shared SQLite checkpointer (lazy, once per process)."""
+        if self._checkpointer is not None:
+            return self._checkpointer
+
+        async with self._checkpointer_lock:
+            if self._checkpointer is not None:
+                return self._checkpointer
+
+            # settings.checkpoint_sqlite_path example: "data/checkpoints.sqlite"
+            conn_string = settings.checkpointer_db_url
+            cm = AsyncSqliteSaver.from_conn_string(conn_string)
+
+            # Enter once and keep it open for the whole app lifetime
+            saver = await cm.__aenter__()
+            await saver.setup()  # idempotent
+
+            self._checkpointer_cm = cm
+            self._checkpointer = saver
+            return saver
+
+    async def aclose(self) -> None:
+        """Call on app shutdown to close the shared checkpointer."""
+        tasks = list(self._init_tasks.values())
+        # Factories may still own synchronous executor work. Drain them before
+        # closing shared checkpoints and capability resources.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for instance in self._instances.values():
+            close = getattr(instance, "aclose", None)
+            if close is not None:
+                await close()
+            for callback in (getattr(instance, "config", None) or {}).get("callbacks", []):
+                close_callback = getattr(callback, "close", None)
+                if close_callback is not None:
+                    close_callback()
+        self._instances.clear()
+        if self._checkpointer_cm is not None:
+            await self._checkpointer_cm.__aexit__(None, None, None)
+        self._checkpointer_cm = None
+        self._checkpointer = None
+
+    def _start_initialization(self, agent_id: str) -> None:
+        async def build_async() -> Any:
+            definition = self._definitions[agent_id]
+            if definition.factory is None:
+                init_fn, graph_fn = await asyncio.to_thread(_import_agent_factories, definition.module_path)
+                param_names, accepts_kwargs = _get_signature_info(init_fn)
+                graph_names, graph_kwargs = _get_signature_info(graph_fn) if graph_fn else (frozenset(), False)
+                definition = replace(definition, factory=init_fn, graph_factory=graph_fn,
+                                     param_names=param_names, accepts_kwargs=accepts_kwargs,
+                                     graph_param_names=graph_names, graph_accepts_kwargs=graph_kwargs)
+                self._definitions[agent_id] = definition
+            provider = definition.default_provider
+            params = dict(definition.init_params)
+            params["provider"] = provider
+            if "agent_resolver" in definition.param_names:
+                if self.resolver is None:
+                    raise ValueError(f"Agent '{agent_id}' requires an agent resolver")
+                params["agent_resolver"] = self.resolver
+            platform_mode = definition.guardrail_mode == "platform"
+            factory_names = definition.graph_param_names if platform_mode else definition.param_names
+            if "model_factory" in factory_names and "models" in self.capabilities:
+                params["model_factory"] = self.capabilities["models"]
+            if "services" in factory_names:
+                params["services"] = self.capabilities
+            if platform_mode and definition.graph_factory is None:
+                raise ValueError(
+                    f"Agent '{agent_id}' uses platform guardrails, but its module does not expose build_agent_graph()."
+                )
+
+            checkpoint_key = _normalize_checkpoint_saver(definition.checkpoint_saver)
+            checkpoint_saver = _SKIP_CHECKPOINTER
+            if checkpoint_key in {"sqlite", "sqllite"}:
+                checkpoint_saver = await self._ensure_checkpointer()
+            elif checkpoint_key is not None:
+                raise ValueError(f"Unsupported checkpointer for '{agent_id}': {definition.checkpoint_saver}")
+
+            if checkpoint_saver is not _SKIP_CHECKPOINTER and not platform_mode:
+                params["checkpoint_saver"] = checkpoint_saver
+
+            if definition.init_context:
+                param_names = definition.graph_param_names if platform_mode else definition.param_names
+                accepts_kwargs = definition.graph_accepts_kwargs if platform_mode else definition.accepts_kwargs
+                if "init_context" in param_names or accepts_kwargs:
+                    params["init_context"] = _parse_init_context(definition.init_context, agent_id=agent_id)
+                else:
+                    raise ValueError(f"Agent '{agent_id}' does not accept init_context")
+
+            tool_bundle = None
+            platform_runtime = None
+            if platform_mode:
+                platform_runtime = PlatformGuardrailRuntime.from_policy_id(
+                    definition.guardrail_policy_id,
+                    agent_id=agent_id,
+                )
+
+            if definition.tools_config.configured:
+                param_names = definition.graph_param_names if platform_mode else definition.param_names
+                accepts_kwargs = definition.graph_accepts_kwargs if platform_mode else definition.accepts_kwargs
+                legacy_require_profiles = bool(params.get("guardrail_tool_execution_enabled", False))
+                require_profiles = (
+                    platform_runtime.tool_execution_enabled
+                    if platform_runtime is not None
+                    else legacy_require_profiles
+                )
+                if not platform_mode and "tools" not in param_names and not accepts_kwargs:
+                    raise ValueError(
+                        f"Agent '{agent_id}' config declares tools, but initialize_agent() "
+                        "does not accept a 'tools' parameter."
+                    )
+                tool_bundle = await build_agent_tool_bundle(
+                    definition.tools_config,
+                    require_guardrail_profiles=require_profiles,
+                )
+                configured_tools = tool_bundle.tools
+                if not platform_mode and require_profiles:
+                    if "guardrail_tool_profiles" not in definition.param_names and not definition.accepts_kwargs:
+                        raise ValueError(
+                            f"Agent '{agent_id}' enables tool execution guardrails, but initialize_agent() "
+                            "does not accept a 'guardrail_tool_profiles' parameter."
+                        )
+                    existing_profiles = params.get("guardrail_tool_profiles")
+                    if existing_profiles is None:
+                        params["guardrail_tool_profiles"] = dict(tool_bundle.guardrail_profiles)
+                    elif isinstance(existing_profiles, dict):
+                        params["guardrail_tool_profiles"] = {
+                            **existing_profiles,
+                            **tool_bundle.guardrail_profiles,
+                        }
+                    else:
+                        raise ValueError(
+                            f"Agent '{agent_id}' params.guardrail_tool_profiles must be an object."
+                        )
+                if not platform_mode or "tools" in param_names or accepts_kwargs:
+                    existing_tools = params.get("tools")
+                    if existing_tools is None:
+                        params["tools"] = configured_tools
+                    elif isinstance(existing_tools, (list, tuple)):
+                        params["tools"] = [*existing_tools, *configured_tools]
+                    else:
+                        raise ValueError(
+                            f"Agent '{agent_id}' params.tools must be a list when config tools are also declared."
+                        )
+
+            names = definition.graph_param_names if platform_mode else definition.param_names
+            accepts_kwargs = definition.graph_accepts_kwargs if platform_mode else definition.accepts_kwargs
+            unsupported = set(params) - names
+            if unsupported:
+                raise ValueError(f"Agent '{agent_id}' does not accept settings: {', '.join(sorted(unsupported))}")
+
+            loop = asyncio.get_running_loop()
+
+            # Keep your current pattern: build agent in executor thread
+            if platform_mode:
+                assert definition.graph_factory is not None
+                assert platform_runtime is not None
+                selected_tools = [] if tool_bundle is None else tool_bundle.tools
+                tool_profiles = {} if tool_bundle is None else dict(tool_bundle.guardrail_profiles)
+
+                def build_platform_graph() -> Any:
+                    spec = definition.graph_factory(**params)
+                    return PlatformGraphCompiler().compile(
+                        spec,
+                        guardrail_runtime=platform_runtime,
+                        checkpointer=None if checkpoint_saver is _SKIP_CHECKPOINTER else checkpoint_saver,
+                        tools=selected_tools,
+                        tool_profiles=tool_profiles,
+                    )
+
+                return await asyncio.to_thread(build_platform_graph)
+
+            if inspect.iscoroutinefunction(definition.factory):
+                return await definition.factory(**params)
+            return await asyncio.to_thread(definition.factory, **params)
+
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(build_async())
+
+        def on_done(fut: Future) -> None:
+            try:
+                instance = fut.result()
+            except BaseException as exc:  # noqa: BLE001
+                LOG.exception("Agent '%s' initialization failed", agent_id)
+                self._init_errors[agent_id] = exc
+            else:
+                self._instances[agent_id] = instance
+                self._init_errors.pop(agent_id, None)
+                LOG.info("Agent '%s' initialization complete.", agent_id)
+            finally:
+                self._init_tasks.pop(agent_id, None)
+
+        task.add_done_callback(on_done)
+        self._init_tasks[agent_id] = task
+
+    async def ensure_agent_ready(self, agent_id: str) -> bool:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        if agent_id in self._instances:
+            return True
+        if agent_id in self._init_errors:
+            exc = self._init_errors.pop(agent_id)
+            raise RuntimeError(f"Failed to initialize agent '{agent_id}'") from exc
+        task = self._init_tasks.get(agent_id)
+        if task is None:
+            self._start_initialization(agent_id)
+            return False
+        if task.done():
+            try:
+                instance = task.result()
+            except BaseException as exc:  # noqa: BLE001
+                self._init_errors[agent_id] = exc
+                self._init_tasks.pop(agent_id, None)
+                raise RuntimeError(f"Failed to initialize agent '{agent_id}'") from exc
+            else:
+                self._instances[agent_id] = instance
+                self._init_tasks.pop(agent_id, None)
+                self._init_errors.pop(agent_id, None)
+                return True
+        return False
+
+    def get_agent(self, agent_id: str) -> Any:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        if agent_id in self._instances:
+            return self._instances[agent_id]
+        if agent_id in self._init_errors:
+            raise RuntimeError(f"Agent '{agent_id}' failed to initialize") from self._init_errors[agent_id]
+        raise RuntimeError(f"Agent '{agent_id}' is still initializing")
+
+    def is_ready(self, agent_id: str) -> bool:
+        return agent_id in self._instances
+
+    def initialization_status(self, agent_id: str) -> str:
+        if agent_id in self._instances:
+            return "ready"
+        if agent_id in self._init_errors:
+            return "error"
+        if agent_id in self._init_tasks:
+            return "initializing"
+        if agent_id in self._definitions:
+            return "pending"
+        return "unknown"
+
+    def supported_content_types(self, agent_id: str) -> Tuple[ContentType, ...]:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        return self._definitions[agent_id].supported_content_types
+
+    def allows_raw_attachments(self, agent_id: str) -> bool:
+        if agent_id not in self._definitions:
+            raise KeyError(f"Unknown agent '{agent_id}'")
+        return self._definitions[agent_id].allow_raw_attachments
+
+    def stream_config(self, agent_id: str | None) -> tuple[List[str], bool]:
+        if not agent_id:
+            return ["messages", "values"], False
+        definition = self._definitions.get(agent_id)
+        if definition is None:
+            return ["messages", "values"], False
+        return list(definition.stream_modes), definition.stream_subgraphs
+
+    def allow_external_tool_access(self, agent_id: str | None) -> bool:
+        if not agent_id:
+            return False
+        definition = self._definitions.get(agent_id)
+        if definition is None:
+            return False
+        return definition.external_tool_access or bool(definition.init_params.get("allow_external_tool_access", False))
+
+    def preload_all(self) -> None:
+        for agent_id in self._definitions:
+            if agent_id in self._instances:
+                continue
+            if agent_id in self._init_tasks:
+                continue
+            if agent_id in self._init_errors:
+                self._init_errors.pop(agent_id, None)
+            if self._definitions[agent_id].is_active:
+                self._start_initialization(agent_id)
+
+
+agent_registry = AgentRegistry()

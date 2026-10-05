@@ -223,12 +223,13 @@ def build_agent_graph(
     *,
     streaming: bool = True,
     tools: List[Any] | None = None,
+    model_factory=None,
 ):
     #set_locale(locale)
     #set_models_locale(locale)
     log_name = f"simple_agent_{time.strftime('%Y%m%d%H%M')}"
     callback_handlers = _build_callback_handlers(log_name)
-    llm = get_llm(model="base", provider=provider.value, temperature=0.4, streaming=streaming)
+    llm = (model_factory or get_llm)(model="base", provider=provider.value, temperature=0.4, streaming=streaming)
 
     builder = PlatformStateGraph(SimpleAgentState)
     builder.add_node("greetings", create_greetings_node(), guardrails=False)
@@ -276,6 +277,7 @@ def initialize_agent(
     *,
     streaming: bool = True,
     tools: List[Any] | None = None,
+    model_factory=None,
 ):
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     spec = build_agent_graph(
@@ -284,6 +286,7 @@ def initialize_agent(
         locale=locale,
         streaming=streaming,
         tools=tools,
+        model_factory=model_factory,
     )
     return PlatformGraphCompiler().compile(
         spec,

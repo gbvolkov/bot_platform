@@ -565,6 +565,7 @@ def initialize_agent(
     guardrail_palimpsest_session_options: Mapping[str, Any] | None = None,
     guardrail_tool_profiles: Mapping[str, ToolSecurityProfile | Mapping[str, Any]] | None = None,
     guardrail_unprofiled_tools: Literal["block", "allow_read_only"] = "block",
+    model_factory=None,
 ):
     #set_locale(locale)
     #set_models_locale(locale)
@@ -581,8 +582,9 @@ def initialize_agent(
         callback_handlers += [lf_handler]
 
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
-    llm = get_llm(model="base", provider=provider.value, temperature=0)
-    response_analyser_llm = get_llm(model="nano", provider=provider.value, temperature=0, streaming=False)
+    models = model_factory or get_llm
+    llm = models(model="base", provider=provider.value, temperature=0)
+    response_analyser_llm = models(model="nano", provider=provider.value, temperature=0, streaming=False)
 
     run_privacy_middleware = None
     confirmation_privacy_middleware = None

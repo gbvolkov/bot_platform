@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from agents.simple_agent.agent import build_agent_graph
+from agent_runtime.local import compile_local_graph
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -298,9 +299,8 @@ def _compile_platform_graph(
     guardrail_runtime: PlatformGuardrailRuntime,
     tool_bundle: BuiltAgentTools,
 ) -> Any:
-    spec = build_agent_graph(provider=provider, streaming=False)
-    return PlatformGraphCompiler().compile(
-        spec,
+    return compile_local_graph(
+        build_agent_graph, provider=provider, streaming=False, compiler=PlatformGraphCompiler(),
         guardrail_runtime=guardrail_runtime,
         checkpointer=MemorySaver(),
         tools=tool_bundle.tools,

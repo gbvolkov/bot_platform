@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agents.artifact_creator_agent.agent import initialize_agent
+from agent_runtime.local import build_local_agent
 from agents.utils import ModelType, extract_text
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -677,7 +678,7 @@ def main() -> int:
                     )
                 )
                 registry_tools = tool_bundle.tools
-                agent = initialize_agent(
+                agent = build_local_agent(initialize_agent,
                     provider=provider,
                     locale=args.locale,
                     checkpoint_saver=checkpoint_saver,

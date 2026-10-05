@@ -466,14 +466,15 @@ def test_agent_config_parses_top_level_platform_guardrails(monkeypatch):
     definition = definitions["demo"]
     assert definition.guardrail_policy_id == "default_guardrails"
     assert definition.guardrail_mode == "platform"
-    assert definition.graph_factory is build_agent_graph
-    assert definition.factory is initialize_agent
+    assert definition.graph_factory is None
+    assert definition.module_path == "demo_platform_agent"
+    assert definition.factory is None
     assert definition.tools_config.internal_tools[0].name == "web_search_tool"
     assert definition.tools_config.internal_tools[0].params == {
         "max_results": 2,
         "summarize": True,
     }
-    assert definition.init_params["allow_external_tool_access"] is True
+    assert definition.external_tool_access is True
 
 
 def test_agent_registry_platform_mode_requires_graph_factory():

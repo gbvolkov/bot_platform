@@ -165,7 +165,7 @@ def test_compile_platform_graph_injects_runtime_tools_and_profiles(monkeypatch):
             captured["tool_profiles"] = tool_profiles
             return "compiled"
 
-    monkeypatch.setattr(cli, "build_agent_graph", lambda **kwargs: {"kwargs": kwargs})
+    monkeypatch.setattr(cli, "build_agent_graph", lambda provider, streaming: {"kwargs": {"provider": provider, "streaming": streaming}})
     monkeypatch.setattr(cli, "PlatformGraphCompiler", lambda: FakeCompiler())
 
     runtime = object()

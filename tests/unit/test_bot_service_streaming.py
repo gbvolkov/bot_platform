@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
@@ -46,3 +47,38 @@ def test_invoke_agent_stream_does_not_replay_final_ai_message() -> None:
         {"type": "chunk", "content": "Beta"},
     ]
     assert result_text == "Alpha Beta"
+
+
+def test_invalid_stream_result_reports_error_without_hanging(monkeypatch):
+    from agent_runtime import invocation
+    def invalid_result(**kwargs):
+        raise RuntimeError("Invalid final graph state")
+    monkeypatch.setattr(invocation, "_build_agent_result_from_state", invalid_result)
+    class EmptyAgent:
+        async def astream(self, *args, **kwargs):
+            if False:
+                yield
+    async def check():
+        events, result = await invoke_agent_stream(EmptyAgent(), MessagePayload(text="hi"),
+            "conversation", "gaz_agent", "user", "default")
+        async for _ in events:
+            pass
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(result, 1)
+    asyncio.run(check())
+
+
+def test_child_values_cannot_replace_root_terminal_state():
+    class NestedAgent:
+        async def astream(self, *args, **kwargs):
+            yield (), "values", {"messages": [AIMessage(content="Root answer")]}
+            yield ("child:task",), "values", {"messages": [AIMessage(content="Child answer")]}
+
+    async def check():
+        events, result = await invoke_agent_stream(NestedAgent(), MessagePayload(text="hi"),
+            "conversation", "simple_agent", "user", "default")
+        async for _ in events:
+            pass
+        assert (await result)["ai"].content == "Root answer"
+
+    asyncio.run(check())
