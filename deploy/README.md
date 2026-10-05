@@ -225,11 +225,13 @@ initialization failures, artifact failures and the last event-delivery lag. Repl
 deltas/custom events expire six hours after termination; outcomes, terminal events,
 artifacts and final results remain with history.
 
-## Release evidence and outstanding gates
+## Release evidence
 
-Local verification on 2026-10-05: **622 passed, 7 skipped** in the deterministic
-release suite. The seven skips are optional guardrail checks; the missing older
-iSmart assets and live privacy-model smoke test are excluded as described above.
+Local verification on 2026-10-05: **634 passed, 7 skipped** in the deterministic
+release suite. Optional checks skip; the missing older iSmart assets and live
+privacy-model smoke test are excluded as described above. The final Linux worker
+image passes **632 tests with 9 skips** without networking; ignored GAZ workbook
+integration accounts for the additional Linux skips.
 The frozen lock validates all 410 resolved packages without dependency upgrades.
 All twelve component wheels build, and Compose configuration validates with the
 gated legacy-dispatch profile.
@@ -243,9 +245,12 @@ separation, ordering, cancellation, missed notifications, late subscription and
 legacy projection ownership. These adapter fixtures do not claim that each real
 plugin has initialized against production credentials and datasets.
 
-Before declaring the release deployed, build/run the Linux images on a host with
-Docker available, rehearse migration/rollback against copied production state,
-and confirm all real plugins' readiness and supported-channel integration in that
-environment. This workstation has no running Docker engine, so image execution and
-live session rollout have not been verified here. No production database or live
-legacy process was changed during implementation.
+The Linux images were built and deployed to cheetan. All 17 real active plugins
+initialized with the retained production configuration and datasets; both workers,
+the native API, OpenAI adapter, bundled web chat, existing GUI and capability
+services passed the recorded deployment checks. Migration rehearsal on copied
+production state was idempotent. For this host, the owner explicitly selected
+archived legacy history instead of retaining live legacy sessions: all 281 prior
+conversations were closed, all 3,718 messages remained unchanged, and the previous
+installation was moved to a verified backup. See [cheetan.md](cheetan.md) for exact
+image/configuration revisions, nginx routing, evidence and rollback instructions.

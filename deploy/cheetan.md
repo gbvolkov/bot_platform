@@ -3,6 +3,7 @@
 The host has other applications on ports 8000 and 8080. Use both Compose files:
 
 ```sh
+cd /home/volkov/bot-platform-deploy/current
 docker compose --env-file /home/volkov/bot-platform-deploy/configuration/deployment.env \
   -f docker-compose.yml -f deploy/cheetan.compose.yml config --quiet
 docker compose --env-file /home/volkov/bot-platform-deploy/configuration/deployment.env \
@@ -73,3 +74,51 @@ the login page through host nginx, and the static assets. Inspect plugin-specifi
 initialization errors separately from application readiness. Run the deterministic
 suite inside the worker image and installed-package checks inside access/retrieval
 images. Do not replay historical side-effecting tool calls as a deployment check.
+
+## Verified deployment, 2026-10-05
+
+Runtime/access/retrieval images are pinned to source commit **4f002d9**. The
+existing GUI images use **0afd373**. Compose startup ordering is from **f8d8d5c**;
+the OpenAI adapter and bundled web chat wait for the native API's health check.
+`current-release` records the image release, `current-compose-release` records
+the applied composition, and `current` points to the saved operational checkout.
+Documentation-only updates do not rebuild or restart these images.
+
+All **12** project services were verified running with zero restarts after the
+final cutover. One interactive worker reports **16** ready agents; the batch
+worker reports `ismart_generator_agent`. All **17** IDs appear in the native,
+OpenAI and existing GUI catalogs. Application readiness is healthy with no
+initialization failures, active claims or recovery-required runs at verification.
+
+The public GUI at **https://agents.gbvolkoff.name:8443/**, its static assets, and
+`/api/models` return HTTP 200 through the existing nginx configuration. Protected
+GUI history still rejects unauthenticated requests. The bundled web chat renders
+and lists all 17 agents; retrieval and knowledge-base HTTP checks also pass.
+The coordinator and capability services have no published host ports.
+
+Verification evidence:
+
+- Windows deterministic suite: **634 passed, 7 skipped**.
+- Linux suite in the final worker image, with networking disabled:
+  **632 passed, 9 skipped**. Optional checks and missing local GAZ workbooks skip;
+  the older iSmart asset-dependent suite remains excluded at the owner's request.
+  No replacement prompts were synthesized.
+- Installed access packages import outside the checkout without agent or model
+  dependencies; installed capabilities import without business-agent packages.
+- Native accepted runs, persisted checkpoints, one real isolated OpenAI streaming
+  response, duplicate acceptance and late terminal-event replay passed. Both
+  synthetic test conversations were explicitly closed. Their durable outcomes
+  remained available after access/worker updates; no historical tool calls ran.
+- Offline libpostal parsing and Gmail MCP protocol/tool discovery passed. No
+  email tools were invoked. Final worker startup installs no packages or spaCy
+  resources. Neural constructors are coordinated without changing inference,
+  model versions, privacy settings or session scope.
+- The complete archived message digest still matches: **281 conversations and
+  3,718 messages**. All 45 separately mounted iSmart reference files match their
+  transfer manifest. Ignored documents and generated outputs remain outside Git.
+
+`/home/volkov/bot-platform-deploy/deployment-verification.json` records the exact
+running image IDs, ready-agent list and verification time. Detailed build and
+test logs are in `build-logs`; earlier verified logs are preserved with their
+release snapshots. The original installation and consistent database backups
+remain under `/home/volkov/bot-platform-backups/20261005-080455`.
