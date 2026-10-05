@@ -4,6 +4,7 @@ import os
 from typing import List, Any
 
 import config as cfg
+from platform_utils.model_loading import MODEL_LOADING_LOCK
 
 #os.environ["LANGSMITH_HIDE_INPUTS"] = "true"
 #os.environ["LANGSMITH_HIDE_OUTPUTS"] = "true"
@@ -142,9 +143,10 @@ def initialize_agent(
             ,"RU_BANK_ACC"
             ,"TICKET_NUMBER"
         ]
-        palimpsest_sessions = PalimpsestSessionManager(
-            Palimpsest(verbose=False, run_entities=anon_entities)
-        )
+        with MODEL_LOADING_LOCK:
+            palimpsest_sessions = PalimpsestSessionManager(
+                Palimpsest(verbose=False, run_entities=anon_entities)
+            )
     memory = None if use_platform_store else checkpoint_saver or MemorySaver()
     team_llm = get_llm(model = cfg.TEAM_GPT_MODEL, provider = provider.value, temperature=0.4)
     

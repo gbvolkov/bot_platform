@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import re
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 from uuid import uuid4
+from platform_utils.model_loading import MODEL_LOADING_LOCK
 
 from .context import GuardrailContext
 from .decisions import GuardrailDecision, allow, block, redact
@@ -361,9 +362,10 @@ class LLMGuardScannerRail:
             return spec.scanner
         cache = self._input_instances if stage == "input" else self._output_instances
         key = id(spec) if cache_key is None else cache_key
-        if key not in cache:
-            factory = self._input_factory if stage == "input" else self._output_factory
-            cache[key] = factory(spec)
+        with MODEL_LOADING_LOCK:
+            if key not in cache:
+                factory = self._input_factory if stage == "input" else self._output_factory
+                cache[key] = factory(spec)
         return cache[key]
 
     def _input_instance_for_scan(

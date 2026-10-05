@@ -118,6 +118,16 @@ until an index is requested. Ordinary verification uses synthetic service settin
 and KPI fixtures; local GAZ price-workbook integration skips when its ignored
 source files are unavailable.
 
+The large Russian spaCy resource used by Palimpsest is also baked into worker and
+retrieval images: `ru_core_news_lg` 3.8.0, matching cheetan's original installation,
+with a verified upstream SHA-256. The small 3.8.0 model remains in the root lock.
+The worker includes Node.js 22.23.3 and the existing Gmail MCP 1.7.4 stdio tool;
+`deploy/mcp-gmail/package-lock.json` preserves its previously installed dependency
+closure. npm runs offline and resolves this package from the image. These build
+resources eliminate startup installation without changing privacy configuration
+or adding an MCP service. Slow guardrail construction runs outside the worker's
+event loop so it cannot prevent other plugins from reporting readiness.
+
 ## Migration, cohorts and rollback
 
 1. Back up the application and checkpoint databases consistently and rehearse on

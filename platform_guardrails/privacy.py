@@ -11,6 +11,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.config import get_config
 
 from .context import GuardrailContext, build_guardrail_context, privacy_scope_key
+from platform_utils.model_loading import MODEL_LOADING_LOCK
 
 
 DEFAULT_PALIMPSEST_ENTITIES = [
@@ -321,7 +322,8 @@ class PrivacyRail:
             constructor_kwargs,
             api_name="Palimpsest",
         )
-        processor = Palimpsest(**constructor_kwargs)
+        with MODEL_LOADING_LOCK:
+            processor = Palimpsest(**constructor_kwargs)
         session_kwargs = _palimpsest_session_kwargs(
             entity_replacements=entity_replacements,
             palimpsest_session_options=palimpsest_session_options,

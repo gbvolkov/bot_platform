@@ -33,6 +33,7 @@ Run:
 
 
 from __future__ import annotations
+from platform_utils.model_loading import MODEL_LOADING_LOCK
 
 import argparse
 import contextlib
@@ -221,7 +222,8 @@ def get_stopwords_ru_list() -> Optional[List[str]]:
 # -----------------------------
 
 def build_embedder(model_name: str, device: str) -> SentenceTransformer:
-    return SentenceTransformer(model_name, device=device)
+    with MODEL_LOADING_LOCK:
+        return SentenceTransformer(model_name, device=device)
 
 
 def embed_texts(model: SentenceTransformer, texts: Sequence[str], batch_size: int) -> np.ndarray:

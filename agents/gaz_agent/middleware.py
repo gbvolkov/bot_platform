@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from agents.palimpsest_sessions import PalimpsestSessionManager, PalimpsestSessionMiddleware
+from platform_utils.model_loading import MODEL_LOADING_LOCK
 
 
 _ANON_ENTITIES = [
@@ -26,13 +27,14 @@ class PalimpsestMiddleware(PalimpsestSessionMiddleware):
 def build_palimpsest_session_manager(locale: str = "ru-RU") -> PalimpsestSessionManager:
     from palimpsest import Palimpsest
 
-    return PalimpsestSessionManager(
-        Palimpsest(
-            verbose=False,
-            run_entities=_ANON_ENTITIES,
-            locale=locale,
+    with MODEL_LOADING_LOCK:
+        return PalimpsestSessionManager(
+            Palimpsest(
+                verbose=False,
+                run_entities=_ANON_ENTITIES,
+                locale=locale,
+            )
         )
-    )
 
 
 def build_palimpsest_middleware(
