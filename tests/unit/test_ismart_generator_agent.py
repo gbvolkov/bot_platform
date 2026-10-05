@@ -6098,7 +6098,7 @@ class FakeCompiledAgent:
 
 def test_cli_runs_langgraph_agent_with_configurable_context(monkeypatch: Any, capsys: Any) -> None:
     fake_agent = FakeCompiledAgent(status="approved")
-    monkeypatch.setattr(cli, "initialize_agent", lambda **_kwargs: fake_agent)
+    monkeypatch.setattr(cli, "initialize_agent", lambda provider, use_platform_store, model_mode, streaming: fake_agent)
 
     code = cli.main(
         [
@@ -6149,7 +6149,7 @@ def test_generation_config_reads_previous_lessons_context_from_runtime_context(t
 
 def test_cli_returns_nonzero_for_failed_generation(monkeypatch: Any, capsys: Any) -> None:
     fake_agent = FakeCompiledAgent(status="failed")
-    monkeypatch.setattr(cli, "initialize_agent", lambda **_kwargs: fake_agent)
+    monkeypatch.setattr(cli, "initialize_agent", lambda provider, use_platform_store, model_mode, streaming: fake_agent)
 
     code = cli.main(["--input", "task.json", "--output", "out"])
 

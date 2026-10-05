@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import httpx
-from services.bot_client import BotServiceClient
+from platform_client.http import BotServiceClient
 from .config import settings
 
 

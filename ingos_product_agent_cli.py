@@ -23,7 +23,7 @@ MULTILINE_END_COMMANDS = {"/send", "/end", ">>>"}
 MULTILINE_CANCEL_COMMANDS = {"/cancel", "/abort"}
 CHOOSE_PRODUCT_COMMANDS = {"/choose-product", "/product"}
 LIST_PRODUCTS_COMMANDS = {"/list-products", "/products"}
-DEFAULT_AGENT_CONFIG_PATH = "data/config/bot_service/load.json"
+DEFAULT_AGENT_CONFIG_PATH = "config_defaults/agents.json"
 DEFAULT_USER_ID = "ingos-product-cli"
 DEFAULT_USER_ROLE = "default"
 PRODUCT_AGENT_ID_PREFIX = "product_"
@@ -283,16 +283,8 @@ def _initialize_agent_for_spec(
     params["provider"] = provider
     params["prefetch_top_k"] = prefetch_top_k
 
-    signature = inspect.signature(init_fn)
-    accepted_names = set(signature.parameters)
-    accepts_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    if not accepts_kwargs:
-        params = {key: value for key, value in params.items() if key in accepted_names}
-
-    return init_fn(**params)
+    from agent_runtime.local import build_local_agent
+    return build_local_agent(init_fn, **params)
 
 
 def _invoke_turn(

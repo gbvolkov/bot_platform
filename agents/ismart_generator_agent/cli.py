@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 from agents.utils import ModelType
 
 from .agent import initialize_agent
+from agent_runtime.local import build_local_agent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         provider = _parse_provider(args.provider)
-        graph = initialize_agent(
+        graph = build_local_agent(initialize_agent,
             provider=provider,
             use_platform_store=False,
             streaming=False,

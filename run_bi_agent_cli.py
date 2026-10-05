@@ -69,7 +69,8 @@ def _build_init_context(settings: SessionSettings) -> Dict[str, Any]:
 def _create_bi_agent(settings: SessionSettings) -> Any:
     from agents.bi_agent import initialize_agent
 
-    return initialize_agent(notify_on_reload=False, init_context=_build_init_context(settings))
+    from agent_runtime.local import build_local_agent
+    return build_local_agent(initialize_agent, notify_on_reload=False, init_context=_build_init_context(settings))
 
 
 def _find_last_ai_message(messages: List[Any]) -> AIMessage:

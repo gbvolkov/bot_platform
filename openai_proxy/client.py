@@ -1,3 +1,3 @@
 from __future__ import annotations
 
-from services.bot_client import BotServiceClient  # noqa: F401
+from platform_client.http import BotServiceClient  # noqa: F401

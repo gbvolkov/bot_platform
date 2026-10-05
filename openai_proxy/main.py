@@ -17,9 +17,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from services.task_queue import RedisTaskQueue
-from services.task_queue.config import settings as task_queue_settings
-from services.task_queue.models import EnqueuePayload
+from platform_client.queue_adapter import DurableQueueClient
+from platform_sdk.queue_settings import settings as task_queue_settings
+from platform_sdk.queue import EnqueuePayload
 
 from .client import BotServiceClient
 from .config import settings
@@ -162,7 +162,7 @@ bot_client = BotServiceClient(
     request_timeout=settings.request_timeout_seconds,
     connect_timeout=settings.connect_timeout_seconds,
 )
-task_queue = RedisTaskQueue()
+task_queue = DurableQueueClient(str(settings.bot_service_base_url))
 
 
 @asynccontextmanager
@@ -355,6 +355,11 @@ async def _stream_events(
                     delta={"role": "assistant"},
                 )
                 role_announced = True
+            if event.metadata and event.metadata.get("content"):
+                yield _build_sse_payload(
+                    model=model, job_id=job_id, conversation_id=conversation_id,
+                    delta={"content": event.metadata["content"]},
+                )
             metadata_payload: Dict[str, Any] | None = None
             if event.metadata:
                 attachments = event.metadata.get("attachments")
@@ -595,10 +600,17 @@ async def create_chat_completion(
     if request.stream:
         logger.debug("Starting streaming response job_id=%s", job_id)
         return StreamingResponse(
-            _stream_events(job_id=job_id, model=request.model, conversation_id=conversation_id),
+            task_queue.managed_stream(_stream_events(job_id=job_id, model=request.model, conversation_id=conversation_id), job_id),
             media_type="text/event-stream",
         )
 
+    try:
+        return await _wait_completion(job_id, request, conversation_id)
+    finally:
+        task_queue.release(job_id)
+
+
+async def _wait_completion(job_id, request, conversation_id):
     logger.debug("Awaiting completion job_id=%s", job_id)
     completion_event = await task_queue.wait_for_completion(
         job_id=job_id,

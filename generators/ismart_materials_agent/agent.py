@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from agent_runtime.local import build_local_agent
 
 from .context import material_result_summary, task_identity
 from .contracts import (
@@ -38,7 +39,7 @@ def run_ismart_task(
     run_dir: str | Path | None = None,
     module_material_summaries: dict[str, list[dict[str, Any]]] | None = None,
 ) -> IsmartGenerationResult:
-    runtime = initialize_agent(config=config, client=client)
+    runtime = build_local_agent(initialize_agent, config=config, client=client)
     return runtime.run_task(
         task,
         run_dir=Path(run_dir) if run_dir is not None else None,

@@ -134,7 +134,7 @@ def test_choose_product_spec_retries_until_valid(monkeypatch, capsys):
     assert captured.out.count("Enter a number from 1 to 2.") == 2
 
 
-def test_initialize_agent_for_spec_filters_unaccepted_params(monkeypatch):
+def test_initialize_agent_for_spec_rejects_unaccepted_params(monkeypatch):
     captured: dict[str, object] = {}
 
     def fake_initialize_agent(provider, product, use_platform_store=False, prefetch_top_k=3):
@@ -165,6 +165,10 @@ def test_initialize_agent_for_spec_filters_unaccepted_params(monkeypatch):
         },
     )
 
+    with pytest.raises(TypeError, match="role"):
+        cli._initialize_agent_for_spec(spec, provider=ModelType.GPT4, prefetch_top_k=5)
+    assert captured == {}
+    spec.init_params.pop("role")
     agent = cli._initialize_agent_for_spec(
         spec,
         provider=ModelType.GPT4,

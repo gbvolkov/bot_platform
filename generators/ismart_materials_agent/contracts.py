@@ -16,7 +16,7 @@ def utc_now_iso() -> str:
 def repo_root() -> Path:
     current = Path(__file__).resolve()
     for parent in (current, *current.parents):
-        if (parent / "pyproject.toml").exists() or (parent / ".git").exists():
+        if (parent / "config_defaults" / "agents.json").exists() or (parent / ".git").exists():
             return parent
     return Path.cwd().resolve()
 
