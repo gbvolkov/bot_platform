@@ -52,27 +52,27 @@
   "internal_tools": [
     {
       "id": "fetch_user_info",
-      "import": "agents.user_info:fetch_user_info"
+      "import": "platform_capabilities.user_info:fetch_user_info"
     },
     {
       "id": "lookup_term",
-      "factory": "agents.retrievers.retriever:get_term_and_defition_tools"
+      "factory": "platform_capabilities.retrievers.retriever:get_term_and_defition_tools"
     },
     {
       "id": "search_kb",
-      "factory": "agents.retrievers.retriever:get_search_tool"
+      "factory": "platform_capabilities.retrievers.retriever:get_search_tool"
     },
     {
       "id": "search_tickets",
-      "factory": "agents.retrievers.retriever:get_tickets_search_tool"
+      "factory": "platform_capabilities.retrievers.retriever:get_tickets_search_tool"
     },
     {
       "id": "store_artifact_tool",
-      "import": "agents.tools.store:store_artifact_tool"
+      "import": "platform_capabilities.tools.store:store_artifact_tool"
     },
     {
       "id": "web_search_tool",
-      "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "factory": "platform_capabilities.tools.yandex_search:YandexSearchTool",
       "guardrail_profile": "external_public_no_result_anonymization",
       "params": {
         "api_key": "${YA_API_KEY}",
@@ -83,7 +83,7 @@
     },
     {
       "id": "web_search_public",
-      "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "factory": "platform_capabilities.tools.yandex_search:YandexSearchTool",
       "guardrail_profile": "external_public_no_result_anonymization",
       "params": {
         "name": "web_search_public",
@@ -95,7 +95,7 @@
     },
     {
       "id": "web_search_private",
-      "factory": "agents.tools.yandex_search:YandexSearchTool",
+      "factory": "platform_capabilities.tools.yandex_search:YandexSearchTool",
       "guardrail_profile": "external_confidential_anonymize_result",
       "params": {
         "name": "web_search_private",
@@ -107,7 +107,7 @@
     },
     {
       "id": "think_tool",
-      "factory": "agents.tools.think:ThinkTool",
+      "factory": "platform_capabilities.tools.think:ThinkTool",
       "guardrail_profile": "internal_state_no_result_scan"
     }
   ],

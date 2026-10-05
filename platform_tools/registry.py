@@ -819,6 +819,8 @@ def _load_imported_value(import_path: str) -> Any:
     module_path, sep, attr_name = import_path.partition(":")
     if not sep or not module_path.strip() or not attr_name.strip():
         raise ToolRegistryError("Importable tool bundle must use 'module:function' format.")
+    if module_path.split(".")[0] in {"agents", "bot_service", "platform_access"}:
+        raise ToolRegistryError("Platform tools must be provided by capability packages, not agents or access adapters.")
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:

@@ -30,14 +30,8 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     AudioSegment = None
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("./logs/loader.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
+# Service/worker composition owns log handlers. Importing ingestion must not
+# create files in the caller's working directory or reconfigure process logging.
 
 import config
 

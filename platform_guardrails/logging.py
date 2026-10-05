@@ -102,6 +102,11 @@ def _generation_texts(response: Any) -> list[str]:
 class RedactingJSONFileTracer(BaseCallbackHandler):
     """Local JSONL callback tracer that avoids persisting raw prompts and outputs."""
 
+    def close(self):
+        if not self.f.closed:
+            self.f.flush()
+            self.f.close()
+
     def __init__(self, path: str = "traces.jsonl") -> None:
         target = Path(path)
         if target.parent and str(target.parent) not in {"", "."}:

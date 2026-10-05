@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
 
-from agents.sales_lead_agent.tools import (
+from platform_capabilities.procurement import (
     ProcurementQueryBuilder,
     PurchaseAdapter,
     RunWorkspace,

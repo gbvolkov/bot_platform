@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agents.retrievers.utils.models_builder import getEmbeddingModel
+from platform_capabilities.retrievers.utils.models_builder import getEmbeddingModel
 
 
 def get_embedding_model():

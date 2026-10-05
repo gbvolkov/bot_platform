@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agents.sales_lead_agent.tools import (
+from platform_capabilities.procurement import (
     PreparedDocument,
     PurchaseSearchItem,
     SalesLeadAgentDependencies,

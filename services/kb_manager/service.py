@@ -455,7 +455,7 @@ class KnowledgeBaseManagerService:
     def _get_embedding_model(self):
         """Resolve the embedding model for index construction."""
         if self._embedding_backend == EmbeddingBackend.DEFAULT:
-            from agents.retrievers.utils.models_builder import getEmbeddingModel
+            from platform_capabilities.retrievers.utils.models_builder import getEmbeddingModel
 
             return getEmbeddingModel()
         raise NotImplementedError(f"Embedding backend '{self._embedding_backend.value}' is not supported.")
