@@ -1,0 +1,106 @@
+{
+  "reason": "These historical values were discarded by signature filtering in c7057f0f and have no constructor mapping. They are removed from the default manifest; supplying unsupported settings now raises an error.",
+  "agents": {
+    "service_desk": {
+      "locale": "ru",
+      "notify_on_reload": true
+    },
+    "ideator": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "new_ideator": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "ideator_old": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "ismart_tutor_agent": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "artifact_creator_agent": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "simple_agent": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "simple_agent_en": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "ismart_task_variator_agent": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Car": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Household": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Personal": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Tick Bite": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Инголаб": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Инголаб ПДФ": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Инголаб ППТХ": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Овертайм": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "product_Юридическая помощь": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "gaz_agent": {
+      "notify_on_reload": true,
+      "role": "default"
+    },
+    "sales_lead_agent": {
+      "locale": "ru",
+      "notify_on_reload": true,
+      "role": "default",
+      "use_platform_store": false
+    },
+    "mycroft_agent": {
+      "locale": "ru",
+      "super_agent_config_path": "data/super_agent.yaml",
+      "use_platform_store": false
+    },
+    "sysadmin_agent": {
+      "notify_on_reload": true,
+      "role": "default"
+    }
+  }
+}

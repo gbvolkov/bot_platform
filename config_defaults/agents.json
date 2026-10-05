@@ -1,0 +1,875 @@
+{
+  "agents": [
+    {
+      "id": "find_job",
+      "name": "Job Finder",
+      "description": "Подыскивает вакансии на основе резюме пользователя.",
+      "module": "agents.find_job_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [
+        "text_files",
+        "mds",
+        "docx_documents",
+        "pdfs"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "service_desk",
+      "name": "Service Desk Assistant",
+      "description": "Отвечает на вопросы сотрудников и консультирует по внутренним процессам.",
+      "module": "agents.sd_ass_agent.agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "role": "default"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "ai_bi",
+      "name": "BI analyst",
+      "description": "Отвечает на вопросы по датасету и строит графики.",
+      "module": "agents.bi_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "gaz_pricing_bi",
+      "name": "GAZ Pricing BI",
+      "description": "Отвечает на вопросы по базе цен, комплектаций и ТО ГАЗ и строит графики.",
+      "module": "agents.bi_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "init_context": {
+        "database_url": "sqlite:///C:/Projects/bot_platform/data/gaz-pricing/gaz_pricing_norm.sqlite",
+        "database_prompt_context_path": "agents/gaz_agent/pricing_bi_prompt_context.txt",
+        "return_files": true,
+        "return_images": true
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "gaz_pricing_bi_int",
+      "name": "GAZ Pricing BI",
+      "description": "Отвечает на вопросы по базе цен, комплектаций и ТО ГАЗ и строит графики.",
+      "module": "agents.bi_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "init_context": {
+        "database_url": "sqlite:///C:/Projects/bot_platform/data/gaz-pricing/gaz_pricing_norm.sqlite",
+        "database_prompt_context_path": "agents/gaz_agent/pricing_bi_prompt_context.txt",
+        "return_files": false,
+        "return_images": false
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "kpi_bi_int",
+      "name": "KPI BI",
+      "description": "Отвечает на вопросы по базе KPI.",
+      "module": "agents.bi_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "init_context": {
+        "database_url": "sqlite:///C:/Projects/bot_platform/data/kpi/kpi.sqlite",
+        "database_prompt_context_path": "agents/kpi_agent/kpi_bi_prompt_context.txt",
+        "return_files": false,
+        "return_images": false,
+        "max_string_length": 0,
+        "answer_row_limit": 50
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "kpi_agent",
+      "name": "KPI Agent",
+      "description": "Mycroft KPI assistant for Saint Petersburg branch KPI explanations, position-first KPI lookup, org-structure navigation, KPI method and metric explanations.",
+      "module": "agents.mycroft_agent.configured_agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "config_path": "data/config/mycroft/scenarios/kpi_agent/config.json",
+        "model_size": "base",
+        "temperature": 0.1,
+        "streaming": false,
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "marketing_analyst",
+      "name": "Marketing Analyst",
+      "description": "Routing catalog for internal GAZ marketing materials. Use when the seller needs document-backed sales framing, not exact prices/TTX/current market facts. Services: 1. Сформировать обзор семейств GAZ. Когда заказывать: продавец получил широкую задачу клиента, например подобрать направление ТС/парка по бизнес-сценарию без точной спецификации. Что вернуть: shortlist семейств/модельных направлений GAZ с причиной пригодности, источниками и флагами BI/web validation. 2. Подобрать аргументы продажи для клиента или сегмента. Когда заказывать: продавец готовит коммерческий разговор, КП или ответ на возражения. Что вернуть: набор тезисов, value proposition, обработку возражений и ссылки на внутренние материалы. 3. Свести условия программ продаж и финансирования из материалов. Когда заказывать: продавцу нужно объяснить, какие акции, субсидии, лизинговые или финансовые условия упоминаются во внутренних материалах. Что вернуть: summary механики программ, ограничений и caveats без обещания актуальных ставок, цен или доступности. 4. Сравнить GAZ с конкурентом или соседним семейством. Когда заказывать: продавец защищает выбор GAZ или готовит сравнительный narrative. Что вернуть: comparison brief с сильными сторонами, рисками, подтвержденными тезисами и фактами, которые требуют BI/web validation. 5. Объяснить конфигурационные сценарии, опции, надстройки или тип топлива. Когда заказывать: продавцу нужно подобрать позиционирование под кузов, спецнадстройку, топливо или опциональный сценарий, но не точную комплектацию. Что вернуть: scenario matrix, аргументы применимости и validation flags для точных опций/ТТХ. 6. Собрать TCO и эксплуатационные аргументы. Когда заказывать: продавец отвечает на вопросы клиента о стоимости владения, сервисе, эксплуатации или дефектах как факторе покупки. Что вернуть: TCO/operations brief с cost drivers, сервисными тезисами, рисками и тем, что надо подтвердить в BI. 7. Сопоставить пассажирский маршрут с автобусными решениями GAZ. Когда заказывать: продавец работает с перевозчиком, муниципалитетом, школой, корпоративной развозкой или маршрутом город/пригород и нужно понять, какие автобусные/пассажирские направления из внутренних документов уместны. Что вернуть: route-fit brief: профиль маршрута, подходящие автобусные/пассажирские семейства из материалов, sales rationale, ограничения и флаги BI validation для точной вместимости, габаритов, цены, комплектации и действующих требований. 8. Подобрать материалы по спецкузовам и альтернативным топливам. Когда заказывать: продавец обсуждает спецтехнику, особые надстройки, газ/метан/иные топливные сценарии. Что вернуть: application brief с релевантными направлениями, аргументами и источниками.",
+      "module": "agents.mycroft_agent.configured_agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "config_path": "data/config/mycroft/scenarios/marketing_analyst/config.json",
+        "model_size": "mini",
+        "temperature": 0.1,
+        "streaming": false,
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "mycroft_gaz_agent",
+      "name": "Mycroft GAZ Sales Agent",
+      "description": "Mycroft-configured GAZ sales orchestrator. Uses gaz_pricing_bi_int for exact prices, комплектации, опции, ТТХ, ТО, гарантию and service data; marketing_analyst for internal GAZ sales materials, positioning, programs, financing conditions, objections, comparisons and evidence; web_search_agent for missing current public facts and source links. Returns one customer-facing sales answer while preserving source boundaries.",
+      "module": "agents.mycroft_agent.configured_agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "config_path": "data/config/mycroft/scenarios/gaz_sales/config.json",
+        "model_size": "base",
+        "temperature": 0.1,
+        "streaming": false,
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "cbr_data_bi",
+      "name": "BI агент по аналитике страхового рынка ЦБ РФ",
+      "description": "Отвечает на вопросы по статистическим данным страхового рынка ЦБ РФ.",
+      "module": "agents.bi_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "init_context": {
+        "database_url": "sqlite:///C:/Projects/bot_platform/data/cbr/cbr_data.sqlite",
+        "database_prompt_context_path": "data/cbr/bi_prompt.txt",
+        "return_files": true,
+        "return_images": true
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "new_theodor_agent",
+      "name": "Новый Theodor AI (Product Mentor)",
+      "description": "Продуктовый наставник. Ведет по методологии Фёдора (13 артефактов).",
+      "module": "agents.new_theodor_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "capabilities": [
+        "product_documentation",
+        "artifact_methodology"
+      ],
+      "runtime_context_keys": [
+        "user_prompt"
+      ],
+      "delegation_modes_supported": [
+        "isolated"
+      ],
+      "supports_shared_state_patch": false,
+      "output_modes": [
+        "text",
+        "artifacts"
+      ],
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "theodor_agent",
+      "name": "Theodor AI (Product Mentor)",
+      "description": "Продуктовый наставник. Ведет по методологии Фёдора (13 артефактов).",
+      "module": "agents.theodor_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "notify_on_reload": true,
+        "role": "default"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "ideator",
+      "name": "Ideator (Новости → идеи)",
+      "description": "Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+      "module": "agents.ideator_agent",
+      "is_active": true,
+      "allow_raw_attachments": true,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [
+        "jsons"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "new_ideator",
+      "name": "Новый Ideator (Новости → идеи)",
+      "description": "Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+      "module": "agents.new_ideator_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": true,
+      "capabilities": [
+        "idea_generation"
+      ],
+      "runtime_context_keys": [
+        "scout_report"
+      ],
+      "delegation_modes_supported": [
+        "isolated"
+      ],
+      "supports_shared_state_patch": false,
+      "output_modes": [
+        "text",
+        "ideas"
+      ],
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [
+        "jsons"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "ideator_old",
+      "name": "Ideator (Новости → идеи). Old version",
+      "description": "Генерирует смысловые линии и идеи, опираясь на новости из отчёта.",
+      "module": "agents.ideator_old_agent",
+      "is_active": false,
+      "allow_raw_attachments": true,
+      "supported_content_types": [
+        "jsons"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "ismart_tutor_agent",
+      "name": "iSmart Tutor",
+      "description": "Educational tutor that provides concise hints and clarifying questions (without giving full solutions).",
+      "module": "agents.ismart_tutor_agent",
+      "is_active": true,
+      "allow_raw_attachments": true,
+      "supported_content_types": [
+        "images"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "artifact_creator_agent",
+      "name": "Artifact Creator Agent",
+      "description": "General-purpose assistant with optional system prompt setup. Generates artifact and then confirms with user",
+      "module": "agents.artifact_creator_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [],
+      "tools": [
+        {
+          "type": "internal",
+          "name": "web_search_tool",
+          "params": {
+            "max_results": 2,
+            "summarize": true
+          }
+        },
+        {
+          "type": "mcp",
+          "server": "googleapis_maps",
+          "tools": [
+            "search_places"
+          ]
+        }
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "guardrail_policy": "default_guardrails"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true,
+      "runtime": {
+        "allow_external_tool_access": true
+      }
+    },
+    {
+      "id": "simple_agent",
+      "name": "Simple Agent",
+      "description": "General-purpose assistant with optional system prompt setup.",
+      "module": "agents.simple_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "guardrails": {
+        "policy": "default_guardrails",
+        "mode": "platform"
+      },
+      "tools": [
+        {
+          "type": "internal",
+          "name": "web_search_tool",
+          "params": {
+            "max_results": 2,
+            "summarize": true
+          }
+        }
+      ],
+      "capabilities": [
+        "generic_execution",
+        "critique"
+      ],
+      "runtime_context_keys": [
+        "system_prompt",
+        "tools_profile_id"
+      ],
+      "delegation_modes_supported": [
+        "isolated"
+      ],
+      "supports_shared_state_patch": false,
+      "output_modes": [
+        "text"
+      ],
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true,
+      "runtime": {
+        "allow_external_tool_access": true
+      }
+    },
+    {
+      "id": "simple_agent_en",
+      "name": "Simple Agent (english version",
+      "description": "General-purpose assistant with optional system prompt setup.",
+      "module": "agents.simple_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "en",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "ismart_task_variator_agent",
+      "name": "iSmart Task Variator Agent",
+      "description": "Clones tasks with variations from another task.",
+      "module": "agents.ismart_task_variator_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai_think",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "product_Car",
+      "name": "Car",
+      "description": "Assistant of Ingosstrakh Product 'Car'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Car"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Household",
+      "name": "Household",
+      "description": "Assistant of Ingosstrakh Product 'Household'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Household"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Personal",
+      "name": "Personal",
+      "description": "Assistant of Ingosstrakh Product 'Personal'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Personal"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Tick Bite",
+      "name": "Tick Bite",
+      "description": "Assistant of Ingosstrakh Product 'Tick Bite'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Tick Bite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Инголаб",
+      "name": "Инголаб",
+      "description": "Assistant of Ingosstrakh Product 'Инголаб'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Инголаб"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Инголаб ПДФ",
+      "name": "Инголаб ПДФ",
+      "description": "Assistant of Ingosstrakh Product 'Инголаб ПДФ'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Инголаб ПДФ"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Инголаб ППТХ",
+      "name": "Инголаб ППТХ",
+      "description": "Assistant of Ingosstrakh Product 'Инголаб ППТХ'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Инголаб ППТХ"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Овертайм",
+      "name": "Овертайм",
+      "description": "Assistant of Ingosstrakh Product 'Овертайм'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Овертайм"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "product_Юридическая помощь",
+      "name": "Юридическая помощь",
+      "description": "Assistant of Ingosstrakh Product 'Юридическая помощь'.",
+      "module": "agents.ingos_product_agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "checkpoint_saver": "SQLite",
+        "product": "Юридическая помощь"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": true
+    },
+    {
+      "id": "gaz_agent",
+      "name": "GAZ Sales Agent",
+      "description": "Problem-first sales assistant for GAZ commercial, passenger, and special-purpose vehicle selection.",
+      "module": "agents.gaz_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "sales_lead_agent",
+      "name": "Sales Lead Agent",
+      "description": "Lead discovery and primary qualification agent for procurement, document-backed evidence, open-source enrichment, and counterparty checks.",
+      "module": "agents.sales_lead_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "mycroft_agent",
+      "name": "Mycroft - super agent",
+      "description": "Config-driven super-agent that selects workflow templates and orchestrates registry or adapter-backed delegates.",
+      "module": "agents.mycroft_agent.agent",
+      "is_active": false,
+      "allow_raw_attachments": false,
+      "capabilities": [
+        "workflow_management",
+        "multi_agent_orchestration"
+      ],
+      "runtime_context_keys": [],
+      "delegation_modes_supported": [
+        "isolated"
+      ],
+      "supports_shared_state_patch": false,
+      "output_modes": [
+        "text",
+        "artifacts"
+      ],
+      "streaming": {
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [
+        "jsons",
+        "text_files",
+        "mds"
+      ],
+      "params": {
+        "provider": "openai",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    },
+    {
+      "id": "ismart_generator_agent",
+      "name": "iSMART Generator Agent",
+      "description": "LangGraph/LangChain generator for iSMART course materials. Reads one task or a task batch JSON, runs typed content subagents, semantic validators, validation controller, package validation, and writes HTML/JSON artifacts to local output.",
+      "module": "agents.ismart_generator_agent",
+      "artifact_exporter": "agents.ismart_generator_agent.artifacts:export_artifacts",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "subgraphs": true,
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [
+        "jsons",
+        "text_files",
+        "mds"
+      ],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite",
+        "streaming": false
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "batch",
+      "privacy_affinity": false
+    },
+    {
+      "id": "sysadmin_agent",
+      "name": "Sysadmin Agent",
+      "description": "Sysadmin assistant for Ubuntu, firewall, Docker, and server diagnostics via MCP tools.",
+      "module": "agents.sysadmin_agent.agent",
+      "is_active": true,
+      "allow_raw_attachments": false,
+      "streaming": {
+        "modes": [
+          "messages",
+          "custom",
+          "values"
+        ]
+      },
+      "supported_content_types": [],
+      "params": {
+        "provider": "openai",
+        "use_platform_store": false,
+        "locale": "ru",
+        "checkpoint_saver": "SQLite"
+      },
+      "revision": "c7057f0f-1",
+      "execution_class": "interactive",
+      "privacy_affinity": false
+    }
+  ]
+}
