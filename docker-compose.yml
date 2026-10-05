@@ -1,122 +1,154 @@
-version: "3.9"
+name: bot-platform
 
-x-app: &app
-  image: python:3.13-slim
-  working_dir: /app
-  volumes:
-    - .:/app
-  environment:
-    PYTHONUNBUFFERED: "1"
+x-access: &access
+  image: bot-platform-access:${PLATFORM_RELEASE:-c7057f0f-refactor}
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+    target: access
   restart: unless-stopped
+  environment: &environment
+    PLATFORM_DATABASE_PATH: /state/${PLATFORM_DATABASE_FILENAME:-application.sqlite}
+    PLATFORM_ARTIFACT_PATH: /artifacts
+    PLATFORM_CATALOG_PATH: /app/config_defaults/agents.json
+    PLATFORM_WORKER_AGENT_IDS: ${PLATFORM_WORKER_AGENT_IDS:-}
+    PLATFORM_SERVICE_TOKEN: ${PLATFORM_SERVICE_TOKEN:?Set a private worker credential}
+    PLATFORM_LEGACY_URL: ${PLATFORM_LEGACY_URL:-http://host.docker.internal:8002/api}
+    PLATFORM_REDIS_URL: redis://notifications:6379/0
+  volumes:
+    - ${PLATFORM_STATE_DIR:?Set the existing application database directory}:/state
+    - artifacts:/artifacts
+  networks: [access, workers]
+  extra_hosts: ["host.docker.internal:host-gateway"]
+
+x-worker: &worker
+  image: bot-platform-worker:${PLATFORM_RELEASE:-c7057f0f-refactor}
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+    target: worker
+  restart: unless-stopped
+  env_file: ${PLATFORM_WORKER_ENV_FILE:-gv.env}
+  environment: &worker-environment
+    PLATFORM_SERVICE_TOKEN: ${PLATFORM_SERVICE_TOKEN:?Set a private worker credential}
+    PLATFORM_COORDINATOR_URL: http://coordinator:8001
+    PLATFORM_LEGACY_URL: ${PLATFORM_LEGACY_URL:-http://host.docker.internal:8002/api}
+    BOT_SERVICE_CHECKPOINTER_DB_URL: /checkpoints/${PLATFORM_CHECKPOINT_FILENAME:-checkpoints.sqlite}
+    BOT_SERVICE_ATTACHMENT_STORE_DIR: /runtime-artifacts
+    PLATFORM_REDIS_URL: redis://notifications:6379/0
+    SALES_LEAD_RETRIEVAL_SERVICE_BASE_URL: http://retrieval_api:8010/api
+  volumes:
+    - ${PLATFORM_CHECKPOINT_DIR:?Set the existing checkpoint directory}:/checkpoints
+    - ${PLATFORM_DATA_DIR:?Set the agent data directory}:/app/data
+    - runtime-artifacts:/runtime-artifacts
+    - ${PLATFORM_ISMART_DOCS_DIR:-./docs/ismart}:/app/docs/ismart:ro
+    - generated-output:/app/docs/generated output
+    - logs:/app/logs
+  networks: [workers, egress]
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  # No inference deadline: planned shutdown drains the current root turn.
+  # If this operational grace expires, the lease records recovery_required.
+  stop_grace_period: ${PLATFORM_STOP_GRACE_PERIOD:-24h}
 
 services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6380:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+  notifications:
+    image: redis:7.4.2-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [workers]
     restart: unless-stopped
 
-  code_pull:
-    image: alpine/git:2.47.1
-    working_dir: /app
-    volumes:
-      - .:/app
-    environment:
-      GIT_TERMINAL_PROMPT: "0"
-    command:
-      [
-        "sh",
-        "-c",
-        "if [ -d /app/.git ]; then git config --global --add safe.directory /app && git pull --rebase --autostash; else echo 'No .git directory found; skipping git pull.'; fi",
-      ]
-    restart: "no"
-
   bot_service:
-    <<: *app
-    command:
-      [
-        "sh",
-        "-c",
-        "pip install --no-cache-dir uv && uv pip install -r pyproject.toml && uvicorn bot_service.main:app --host 0.0.0.0 --port 8000",
-      ]
-    ports:
-      - "8000:8000"
-    depends_on:
-      code_pull:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
+    <<: *access
+    ports: ["8000:8000"]
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz').read()",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
-  queue_worker:
-    <<: *app
-    command:
-      [
-        "sh",
-        "-c",
-        "pip install --no-cache-dir uv && uv pip install -r pyproject.toml && python -m services.task_queue.worker",
-      ]
+  coordinator:
+    <<: *access
+    command: ["python", "-m", "uvicorn", "platform_access.coordinator:app", "--host", "0.0.0.0", "--port", "8001"]
+    networks: [workers]
+
+  interactive_worker:
+    <<: *worker
     environment:
-      PYTHONUNBUFFERED: "1"
-      TASK_QUEUE_REDIS_URL: redis://redis:6379/0
-      TASK_QUEUE_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
-    depends_on:
-      code_pull:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      bot_service:
-        condition: service_healthy
+      <<: *worker-environment
+      PLATFORM_EXECUTION_CLASS: interactive
+
+  batch_worker:
+    <<: *worker
+    environment:
+      <<: *worker-environment
+      PLATFORM_EXECUTION_CLASS: batch
+
+  legacy_bridge:
+    <<: *worker
+    profiles: [legacy-dispatch]
+    environment:
+      <<: *worker-environment
+      PLATFORM_EXECUTION_CLASS: legacy
 
   openai_proxy:
-    <<: *app
-    command:
-      [
-        "sh",
-        "-c",
-        "pip install --no-cache-dir uv && uv pip install -r pyproject.toml && uvicorn openai_proxy.main:app --host 0.0.0.0 --port 8084 --http openai_proxy.http_logging:LoggingH11Protocol",
-      ]
-    ports:
-      - "8084:8084"
+    image: bot-platform-access:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    command: ["python", "-m", "uvicorn", "openai_proxy.main:app", "--host", "0.0.0.0", "--port", "8084", "--http", "openai_proxy.http_logging:LoggingH11Protocol"]
     environment:
-      PYTHONUNBUFFERED: "1"
-      TASK_QUEUE_REDIS_URL: redis://redis:6379/0
-      TASK_QUEUE_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
       OPENAI_PROXY_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
-    depends_on:
-      code_pull:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      bot_service:
-        condition: service_healthy
-      queue_worker:
-        condition: service_started
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8084/healthz').read()",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+    ports: ["8084:8084"]
+    networks: [access, egress]
+    restart: unless-stopped
+
+  web_chat:
+    image: bot-platform-access:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    command: ["python", "-m", "uvicorn", "web_chat.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      WEB_CHAT_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
+    ports: ["8080:8080"]
+    networks: [access]
+    restart: unless-stopped
+
+  retrieval_api:
+    image: bot-platform-retrieval:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: retrieval
+    env_file: ${PLATFORM_WORKER_ENV_FILE:-gv.env}
+    environment: &retrieval-environment
+      SALES_LEAD_RETRIEVAL_SERVICE_DATABASE_URL: sqlite+aiosqlite:////retrieval-state/sales_lead_retrieval.sqlite
+    volumes: &retrieval-volumes
+      - ${PLATFORM_RETRIEVAL_STATE_DIR:?Set the existing retrieval database directory}:/retrieval-state
+      - ${PLATFORM_DATA_DIR:?Set the agent data directory}:/app/data
+      - logs:/app/logs
+    networks: [workers, egress]
+    restart: unless-stopped
+
+  retrieval_worker:
+    image: bot-platform-retrieval:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    command: ["python", "-m", "services.sales_lead_retrieval.worker"]
+    env_file: ${PLATFORM_WORKER_ENV_FILE:-gv.env}
+    environment: *retrieval-environment
+    volumes: *retrieval-volumes
+    networks: [workers, egress]
+    restart: unless-stopped
+
+  kb_manager:
+    image: bot-platform-retrieval:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    command: ["python", "-m", "uvicorn", "services.kb_manager.app:app", "--host", "0.0.0.0", "--port", "8011"]
+    env_file: ${PLATFORM_WORKER_ENV_FILE:-gv.env}
+    volumes: *retrieval-volumes
+    networks: [workers, egress]
+    restart: unless-stopped
+
+volumes:
+  artifacts:
+  runtime-artifacts:
+  generated-output:
+  logs:
+
+networks:
+  access:
+  workers:
+    internal: true
+  egress:

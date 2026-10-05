@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-platform-agents"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = ["bot-platform-runtime==0.1.0", "bot-platform-capabilities==0.1.0", "deepagents==0.3.3"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["agents*", "data.config.mycroft*"]
+namespaces = true
+exclude = ["*.build", "*.build.*", "*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.toml", "*.md", "*.txt", "*.yaml", "*.html", "static/*", "templates/*"]

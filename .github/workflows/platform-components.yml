@@ -1,0 +1,29 @@
+name: Platform component boundaries
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  access:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r deploy/requirements.access.lock
+      - run: python -m pip install --no-deps --no-build-isolation ./platform_contracts ./platform_sdk ./platform_application ./platform_infrastructure ./platform_client ./platform_access ./openai_proxy ./web_chat
+      - run: python scripts/verify_platform.py --scope access
+      - run: cd /tmp && python -I "$GITHUB_WORKSPACE/scripts/check_component_packages.py" access
+
+  linux-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target access -f deploy/Dockerfile -t bot-platform-access:test .
+      - run: docker run --rm --entrypoint python bot-platform-access:test -I -c "import platform_access.main, openai_proxy.main, web_chat.main; import importlib.util; assert importlib.util.find_spec('agents') is None"
+      - run: docker build --target worker -f deploy/Dockerfile -t bot-platform-worker:test .
+      - run: docker run --rm --entrypoint python -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 bot-platform-worker:test scripts/verify_platform.py
+      - run: docker build --target retrieval -f deploy/Dockerfile -t bot-platform-retrieval:test .
+      - run: docker run --rm --entrypoint python bot-platform-retrieval:test -I -c "import platform_capabilities.procurement, services.sales_lead_retrieval.main; import importlib.util; assert importlib.util.find_spec('agents') is None"

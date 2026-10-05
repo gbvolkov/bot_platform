@@ -1,5 +1,15 @@
 # Bot Platform
 
+The separated runtime is implemented under `platform_access`,
+`platform_application`, `agent_runtime`, `platform_capabilities`,
+`platform_infrastructure`, `platform_contracts`, `platform_sdk`, and
+`platform_client`. See the [deployment and migration guide](deploy/README.md)
+for the current SQLite/worker architecture, frozen installation, verification,
+cohort rollout and recovery commands. Public APIs use `platform_access.main:app`;
+existing sessions stay on their unchanged legacy host until explicitly closed.
+
+The sections below describe the retained legacy setup and CLI workflows.
+
 An orchestration layer for knowledge-base driven agents. The project contains:
 
 - **`bot_service`** – FastAPI backend that manages conversations, agents, and persistence.
