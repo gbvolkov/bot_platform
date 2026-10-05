@@ -23,6 +23,10 @@ CMD ["python", "-m", "uvicorn", "platform_access.main:app", "--host", "0.0.0.0",
 
 FROM python:3.12.10-slim-bookworm AS ismart-python
 
+FROM python:3.13.3-slim-bookworm AS tokenizer-data
+COPY deploy/fetch_nltk_assets.py /fetch_nltk_assets.py
+RUN python /fetch_nltk_assets.py /opt/nltk_data
+
 FROM python:3.13.3-slim-bookworm AS postal-build
 # Match the native library already used on cheetan, including its versioned
 # default models. Keep native sources and model downloads out of startup.
@@ -46,9 +50,10 @@ WORKDIR /app
 COPY vendor vendor
 COPY deploy/requirements.worker.lock deploy/requirements.worker.lock
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked python -m pip install -r deploy/requirements.worker.lock
+COPY --from=tokenizer-data /opt/nltk_data /usr/local/share/nltk_data
 COPY . .
 RUN python -m pip install --no-deps ./platform_contracts ./platform_sdk ./platform_application ./platform_infrastructure ./platform_client ./platform_capabilities ./agent_runtime ./agents ./generators ./packages/gaz_index_builder && mkdir -p /app/logs
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 NLTK_DATA=/usr/local/share/nltk_data
 CMD ["python", "-m", "agent_runtime.worker"]
 
 FROM python:3.13.3-slim-bookworm AS retrieval
@@ -59,6 +64,7 @@ WORKDIR /app
 COPY vendor vendor
 COPY deploy/requirements.retrieval.lock deploy/requirements.retrieval.lock
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked python -m pip install -r deploy/requirements.retrieval.lock
+COPY --from=tokenizer-data /opt/nltk_data /usr/local/share/nltk_data
 COPY platform_contracts platform_contracts
 COPY config_defaults config_defaults
 COPY platform_sdk platform_sdk
@@ -75,5 +81,5 @@ COPY config.py models.toml ./
 COPY data/config data/config
 RUN python -m pip install --no-deps ./platform_contracts ./platform_sdk ./platform_client ./platform_capabilities ./packages/gaz_index_builder
 RUN mkdir -p /app/logs
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 NLTK_DATA=/usr/local/share/nltk_data
 CMD ["python", "-m", "uvicorn", "services.sales_lead_retrieval.main:app", "--host", "0.0.0.0", "--port", "8010"]

@@ -12,8 +12,6 @@ import config
 
 from .models_builder import getEmbeddingModel
 
-embedding = getEmbeddingModel() #HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL, encode_kwargs={"normalize_embeddings": True})
-
 #def get_retrievers(df):
 #    embedding = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL, encode_kwargs={"normalize_embeddings": True})
 #    documents = get_documents(df)
@@ -30,6 +28,9 @@ embedding = getEmbeddingModel() #HuggingFaceEmbeddings(model_name=config.EMBEDDI
 
 
 def get_retrievers(documents):
+    # Catalog and utility imports must not initialize neural models. The model
+    # builder retains its shared instance once a caller actually builds an index.
+    embedding = getEmbeddingModel()
     vector_store = None
     bm25_retriever = None
     logging.info("Loading retrievers...")

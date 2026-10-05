@@ -398,7 +398,8 @@ def _display_purchase_file_name(value: str) -> str | None:
     normalized = str(value or "").strip()
     if not normalized:
         return None
-    candidate = Path(normalized).name
+    # Historical records can contain Windows paths when resolved on Linux.
+    candidate = normalized.replace("\\", "/").rsplit("/", 1)[-1]
     return candidate or normalized
 
 

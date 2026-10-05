@@ -25,7 +25,11 @@ def main():
         selected += ["--ignore=tests/unit/test_simulate_privacy_flow.py"]
         if not args.with_local_ismart_assets:
             selected += ["--ignore=tests/unit/test_ismart_materials_agent.py"]
-    environment = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+    environment = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+        "OPENAI_API_KEY": "deterministic-test-placeholder",
+        "OPENAI_API_KEY_PERSONAL": "deterministic-test-placeholder",
+        "YA_API_KEY": "deterministic-test-placeholder", "YA_FOLDER_ID": "deterministic-test-folder"}
+    (ROOT / ".tmp").mkdir(parents=True, exist_ok=True)
     return subprocess.call([sys.executable, "-m", "pytest", *selected, "-q", "--tb=short",
         "--basetemp=" + str(ROOT / ".tmp" / ("verify-" + uuid.uuid4().hex))], cwd=ROOT, env=environment)
 

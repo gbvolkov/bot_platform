@@ -110,6 +110,13 @@ installation. Its default model versions come from that pinned source revision;
 models and the upstream MIT license are included in the images. Cairo development
 headers support the already locked Python dependency. BuildKit caches dependency
 downloads between builds; containers never install dependencies at startup.
+Sentence tokenizers (`punkt` and `punkt_tab`) are included with upstream README
+files, pinned to NLTK data revision `550b6625bcef1f2abff2ff770a5a0d272c9c6b2a`
+and verified SHA-256 checksums in `deploy/fetch_nltk_assets.py`. Their contents
+match the prior host installation. Retrieval utility imports defer model loading
+until an index is requested. Ordinary verification uses synthetic service settings
+and KPI fixtures; local GAZ price-workbook integration skips when its ignored
+source files are unavailable.
 
 ## Migration, cohorts and rollback
 

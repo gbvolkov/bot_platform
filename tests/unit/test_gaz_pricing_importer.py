@@ -1,6 +1,7 @@
 import sqlite3
 import importlib.util
 from pathlib import Path
+import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "import_gaz_pricing_to_sqlite.py"
 SPEC = importlib.util.spec_from_file_location("gaz_pricing_importer", MODULE_PATH)
@@ -101,6 +102,8 @@ def test_importer_warns_and_continues_when_allowlisted_sources_are_missing(tmp_p
         assert conn.execute("select count(*) from comparisons_normalized").fetchone()[0] == 0
 
 
+@pytest.mark.skipif(not all((SOURCE_DIR / name).is_file() for name in SOURCE_ALLOWLIST),
+    reason="Optional local GAZ pricing workbooks are not part of a clean checkout")
 def test_importer_builds_single_merged_table_from_real_excels(tmp_path):
     db_path = tmp_path / "gaz_pricing_norm.sqlite"
     importer = GazPricingImporter(SOURCE_DIR, db_path)

@@ -60,3 +60,31 @@ sys.meta_path.insert(0, Block())
 import platform_access.main, platform_access.coordinator, openai_proxy.main
 '''
     subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True, capture_output=True, text=True)
+
+
+def test_retriever_utilities_load_models_only_when_building_an_index():
+    code = '''
+from langchain_huggingface import HuggingFaceEmbeddings
+def unexpected_model(*args, **kwargs):
+    raise AssertionError('Utility import initialized a neural model')
+HuggingFaceEmbeddings.__init__ = unexpected_model
+from platform_capabilities.retrievers.utils import build_index, models_builder
+assert models_builder._embedding_model is None
+embedding, documents = object(), [object()]
+build_index.getEmbeddingModel = lambda: embedding
+class FakeVectorStore:
+    @staticmethod
+    def from_documents(received, model):
+        assert received is documents and model is embedding
+        return 'vector'
+class FakeKeywordRetriever:
+    @staticmethod
+    def from_documents(received):
+        assert received is documents
+        return 'keyword'
+build_index.FAISS = FakeVectorStore
+build_index.BM25Retriever = FakeKeywordRetriever
+assert build_index.get_retrievers(documents) == ('vector', 'keyword')
+'''
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
