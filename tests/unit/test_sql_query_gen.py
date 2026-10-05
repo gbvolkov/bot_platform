@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage
 
 from agents import sql_query_gen
 from agents.bi_agent import bi_agent
+from platform_contracts.catalog import DEFAULT_CATALOG_PATH
 
 
 def test_sql_database_max_string_length_can_disable_truncation(tmp_path):
@@ -195,7 +196,7 @@ def test_get_response_negative_answer_row_limit_disables_limit(monkeypatch):
 
 def test_kpi_bi_int_configures_bi_result_handling():
     load_config = json.loads(
-        Path("data/config/bot_service/load.json").read_text(encoding="utf-8")
+        DEFAULT_CATALOG_PATH.read_text(encoding="utf-8")
     )
     kpi_agent = next(
         agent for agent in load_config["agents"] if agent["id"] == "kpi_bi_int"

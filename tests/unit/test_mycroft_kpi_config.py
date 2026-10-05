@@ -3,6 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import sqlite3
+from dataclasses import replace
+
+import pytest
+from platform_contracts.catalog import DEFAULT_CATALOG_PATH
 
 from deepagents.middleware.skills import _list_skills
 
@@ -53,7 +57,7 @@ def test_kpi_agent_config_loads_kpi_bi_stateless_subagent_only():
 
 def test_kpi_agent_is_registered_as_public_configured_mycroft_agent():
     load_config = json.loads(
-        Path("data/config/bot_service/load.json").read_text(encoding="utf-8")
+        DEFAULT_CATALOG_PATH.read_text(encoding="utf-8")
     )
     kpi_agent = next(agent for agent in load_config["agents"] if agent["id"] == "kpi_agent")
     kpi_bi = next(agent for agent in load_config["agents"] if agent["id"] == "kpi_bi_int")
@@ -364,11 +368,27 @@ def test_kpi_calculation_method_details_skill_owns_formula_requests():
     assert "use `kpi-calculation-method-details` instead" in method_skill
 
 
-def test_kpi_staff_structure_fuzzy_search_tool_returns_exact_candidates():
+@pytest.fixture
+def staff_structure_tool(tmp_path):
+    # Synthetic positions cover matching without a developer's private KPI data.
+    fields = tuple(f"department_{i}" for i in range(1, 9)) + ("employee_group", "position")
+    database = tmp_path / "staff.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE kpi_staff_structure (staff_structure_id INTEGER PRIMARY KEY, " +
+            ", ".join(f"{name} TEXT" for name in fields) + ")")
+        connection.executemany("INSERT INTO kpi_staff_structure VALUES (" + ",".join("?" for _ in range(11)) + ")", [
+            (10, "Тестовая организация", "Отдел по работе с банками", "", "", "", "", "", "", "", "Специалист"),
+            (90, "Тестовая организация", "Отдел урегулирования убытков", "ОСАГО, ИФЛ, ВЗР", "", "", "", "", "", "", "Специалист"),
+            (91, "Тестовая организация", "Отдел урегулирования убытков", "", "", "", "", "", "", "", "Руководитель"),
+        ])
     config = load_cli_config(CONFIG_PATH)
-    tools = build_internal_tools(config.internal_tools)
+    specs = tuple(replace(spec, params={**spec.params, "database_path": str(database)}) for spec in config.internal_tools)
+    tools = build_internal_tools(specs)
+    return next(item for item in tools if item.name == "kpi_staff_structure_fuzzy_search")
 
-    tool = next(item for item in tools if item.name == "kpi_staff_structure_fuzzy_search")
+
+def test_kpi_staff_structure_fuzzy_search_tool_returns_exact_candidates(staff_structure_tool):
+    tool = staff_structure_tool
     raw_result = tool.invoke(
         {
             "query": "\u043e\u0442\u0434\u0435\u043b \u0440\u0430\u0431\u043e\u0442\u044b \u0441 \u0431\u0430\u043d\u043a\u0430\u043c\u0438",
@@ -399,11 +419,8 @@ def test_kpi_staff_structure_fuzzy_search_tool_returns_exact_candidates():
     )
 
 
-def test_kpi_staff_structure_fuzzy_search_tool_matches_full_position_names():
-    config = load_cli_config(CONFIG_PATH)
-    tools = build_internal_tools(config.internal_tools)
-
-    tool = next(item for item in tools if item.name == "kpi_staff_structure_fuzzy_search")
+def test_kpi_staff_structure_fuzzy_search_tool_matches_full_position_names(staff_structure_tool):
+    tool = staff_structure_tool
     raw_result = tool.invoke(
         {
             "query": "\u0443\u0440\u0435\u0433\u0443\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435 \u0443\u0431\u044b\u0442\u043a\u043e\u0432",
