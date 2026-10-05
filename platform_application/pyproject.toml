@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-platform-application"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = ["bot-platform-contracts==0.1.0"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["platform_application*"]
+namespaces = true
+exclude = ["*.build", "*.build.*", "*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.toml", "*.md", "*.txt", "*.yaml", "*.html", "static/*", "templates/*"]
