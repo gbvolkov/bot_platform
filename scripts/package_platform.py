@@ -18,7 +18,11 @@ COMPONENTS = {
     "platform_client": ("client", ["contracts", "sdk"], ["httpx"]),
     "platform_access": ("access", ["application", "infrastructure", "client", "sdk"], ["fastapi", "uvicorn"]),
     "agent_runtime": ("runtime", ["contracts", "sdk", "client", "infrastructure", "capabilities"], ["langgraph", "langgraph-checkpoint-sqlite", "langchain-core", "pydantic-settings"]),
-    "platform_capabilities": ("capabilities", ["contracts", "sdk", "client"], ["langchain", "langchain-openai", "langchain-mistralai", "boto3", "xhtml2pdf", "rag-lib", "torch", "sentence-transformers", "sqlalchemy", "aiosqlite", "palimpsest", "llm-guard", "langchain-mcp-adapters", "telegramify-markdown"]),
+    "platform_capabilities": ("capabilities", ["contracts", "sdk", "client"], ["langchain", "langchain-openai", "langchain-mistralai", "boto3", "xhtml2pdf", "rag-lib", "torch", "sentence-transformers", "sqlalchemy", "aiosqlite", "palimpsest", "llm-guard", "langchain-mcp-adapters", "telegramify-markdown",
+        "fastapi", "uvicorn", "httpx", "pydantic-settings", "langchain-core", "langchain-community",
+        "langchain-huggingface", "langchain-classic", "langchain-text-splitters", "langgraph", "numpy", "pandas",
+        "requests", "chardet", "filelock", "mistletoe", "scikit-learn", "umap-learn", "trafilatura",
+        "duckduckgo-search", "assemblyai", "pydub", "rank-llm", "zakupki-crawler", "langfuse"]),
     "agents": ("agents", ["runtime", "capabilities"], ["deepagents"]),
     "generators": ("generators", ["runtime"], ["httpx"]),
     "openai_proxy": ("openai-proxy", ["client", "sdk"], ["fastapi", "httpx", "uvicorn", "pydantic-settings"]),
@@ -84,7 +88,7 @@ exclude = ["*.build", "*.build.*", "*.tests", "*.tests.*"]
     baseline = subprocess.run(["uv", "export", "--frozen", "--no-dev", "--format", "requirements-txt", "--no-hashes"],
                               cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True).stdout
     (deploy / "requirements.worker.lock").write_text(baseline, encoding="utf-8")
-    retrieval_roots = {"rag-lib", "fastapi", "uvicorn", "httpx", "pydantic-settings", "langchain",
+    retrieval_roots = set(COMPONENTS["platform_capabilities"][2]) | {"rag-lib", "fastapi", "uvicorn", "httpx", "pydantic-settings", "langchain",
         "langchain-core", "langchain-community", "langchain-huggingface", "langchain-openai", "langchain-mistralai",
         "langgraph", "pandas", "python-dotenv", "openpyxl", "chardet", "numpy", "zakupki-crawler",
         "boto3", "xhtml2pdf", "palimpsest", "llm-guard", "sentence-transformers", "unstructured",

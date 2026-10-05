@@ -10,12 +10,16 @@ annotated-types==0.7.0
 anyio==4.13.0
 arabic-reshaper==3.0.1
 asn1crypto==1.5.1
+assemblyai==0.64.2
 asyncpg==0.31.0
 attrs==26.1.0
+babel==2.18.0
+backoff==2.2.1
 bc-detect-secrets==1.5.43
 bcrypt==5.0.0
 beautifulsoup4==4.14.3
 bioc==2.1
+blinker==1.9.0
 blis==1.3.3
 boto3==1.43.6
 botocore==1.43.6
@@ -32,16 +36,21 @@ colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
 confection==1.3.3
 conllu==4.5.3
 contourpy==1.3.3
+courlan==1.3.2
 cryptography==48.0.0
 cssselect2==0.9.0
 cycler==0.12.1
 cymem==2.0.13
+cython==3.2.4
+dacite==1.9.2
 dataclasses-json==0.6.7
+dateparser==1.4.0
 dawg-python==0.7.2
 dawg2-python==0.9.0
 deprecated==1.3.1
 distro==1.9.0
 docopt==0.6.2
+duckduckgo-search==8.1.1
 durationpy==0.10
 emoji==2.15.0
 et-xmlfile==2.0.0
@@ -52,10 +61,12 @@ fastapi==0.120.0
 filelock==3.29.0
 filetype==1.2.0
 flair==0.15.1
+flask==3.1.3
 flatbuffers==25.12.19
 fonttools==4.62.1
 freetype-py==2.5.1
 frozenlist==1.8.0
+fschat==0.2.36
 fsspec==2026.4.0
 ftfy==6.3.1
 fuzzysearch==0.8.1
@@ -67,6 +78,7 @@ grpcio==1.80.0
 h11==0.16.0
 hf-xet==1.5.0 ; platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
 html5lib==1.1
+htmldate==1.9.4
 httpcore==1.0.9
 httpx==0.27.2
 httpx-sse==0.4.3
@@ -78,6 +90,7 @@ iniconfig==2.3.0
 installer==0.7.0
 intervaltree==3.2.1
 ipymarkup==0.9.0
+itsdangerous==2.2.0
 jinja2==3.1.6
 jiter==0.14.0
 jmespath==1.1.0
@@ -89,6 +102,7 @@ jsonpath-python==1.1.6
 jsonpointer==3.1.1
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+justext==3.0.2
 kiwisolver==1.5.0
 kubernetes==35.0.0
 langchain==1.3.0
@@ -105,6 +119,7 @@ langchain-protocol==0.0.15
 langchain-qdrant==1.1.0
 langchain-text-splitters==1.1.2
 langdetect==1.0.9
+langfuse==3.8.1
 langgraph==1.2.0
 langgraph-checkpoint==4.1.0
 langgraph-checkpoint-sqlite==3.1.0
@@ -114,6 +129,7 @@ langsmith==0.8.3
 llvmlite==0.47.0
 lxml==6.1.0
 markdown-it-py==4.2.0
+markdown2==2.5.5
 markupsafe==3.0.3
 marshmallow==3.26.2
 matplotlib==3.10.9
@@ -131,6 +147,7 @@ mypy-extensions==1.1.0
 natasha==1.6.0
 navec==0.10.0
 networkx==3.6.1
+nh3==0.3.5
 nltk==3.9.4
 numba==0.65.1
 numpy==2.3.4
@@ -157,6 +174,7 @@ openpyxl==3.1.5
 opentelemetry-api==1.41.1
 opentelemetry-exporter-otlp-proto-common==1.41.1
 opentelemetry-exporter-otlp-proto-grpc==1.41.1
+opentelemetry-exporter-otlp-proto-http==1.41.1
 opentelemetry-proto==1.41.1
 opentelemetry-sdk==1.41.1
 opentelemetry-semantic-conventions==0.62b1
@@ -180,6 +198,8 @@ pptree==3.1
 preshed==3.0.13
 presidio-analyzer==2.2.362
 presidio-anonymizer==2.2.362
+primp==1.2.3
+prompt-toolkit==3.0.52
 propcache==0.5.2
 protobuf==6.33.0
 psutil==7.2.2
@@ -192,10 +212,12 @@ pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementatio
 pydantic==2.13.4
 pydantic-core==2.46.4
 pydantic-settings==2.14.1
+pydub==0.25.1
 pyee==13.0.1
 pygments==2.20.0
 pyhanko==0.35.1
 pyhanko-certvalidator==0.31.1
+pyjnius==1.7.0
 pyjwt==2.12.1
 pymorphy2==0.9.1
 pymorphy2-dicts-ru==2.4.417127.4579844
@@ -204,12 +226,14 @@ pymorphy3-dicts-ru==2.4.417150.4580142
 pymupdf==1.27.2.3
 pymupdf-layout==1.27.2.3
 pymupdf4llm==1.27.2.3
+pynndescent==0.6.0
 pyparsing==3.3.2
 pypdf==6.11.0
 pypdfium2==5.8.0
 pypika==0.51.1
 pypostal-multiarch==1.0.3 ; sys_platform == 'linux'
 pyproject-hooks==1.2.0
+pyserini==1.2.0
 pytest==9.0.3
 python-bidi==0.6.9
 python-dateutil==2.9.0.post0
@@ -227,6 +251,7 @@ pyyaml==6.0.3
 qdrant-client==1.18.0
 rag-lib @ git+https://github.com/gbvolkov/rag-lib.git@c66ff6978383286a2611225ed2abb6e2fced4adc
 rank-bm25==0.2.2
+rank-llm==0.21.0
 rapidfuzz==3.14.5
 razdel==0.5.0
 referencing==0.37.0
@@ -248,6 +273,7 @@ sentence-transformers==5.5.0
 sentencepiece==0.2.1
 setuptools==82.0.1
 shellingham==1.5.4
+shortuuid==1.0.13
 six==1.17.0
 slovnet==0.6.0
 smart-open==7.6.1
@@ -273,10 +299,12 @@ thinc==8.3.13
 threadpoolctl==3.6.0
 tiktoken==0.12.0
 tinycss2==1.5.1
+tld==0.13.2
 tldextract==5.3.1
 tokenizers==0.22.2
 torch==2.9.0
 tqdm==4.67.3
+trafilatura==2.0.0
 transformer-smaller-training-vocab==0.4.2
 transformers==4.57.6
 triton==3.5.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'linux2'
@@ -286,6 +314,7 @@ typing-inspect==0.9.0
 typing-inspection==0.4.2
 tzdata==2026.2
 tzlocal==5.3.1
+umap-learn==0.5.12
 unidiff==0.7.5
 unstructured==0.21.5
 unstructured-client==0.42.12
@@ -298,6 +327,8 @@ wcwidth==0.7.0
 weasel==1.0.0
 webencodings==0.5.1
 websocket-client==1.9.0
+websockets==16.0
+werkzeug==3.1.8
 wikipedia-api==0.10.0
 wrapt==1.17.3
 xhtml2pdf==0.2.17
