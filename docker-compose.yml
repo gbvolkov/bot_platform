@@ -92,6 +92,8 @@ services:
 
   openai_proxy:
     image: bot-platform-access:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    depends_on:
+      bot_service: {condition: service_healthy}
     command: ["python", "-m", "uvicorn", "openai_proxy.main:app", "--host", "0.0.0.0", "--port", "8084", "--http", "openai_proxy.http_logging:LoggingH11Protocol"]
     environment:
       OPENAI_PROXY_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
@@ -101,6 +103,8 @@ services:
 
   web_chat:
     image: bot-platform-access:${PLATFORM_RELEASE:-c7057f0f-refactor}
+    depends_on:
+      bot_service: {condition: service_healthy}
     command: ["python", "-m", "uvicorn", "web_chat.main:app", "--host", "0.0.0.0", "--port", "8080"]
     environment:
       WEB_CHAT_BOT_SERVICE_BASE_URL: http://bot_service:8000/api
