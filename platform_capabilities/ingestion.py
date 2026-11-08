@@ -27,6 +27,7 @@ _EXTENSION_CATEGORY_MAP: Dict[ContentType, Tuple[str, ...]] = {
     ContentType.DOCX_DOCUMENTS: (".doc", ".docx"),
     ContentType.CSVS: (".csv",),
     ContentType.EXCELS: (".xls", ".xlsx", ".xlsm"),
+    ContentType.PRESENTATIONS: (".pptx",),
     ContentType.SOUNDS: (".wav", ".mp3", ".m4a", ".ogg", ".flac"),
     ContentType.VIDEOS: (".mp4", ".avi", ".mov", ".mkv", ".webm"),
 }
@@ -44,6 +45,7 @@ _MIME_PREFIX_CATEGORIES: Tuple[Tuple[str, ContentType], ...] = (
     ("text/csv", ContentType.CSVS),
     ("application/vnd.ms-excel", ContentType.EXCELS),
     ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ContentType.EXCELS),
+    ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ContentType.PRESENTATIONS),
 )
 
 

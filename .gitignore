@@ -37,6 +37,8 @@ docs/
 .tmp_sysadmin_mcp_kit/
 pytest-cache*
 outputs/
+output/
+tmp/
 
 .python-version
 bi_bot.pid

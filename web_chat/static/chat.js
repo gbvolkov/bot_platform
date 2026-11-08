@@ -9,12 +9,88 @@ const state = {
   agentId: null,
   isSending: false,
   agentReady: false,
+  attachmentUrls: new Set(),
+  conversationGeneration: 0,
 };
 
-function appendMessage(role, text) {
+function messageAttachments(message) {
+  const attachments = message?.metadata?.attachments;
+  if (Array.isArray(attachments)) return attachments;
+  if (attachments != null) return [null];
+  const content = message?.content;
+  const parts = Array.isArray(content) ? content : content?.parts;
+  if (!Array.isArray(parts)) return [];
+  return parts.filter((part) =>
+    part && ["file", "image", "audio", "video", "attachment"].includes(part.type)
+  );
+}
+
+function messageText(message) {
+  const content = message?.content;
+  const parts = Array.isArray(content) ? content : content?.parts;
+  const plain = Array.isArray(parts)
+    ? parts.filter((part) => part?.type === "text" && part.format === "plain")
+    : [];
+  if (plain.length) return plain.map((part) => part.text || "").join("\n");
+  return message?.raw_text || "";
+}
+
+function appendAttachment(list, attachment, index) {
+  const item = document.createElement("li");
+  const filename = attachment?.filename || attachment?.name;
+  const label = typeof filename === "string" && filename ? filename : `File ${index + 1}`;
+  try {
+    if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) {
+      throw new Error("invalid attachment metadata");
+    }
+    let href;
+    let suppliedUrl = false;
+    if (attachment.data != null) {
+      if (typeof attachment.data !== "string") throw new Error("invalid file data");
+      const decoded = atob(attachment.data);
+      const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+      href = URL.createObjectURL(new Blob([bytes], {
+        type: attachment.content_type || "application/octet-stream",
+      }));
+      state.attachmentUrls.add(href);
+    } else if (typeof attachment.url === "string" && attachment.url) {
+      const url = new URL(attachment.url, window.location.href);
+      if (!["http:", "https:"].includes(url.protocol)) {
+        throw new Error("unsupported download URL");
+      }
+      href = url.href;
+      suppliedUrl = true;
+    } else {
+      throw new Error("file data or download URL was not supplied");
+    }
+    const link = document.createElement("a");
+    link.href = href;
+    if (suppliedUrl) link.target = "_blank";
+    if (typeof filename === "string" && filename) link.download = filename;
+    link.textContent = label;
+    link.rel = "noopener noreferrer";
+    item.appendChild(link);
+  } catch (error) {
+    item.className = "attachment-error";
+    item.textContent = `${label} — Download unavailable: ${error.message || "invalid file data"}.`;
+  }
+  list.appendChild(item);
+}
+
+function appendMessage(role, text, attachments = []) {
   const div = document.createElement("div");
   div.className = `message ${role}`;
-  div.textContent = text;
+  const body = document.createElement("div");
+  body.className = "message-text";
+  body.textContent = text;
+  div.appendChild(body);
+  if (attachments.length) {
+    const files = document.createElement("ul");
+    files.className = "message-attachments";
+    files.setAttribute("aria-label", "Attached files");
+    attachments.forEach((attachment, index) => appendAttachment(files, attachment, index));
+    div.appendChild(files);
+  }
   conversationEl.appendChild(div);
   conversationEl.scrollTop = conversationEl.scrollHeight;
 }
@@ -61,8 +137,12 @@ agentSelect.addEventListener("change", (event) => {
 });
 
 newChatBtn.addEventListener("click", () => {
+  state.conversationGeneration += 1;
   state.conversationId = null;
   state.agentReady = false;
+  state.isSending = false;
+  for (const url of state.attachmentUrls) URL.revokeObjectURL(url);
+  state.attachmentUrls.clear();
   conversationEl.innerHTML = "";
   setStatus("Conversation cleared. Start chatting!");
 });
@@ -71,12 +151,14 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForConversationReady(conversationId, maxAttempts) {
+async function waitForConversationReady(conversationId, generation, maxAttempts) {
   let attempts = 0;
-  while (maxAttempts === undefined || attempts < maxAttempts) {
+  while (generation === state.conversationGeneration &&
+         (maxAttempts === undefined || attempts < maxAttempts)) {
     const res = await fetch(`/api/conversations/${conversationId}`);
     if (res.ok) {
       const data = await res.json();
+      if (generation !== state.conversationGeneration) return false;
       if (data.status === "active") {
         state.agentReady = true;
         return true;
@@ -88,7 +170,8 @@ async function waitForConversationReady(conversationId, maxAttempts) {
   return false;
 }
 
-async function ensureConversation() {
+async function ensureConversation(generation) {
+  if (generation !== state.conversationGeneration) return null;
   if (state.conversationId && state.agentReady) {
     return state.conversationId;
   }
@@ -105,27 +188,32 @@ async function ensureConversation() {
     throw new Error(detail?.detail || "Failed to create conversation");
   }
   const data = await res.json();
+  if (generation !== state.conversationGeneration) return null;
   state.conversationId = data.id;
   state.agentReady = res.status === 201 && data.status === "active";
   if (!state.agentReady) {
     setStatus("Initializing agent, please wait…");
-    await waitForConversationReady(state.conversationId);
+    await waitForConversationReady(state.conversationId, generation);
+    if (generation !== state.conversationGeneration) return null;
     setStatus("");
   }
   return state.conversationId;
 }
 
-async function sendMessage(text) {
-  const conversationId = await ensureConversation();
-  while (true) {
+async function sendMessage(text, generation) {
+  const conversationId = await ensureConversation(generation);
+  if (conversationId === null) return null;
+  while (generation === state.conversationGeneration) {
     const res = await fetch(`/api/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     });
+    if (generation !== state.conversationGeneration) return null;
     if (res.status === 409) {
       setStatus("Agent is initializing, waiting for readiness…");
-      await waitForConversationReady(conversationId);
+      await waitForConversationReady(conversationId, generation);
+      if (generation !== state.conversationGeneration) return null;
       setStatus("Assistant is typing…");
       continue;
     }
@@ -135,6 +223,7 @@ async function sendMessage(text) {
     }
     return res.json();
   }
+  return null;
 }
 
 form.addEventListener("submit", async (event) => {
@@ -142,6 +231,7 @@ form.addEventListener("submit", async (event) => {
   if (state.isSending) return;
   const text = input.value.trim();
   if (!text) return;
+  const generation = state.conversationGeneration;
 
   appendMessage("user", text);
   input.value = "";
@@ -149,20 +239,25 @@ form.addEventListener("submit", async (event) => {
   state.isSending = true;
 
   try {
-    const response = await sendMessage(text);
-    const assistantText = response?.agent_message?.raw_text || "";
-    if (assistantText) {
-      appendMessage("assistant", assistantText);
+    const response = await sendMessage(text, generation);
+    if (generation !== state.conversationGeneration) return;
+    const message = response?.agent_message;
+    const assistantText = messageText(message);
+    const attachments = messageAttachments(message);
+    if (assistantText || attachments.length) {
+      appendMessage("assistant", assistantText, attachments);
     }
   } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Message failed");
-  } finally {
-    state.isSending = false;
-    if (state.agentReady) {
-      setStatus("");
+    if (generation === state.conversationGeneration) {
+      console.error(error);
+      setStatus(error.message || "Message failed");
     }
-    input.focus();
+  } finally {
+    if (generation === state.conversationGeneration) {
+      state.isSending = false;
+      if (state.agentReady) setStatus("");
+      input.focus();
+    }
   }
 });
 

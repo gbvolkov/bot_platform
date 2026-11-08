@@ -43,3 +43,6 @@ CREATE TABLE artifacts (
  storage_key TEXT NOT NULL, created_at REAL NOT NULL);
 CREATE TABLE platform_metrics (name TEXT PRIMARY KEY, value REAL NOT NULL);
 """)]
+
+# Reserve retired experiment migration versions for databases that applied them.
+MIGRATIONS.extend((version, "") for version in range(2, 7))

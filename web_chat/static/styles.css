@@ -79,6 +79,21 @@ main {
     background: #eef2f7;
 }
 
+.message-attachments {
+    margin: 0.75rem 0 0;
+    padding-left: 1.25rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.message-attachments li + li {
+    margin-top: 0.4rem;
+}
+
+.attachment-error {
+    color: #9b2929;
+}
+
 #message-form {
     display: flex;
     flex-direction: column;

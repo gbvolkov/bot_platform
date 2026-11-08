@@ -48,6 +48,11 @@ class AgentRuntime:
         missing = set(descriptor.required_services) - set(self.capabilities)
         if missing:
             raise ValueError(f"Missing required services for {agent_id}: {sorted(missing)}")
+        for name in descriptor.required_services:
+            service = self.capabilities[name]
+            if isinstance(service, asyncio.Future):
+                # Optional resources warm without delaying unrelated initializers.
+                self.capabilities[name] = await asyncio.shield(service)
         chain = _loading_agents.get()
         context = current_context()
         parent = chain[0] if chain else (context.trace.get("agent_id") if context else None)

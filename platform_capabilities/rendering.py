@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple, Optional
+from copy import copy
 import html
 import os
 import uuid
@@ -9,6 +10,7 @@ from pathlib import Path
 from platform_capabilities.object_storage import upload_and_get_link
 from mistletoe import Document
 from mistletoe.html_renderer import HtmlRenderer
+from platform_capabilities.text_presentation import MARKDOWN_PARSE_LOCK
 from xhtml2pdf import pisa
 import logging
 
@@ -277,7 +279,7 @@ def _markdown_v2_to_html(text: str) -> str:
             return "<br />\n"
 
     normalized = _normalize_markdown_v2(text)
-    with _HardBreakRenderer() as renderer:
+    with MARKDOWN_PARSE_LOCK, _HardBreakRenderer() as renderer:
         return renderer.render(Document(normalized)).strip()
 
 
@@ -302,6 +304,69 @@ def _build_html_document(entries: List[Dict[str, str]]) -> str:
         font_bold=_font_url(_FONT_BOLD),
         font_mono=_font_url(_FONT_MONO),
     )
+
+
+def render_chapters_pdf(entries: List[Dict[str, str]], output_path: Path, *, standard_markdown: bool = False) -> None:
+    """Render without upload; standard Markdown mode never executes embedded HTML/URLs."""
+    if not standard_markdown:
+        _render_pdf(_build_html_document(entries), output_path)
+        return
+
+    class SafeRenderer(HtmlRenderer):
+        def render_table(self, token):
+            columns = max([len(token.header.children), *[len(row.children) for row in token.children]])
+            if columns > 6:
+                # Portrait A4 cannot keep a wide grid legible. Retain the first
+                # column as the row key in each panel; preserve every data cell.
+                panels = []
+                groups = [list(range(start, min(start + 4, columns))) for start in range(1, columns, 4)]
+                for index, group in enumerate(groups, 1):
+                    positions = [0, *group]
+                    panel = copy(token)
+                    panel.header = copy(token.header)
+                    panel.header.children = [token.header.children[position] for position in positions if position < len(token.header.children)]
+                    panel.children = []
+                    for row in token.children:
+                        selected_row = copy(row)
+                        selected_row.children = [row.children[position] for position in positions if position < len(row.children)]
+                        panel.children.append(selected_row)
+                    rendered = super().render_table(panel).replace("<table>", '<table repeat="1">', 1)
+                    panels.append(f'<p><strong>{index} / {len(groups)}</strong></p>' + rendered)
+                return "\n".join(panels)
+            result = super().render_table(token)
+            return result.replace("<table>", '<table repeat="1">', 1)
+
+        def render_block_code(self, token):
+            return '<div style="font-family: ArtifactMono; font-size: 9pt">' + '<br/>'.join(html.escape(line) for line in token.children[0].content.splitlines()) + '</div>'
+
+        def render_html_block(self, token):
+            return html.escape(token.content)
+
+        def render_html_span(self, token):
+            return html.escape(token.content)
+
+        def render_image(self, token):
+            return html.escape(getattr(token, "title", "") or "[image]")
+
+        def render_link(self, token):
+            # Links remain visible evidence, not renderer network/file fetches.
+            return self.render_inner(token) + " (" + html.escape(token.target) + ")"
+
+        def render_auto_link(self, token):
+            return html.escape(token.children[0].content)
+
+    sections = []
+    for entry in entries:
+        with MARKDOWN_PARSE_LOCK, SafeRenderer() as renderer:
+            body = renderer.render(Document(entry["body"]))
+        sections.append('<section class="chapter"><h1>' + html.escape(entry["title"]) + "</h1>" + body + "</section>")
+    document = _HTML_TEMPLATE.format(content="\n".join(sections), font_regular=_font_url(_FONT_REGULAR),
+        font_bold=_font_url(_FONT_BOLD), font_mono=_font_url(_FONT_MONO))
+    document = document.replace("font-size: 12pt", "font-size: 10pt").replace("padding: 4pt 6pt", "padding: 3pt 4pt")
+    # ReportLab's character wrapping handles unbreakable compound words/IDs in
+    # narrow cells. Browser overflow-wrap CSS is unsupported by xhtml2pdf.
+    document = document.replace("</style>", "th, td { -pdf-word-wrap: CJK; }\n</style>")
+    _render_pdf(document, output_path)
 
 
 def _patch_windows_named_tempfile_font_bug() -> None:

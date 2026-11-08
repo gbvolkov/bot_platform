@@ -12,6 +12,7 @@ class ContentType(str, Enum):
     DOCX_DOCUMENTS = "docx_documents"
     CSVS = "csvs"
     EXCELS = "excels"
+    PRESENTATIONS = "presentations"
     SOUNDS = "sounds"
     VIDEOS = "videos"
     JSONS = "jsons"

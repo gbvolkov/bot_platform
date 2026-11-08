@@ -22,7 +22,7 @@ COMPONENTS = {
         "fastapi", "uvicorn", "httpx", "pydantic-settings", "langchain-core", "langchain-community",
         "langchain-huggingface", "langchain-classic", "langchain-text-splitters", "langgraph", "numpy", "pandas",
         "requests", "chardet", "filelock", "mistletoe", "scikit-learn", "umap-learn", "trafilatura",
-        "duckduckgo-search", "assemblyai", "pydub", "rank-llm", "zakupki-crawler", "langfuse"]),
+        "duckduckgo-search", "assemblyai", "pydub", "rank-llm", "zakupki-crawler", "langfuse", "python-pptx"]),
     "agents": ("agents", ["runtime", "capabilities"], ["deepagents"]),
     "generators": ("generators", ["runtime"], ["httpx"]),
     "openai_proxy": ("openai-proxy", ["client", "sdk"], ["fastapi", "httpx", "uvicorn", "pydantic-settings"]),

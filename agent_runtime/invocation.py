@@ -21,6 +21,7 @@ from .registry import agent_registry
 from .config import settings
 from platform_sdk.schemas import MessagePayload
 from platform_sdk.context import current_context
+from platform_capabilities.text_presentation import public_text_piece
 
 
 ATTACHMENT_TYPES = {"file", "image", "audio", "video", "attachment"}
@@ -45,11 +46,13 @@ def _extract_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return content
+    if isinstance(content, dict) and content.get("format") == "plain":
+        return public_text_piece(content)
     if isinstance(content, list):
         texts: List[str] = []
         for item in content:
             if isinstance(item, dict):
-                texts.append(item.get("text") or "")
+                texts.append(public_text_piece(item))
             else:
                 texts.append(str(item))
         return "\n".join(filter(None, texts))
@@ -63,7 +66,7 @@ def _extract_stream_text(message: BaseMessage) -> str:
     if isinstance(content, dict):
         text_value = content.get("text")
         if isinstance(text_value, str):
-            return text_value
+            return public_text_piece(content)
         return str(content)
     if isinstance(content, list):
         texts: List[str] = []
@@ -71,7 +74,7 @@ def _extract_stream_text(message: BaseMessage) -> str:
             if isinstance(item, dict):
                 text_value = item.get("text")
                 if isinstance(text_value, str):
-                    texts.append(text_value)
+                    texts.append(public_text_piece(item))
             else:
                 texts.append(str(item))
         return "".join(texts)
@@ -177,7 +180,11 @@ def build_agent_config(
         configurable["allow_external_tool_access"] = True
     context = current_context()
     if context is not None:
-        configurable.update(run_id=context.run_id, parent_run_id=context.parent_run_id)
+        configurable.update(run_id=context.run_id, request_id=context.run_id, parent_run_id=context.parent_run_id)
+        # Native LangGraph uses metadata.run_id to distinguish fresh input from
+        # reconnect/resume. Supply this turn's identity explicitly rather than
+        # inheriting a prior call's tracing metadata.
+        return {"configurable": configurable, "metadata": {"run_id": context.run_id}}
     return {"configurable": configurable}
 
 

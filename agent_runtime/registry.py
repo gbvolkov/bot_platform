@@ -404,6 +404,10 @@ class AgentRegistry:
 
     async def _ensure_checkpointer(self) -> AsyncSqliteSaver:
         """Create a single shared SQLite checkpointer (lazy, once per process)."""
+        injected = self.capabilities.get("checkpoint_saver")
+        if injected is not None:
+            # Resource ownership stays with the injecting host, including close.
+            return injected
         if self._checkpointer is not None:
             return self._checkpointer
 

@@ -15,6 +15,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.callbacks import BaseCallbackHandler
 
 from langchain_openai import ChatOpenAI
+import httpx
 from langchain_mistralai import ChatMistralAI
 #from langchain_gigachat import GigaChat
 from .yandex_tools.yandex_tooling import ChatYandexGPTWithTools as ChatYandexGPT
@@ -85,15 +86,28 @@ def get_llm(
         temperature: Optional[float] = 0, 
         frequency_penalty: Optional[float] = None,
         *,
+        model_name: Optional[str] = None,
         streaming: bool = True,
         verbosity: Optional[str] = None,
         reasoning: Optional[str] = None,
         max_tool_calls: Optional[int] = 3,
-        callbacks: Optional[Sequence[BaseCallbackHandler]] = None,    
+        callbacks: Optional[Sequence[BaseCallbackHandler]] = None,
+        http_async_client: Optional[httpx.AsyncClient] = None,
+        max_retries: Optional[int] = None,
     ):
+    """Use a registry tier, with an optional named-model override for this instance."""
     if provider is None:
         provider = config.LLM_PROVIDER
+    if http_async_client is not None and provider not in {"openai", "openai_think", "openai_4", "openai_pers"}:
+        raise ValueError("An optional HTTP async client is supported only by the OpenAI LangChain providers")
+    client_options = {"http_async_client": http_async_client} if http_async_client is not None else {}
+    if max_retries is not None:
+        if max_retries < 0 or provider not in {"openai", "openai_think", "openai_4", "openai_pers"}:
+            raise ValueError("An explicit nonnegative retry budget is supported only for OpenAI LangChain providers")
+        client_options["max_retries"] = max_retries
     llm_model = get_model(provider, model)
+    if model_name is not None:
+        llm_model = model_name
     if provider == "openai":
         #TODO: model=="base" is a temporary fix for verbosity issue and sgall be removed in future
         if verbosity is None: verbosity = "low" if model == "base" else "medium"
@@ -112,6 +126,7 @@ def get_llm(
             frequency_penalty=frequency_penalty,
             streaming=streaming,
             callbacks=list(callbacks) if callbacks else None,
+            **client_options,
         )
         #return ChatOpenAI(model=llm_model, 
         #                temperature=temperature, 
@@ -138,6 +153,7 @@ def get_llm(
             frequency_penalty=frequency_penalty,
             streaming=streaming,
             callbacks=list(callbacks) if callbacks else None,
+            **client_options,
         )
         #return ChatOpenAI(model=llm_model, 
         #                temperature=temperature, 
@@ -151,6 +167,7 @@ def get_llm(
             frequency_penalty=frequency_penalty,
             streaming=streaming,
             callbacks=list(callbacks) if callbacks else None,
+            **client_options,
         )
     elif provider == "openai_pers":
         return ChatOpenAI(
@@ -160,6 +177,7 @@ def get_llm(
             frequency_penalty=frequency_penalty,
             streaming=streaming,
             callbacks=list(callbacks) if callbacks else None,
+            **client_options,
         )
     elif provider == "gigachat":
         raise NotImplementedError
